@@ -403,7 +403,7 @@ function renderSoundGrid() {
     // Buscar en TODOS los sonidos (incluye el nombre de sus carpetas), sin importar la carpeta seleccionada
     const tokens = q.split(' ')
     sounds = allSounds(soundData).filter(s => {
-      const hay = norm(s.file.replace(/\.[^.]+$/, ''))
+      const hay = norm(s.label)
       return tokens.every(t => hay.includes(t))
     })
   } else {
@@ -411,7 +411,7 @@ function renderSoundGrid() {
     sounds = selectedPath === '' ? allSounds(soundData) : node.sounds
   }
   document.getElementById('sound-grid').innerHTML = sounds.length
-    ? sounds.map(s => `<button class="sound-btn" data-file="${esc(s.file)}" title="${esc(s.file)}">${esc(s.label)}</button>`).join('')
+    ? sounds.map(s => `<button class="sound-btn" data-file="${esc(s.file)}" title="${esc(s.label)}">${esc(s.label)}</button>`).join('')
     : `<p class="empty">${q ? 'Sin resultados para la búsqueda' : 'No hay sonidos en esta carpeta'}</p>`
   updatePlayingButtons()
 }

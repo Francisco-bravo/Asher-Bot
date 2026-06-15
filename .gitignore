@@ -6,6 +6,15 @@ yt-dlp
 yt-dlp.exe
 *.key
 *.log
+
+# Runtime de la capa de almacenamiento (no versionar)
+data/
+object-store/
+*.db
+*.db-wal
+*.db-shm
+
+# Carpetas locales antiguas (en proceso de retiro)
 dev/
 prod/
 wispbyte/

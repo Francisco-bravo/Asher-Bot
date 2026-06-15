@@ -27,6 +27,9 @@ import { pipeline } from 'node:stream/promises'
 import { Readable } from 'node:stream'
 import http from 'node:http'
 import ffmpegStatic from 'ffmpeg-static'
+import { getDb } from './lib/db.mjs'
+import * as soundLib from './lib/sounds.mjs'
+import * as playHistory from './lib/history.mjs'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const IS_WIN = process.platform === 'win32'
@@ -789,18 +792,21 @@ function spawnSoundFfmpeg(filePath) {
   return ff
 }
 
-async function playSound(name) {
-  if (name.includes('\\') || name.split('/').some(s => s === '..' || s === '')) throw new Error('Nombre inválido')
-  if (!listSounds().includes(name)) throw new Error('Sonido no encontrado')
-  const filePath = join(SOUNDS_DIR, name)
+async function playSound(soundId) {
+  const sound = soundLib.getById(Number(soundId))
+  if (!sound) throw new Error('Sonido no encontrado')
+  const filePath = soundLib.localPath(sound)
+  if (!existsSync(filePath)) throw new Error('Archivo del sonido no disponible')
+  const key = String(sound.id) // identificador estable que usa el panel
   const id = ++soundIdSeq
+  playHistory.record({ kind: 'sound', refId: sound.id })
 
   // Con música sonando: mezclar el sonido encima, música atenuada
   if (currentMixer && musicPlayer.state.status === AudioPlayerStatus.Playing) {
     const ff = spawnSoundFfmpeg(filePath)
     activeProcs.push(ff)
     const ov = currentMixer.addOverlay(ff.stdout)
-    activeSounds.set(id, { file: name, proc: ff, ov, mixer: currentMixer })
+    activeSounds.set(id, { file: key, proc: ff, ov, mixer: currentMixer })
     return id
   }
 
@@ -815,7 +821,7 @@ async function playSound(name) {
   soundActive = 1
   currentDirectId = id
   const ff = spawnSoundFfmpeg(filePath)
-  activeSounds.set(id, { file: name, proc: ff, direct: true })
+  activeSounds.set(id, { file: key, proc: ff, direct: true })
   connection.subscribe(soundPlayer)
   directResource = createAudioResource(ff.stdout, { inputType: StreamType.Raw, inlineVolume: true })
   directResource.volume.setVolume(soundVolume)
@@ -991,7 +997,7 @@ http.createServer(async (req, res) => {
         return
       }
       if (path === '/api/state') return sendJson(getState())
-      if (path === '/api/sounds') return sendJson(soundTree())
+      if (path === '/api/sounds') return sendJson(soundLib.tree(soundLib.listForUser(null)))
     }
     if (req.method === 'POST') {
       const body = await readBody(req)
@@ -1095,4 +1101,11 @@ await ensureYtDlp().catch(err => {
   console.error('yt-dlp:', err.message)
   console.error('Sube el binario de yt-dlp manualmente a la carpeta del bot.')
 })
+
+// Inicializar la capa de almacenamiento y asegurar el espejo local de sonidos
+getDb()
+await soundLib.syncFromStore()
+  .then(r => console.log(`Soundboard: ${r.total} sonidos en DB (${r.restored} restaurados del respaldo)`))
+  .catch(err => console.error('sync sonidos:', err.message))
+
 client.login(process.env.DISCORD_BOT_TOKEN)
