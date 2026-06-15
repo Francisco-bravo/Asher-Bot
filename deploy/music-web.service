@@ -1,0 +1,17 @@
+[Unit]
+Description=AsherBot - Panel web (web.mjs: login OAuth, uploads, playlists, historial)
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+# Ajusta WorkingDirectory a donde el deploy deja los archivos:
+#   VM test  -> /home/ubuntu
+#   VM prod  -> /home/ubuntu/music-bot
+WorkingDirectory=/home/ubuntu
+ExecStart=/usr/bin/node --env-file=.env web.mjs
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
