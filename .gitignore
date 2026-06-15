@@ -1,0 +1,11 @@
+.env
+node_modules/
+sounds/
+cookies.txt
+yt-dlp
+yt-dlp.exe
+*.key
+*.log
+dev/
+prod/
+wispbyte/

@@ -1,0 +1,31 @@
+name: Deploy to Prod
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to Prod VM
+        env:
+          SSH_KEY: ${{ secrets.SSH_KEY_PROD }}
+        run: |
+          echo "$SSH_KEY" > key.pem
+          chmod 600 key.pem
+          scp -i key.pem -o StrictHostKeyChecking=no bot.mjs panel.html package.json ubuntu@146.181.44.27:~/music-bot/
+          ssh -i key.pem -o StrictHostKeyChecking=no ubuntu@146.181.44.27 "sudo systemctl restart music-bot"
+          rm key.pem
+
+      - name: Verify bot is running
+        env:
+          SSH_KEY: ${{ secrets.SSH_KEY_PROD }}
+        run: |
+          echo "$SSH_KEY" > key.pem
+          chmod 600 key.pem
+          sleep 5
+          ssh -i key.pem -o StrictHostKeyChecking=no ubuntu@146.181.44.27 "journalctl -u music-bot -n 5 --no-pager"
+          rm key.pem

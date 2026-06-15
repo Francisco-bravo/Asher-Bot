@@ -1,0 +1,20 @@
+{
+  "name": "music-bot-oracle",
+  "type": "module",
+  "main": "bot.mjs",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "start": "node bot.mjs"
+  },
+  "dependencies": {
+    "@discordjs/opus": "^0.10.0",
+    "@discordjs/voice": "^0.19.2",
+    "discord.js": "^14.25.1",
+    "ffmpeg-static": "^5.2.0",
+    "libsodium-wrappers": "^0.7.15",
+    "tweetnacl": "^1.0.3"
+  },
+  "optionalDependencies": {
+    "opusscript": "^0.1.1"
+  }
+}

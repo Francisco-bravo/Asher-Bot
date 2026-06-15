@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Panel del Bot 🎵</title>
+<style>
+  :root {
+    --bg: #1e1f22; --panel: #2b2d31; --panel2: #313338;
+    --accent: #5865f2; --accent2: #4752c4; --text: #f2f3f5;
+    --muted: #949ba4; --danger: #da373c; --ok: #23a55a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    min-height: 100vh; padding: 24px;
+  }
+  .container { max-width: 860px; margin: 0 auto; }
+  h1 { font-size: 1.4rem; margin-bottom: 4px; }
+  .status-line { color: var(--muted); font-size: 0.85rem; margin-bottom: 20px; }
+  .status-line .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--danger); margin-right: 6px; }
+  .status-line .dot.on { background: var(--ok); }
+
+  .tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+  .tab {
+    padding: 10px 20px; border: none; border-radius: 8px 8px 0 0;
+    background: var(--panel); color: var(--muted); cursor: pointer;
+    font-size: 1rem; font-weight: 600;
+  }
+  .tab.active { background: var(--panel2); color: var(--text); }
+
+  .page { display: none; background: var(--panel2); border-radius: 0 12px 12px 12px; padding: 20px; }
+  .page.active { display: block; }
+
+  /* Soundboard: panel doble estilo Soundpad */
+  .vol-row {
+    display: flex; align-items: center; gap: 10px;
+    background: var(--panel); border-radius: 10px;
+    padding: 10px 14px; margin-bottom: 14px;
+  }
+  .vol-row input[type="range"] { flex: 1; accent-color: var(--accent); }
+  .vol-row .vol-label { min-width: 44px; text-align: right; color: var(--muted); font-size: 0.9rem; }
+  .sb-layout { display: flex; gap: 14px; align-items: stretch; }
+  .sb-sidebar {
+    width: 230px; flex-shrink: 0; background: var(--panel);
+    border-radius: 10px; padding: 8px; overflow-y: auto;
+    max-height: 70vh; align-self: flex-start;
+  }
+  .sb-row {
+    display: flex; align-items: center; gap: 4px;
+    padding: 7px 8px; border-radius: 6px; cursor: pointer;
+    font-size: 0.92rem; user-select: none;
+    white-space: nowrap; overflow: hidden;
+  }
+  .sb-row:hover { background: var(--panel2); }
+  .sb-row.selected { background: var(--accent); }
+  .sb-row .arrow {
+    width: 16px; flex-shrink: 0; text-align: center;
+    color: var(--muted); font-size: 0.7rem;
+  }
+  .sb-row.selected .arrow { color: white; }
+  .sb-main { flex: 1; min-width: 0; }
+  .sound-search {
+    width: 100%; padding: 10px 14px; border: none; border-radius: 8px;
+    background: var(--panel); color: var(--text); font-size: 0.95rem;
+    margin-bottom: 10px;
+  }
+  .sound-search:focus { outline: 2px solid var(--accent); }
+  .sound-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
+  .sound-grid .empty { grid-column: 1 / -1; }
+  .sound-btn.playing { background: var(--danger); }
+  .sound-btn.playing:hover { background: var(--danger); filter: brightness(1.2); }
+  .sound-btn.playing::after { content: ' ⏹'; }
+  @media (max-width: 640px) {
+    .sb-layout { flex-direction: column; }
+    .sb-sidebar { width: 100%; max-height: 200px; }
+  }
+  .sound-btn {
+    padding: 18px 10px; border: none; border-radius: 10px;
+    background: var(--panel); color: var(--text); cursor: pointer;
+    font-size: 0.95rem; font-weight: 600; word-break: break-word;
+    transition: background 0.1s, transform 0.05s;
+  }
+  .sound-btn:hover { background: var(--accent); }
+  .sound-btn:active { transform: scale(0.96); }
+  .hint { color: var(--muted); font-size: 0.85rem; margin-top: 16px; }
+
+  /* Música */
+  .now-playing { background: var(--panel); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  .np-title { font-size: 1.05rem; font-weight: 600; margin-bottom: 10px; min-height: 1.3em; }
+  .np-times { display: flex; justify-content: space-between; color: var(--muted); font-size: 0.8rem; margin-top: 6px; }
+  .progress { height: 8px; background: var(--bg); border-radius: 4px; cursor: pointer; overflow: hidden; }
+  .progress-fill { height: 100%; background: var(--accent); border-radius: 4px; width: 0%; transition: width 0.5s linear; }
+
+  .controls { display: flex; gap: 8px; justify-content: center; margin: 16px 0; flex-wrap: wrap; }
+  .ctrl {
+    padding: 10px 16px; border: none; border-radius: 8px;
+    background: var(--panel); color: var(--text); cursor: pointer;
+    font-size: 1.1rem; min-width: 56px;
+  }
+  .ctrl:hover { background: var(--accent); }
+  .ctrl.danger:hover { background: var(--danger); }
+
+  .add-row { display: flex; gap: 8px; margin-bottom: 16px; }
+  .add-row input {
+    flex: 1; padding: 10px 14px; border: none; border-radius: 8px;
+    background: var(--panel); color: var(--text); font-size: 0.95rem;
+  }
+  .add-row input:focus { outline: 2px solid var(--accent); }
+  .add-row button {
+    padding: 10px 20px; border: none; border-radius: 8px;
+    background: var(--accent); color: white; cursor: pointer; font-weight: 600;
+  }
+  .add-row button:hover { background: var(--accent2); }
+
+  .queue-list { list-style: none; }
+  .queue-item {
+    display: flex; align-items: center; gap: 10px;
+    background: var(--panel); border-radius: 8px; padding: 10px 14px; margin-bottom: 6px;
+    cursor: grab;
+  }
+  .queue-item.dragging { opacity: 0.4; }
+  .queue-item.drag-over { box-shadow: 0 -3px 0 0 var(--accent); }
+  .queue-item .grip { color: var(--muted); cursor: grab; user-select: none; }
+  .queue-item .num { color: var(--muted); min-width: 22px; }
+  .queue-item .title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .queue-item button {
+    border: none; background: transparent; color: var(--muted);
+    cursor: pointer; font-size: 1rem; padding: 4px;
+  }
+  .queue-item button:hover { color: var(--text); }
+  .queue-item button.del:hover { color: var(--danger); }
+  .empty { color: var(--muted); text-align: center; padding: 16px; }
+
+  #toast {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    background: var(--danger); color: white; padding: 12px 24px;
+    border-radius: 8px; font-weight: 600; display: none; z-index: 10;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Panel del Bot 🎵</h1>
+  <div class="status-line">
+    <span class="dot" id="conn-dot"></span><span id="conn-text">Desconectado del canal de voz</span>
+  </div>
+
+  <div class="tabs">
+    <button class="tab active" data-page="sounds">🔊 Soundboard</button>
+    <button class="tab" data-page="music">🎵 Música</button>
+  </div>
+
+  <div class="page active" id="page-sounds">
+    <div class="vol-row">
+      <span>🔉</span>
+      <input type="range" id="snd-vol" min="0" max="150" step="5" value="90" title="Volumen de los sonidos">
+      <span class="vol-label" id="snd-vol-label">90%</span>
+    </div>
+    <div class="sb-layout">
+      <div class="sb-sidebar" id="sb-sidebar"></div>
+      <div class="sb-main">
+        <input type="text" id="sound-search" class="sound-search" placeholder="🔍 Buscar sonidos...">
+        <div class="sound-grid" id="sound-grid"></div>
+      </div>
+    </div>
+    <p class="hint">Coloca archivos .mp3 / .wav / .ogg en <code>C:\discord-bot\sounds</code> y aparecerán aquí. Las carpetas (y sus subcarpetas) aparecen a la izquierda; haz clic en una para ver sus sonidos. Un clic en un sonido lo reproduce y otro clic lo detiene. Si hay música sonando, el efecto suena por encima con la música atenuada.</p>
+  </div>
+
+  <div class="page" id="page-music">
+    <div class="now-playing">
+      <div class="np-title" id="np-title">Nada reproduciéndose</div>
+      <div class="progress" id="progress"><div class="progress-fill" id="progress-fill"></div></div>
+      <div class="np-times"><span id="t-elapsed">0:00</span><span id="t-total">–</span></div>
+    </div>
+
+    <div class="controls">
+      <button class="ctrl" onclick="api('/api/previous',{})" title="Anterior">⏮</button>
+      <button class="ctrl" onclick="api('/api/seek',{delta:-10})" title="Atrasar 10s">-10s</button>
+      <button class="ctrl" id="btn-toggle" onclick="togglePause()" title="Pausar/Reanudar">⏸</button>
+      <button class="ctrl" onclick="api('/api/seek',{delta:10})" title="Adelantar 10s">+10s</button>
+      <button class="ctrl" onclick="api('/api/skip',{})" title="Siguiente">⏭</button>
+      <button class="ctrl danger" onclick="api('/api/stop',{})" title="Detener todo">⏹</button>
+      <button class="ctrl danger" onclick="api('/api/disconnect',{})" title="Desconectar del canal de voz">🔌</button>
+    </div>
+
+    <div class="add-row">
+      <input type="text" id="url-input" placeholder="Nombre de canción o URL (YouTube, SoundCloud, Spotify, Apple Music)..." onkeydown="if(event.key==='Enter')addUrl()">
+      <button onclick="addUrl()">Agregar</button>
+    </div>
+
+    <ul class="queue-list" id="queue-list"></ul>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+let state = null
+
+// Tabs
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.onclick = () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'))
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'))
+    tab.classList.add('active')
+    document.getElementById('page-' + tab.dataset.page).classList.add('active')
+  }
+})
+
+function toast(msg) {
+  const el = document.getElementById('toast')
+  el.textContent = msg
+  el.style.display = 'block'
+  clearTimeout(el._t)
+  el._t = setTimeout(() => el.style.display = 'none', 3500)
+}
+
+async function api(path, body) {
+  try {
+    const res = await fetch(path, body !== undefined
+      ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
+      : undefined)
+    const data = await res.json().catch(() => null)
+    if (!res.ok) toast(data && data.error ? data.error : 'Error')
+    else refresh()
+    return data
+  } catch {
+    toast('No se pudo contactar al bot — ¿está corriendo?')
+    return null
+  }
+}
+
+function fmt(s) {
+  if (s == null || isNaN(s)) return '–'
+  s = Math.floor(s)
+  const m = Math.floor(s / 60), sec = s % 60
+  return m + ':' + String(sec).padStart(2, '0')
+}
+
+function togglePause() {
+  if (!state || !state.current) return
+  api(state.paused ? '/api/resume' : '/api/pause', {})
+}
+
+function addUrl() {
+  const input = document.getElementById('url-input')
+  const url = input.value.trim()
+  if (!url) return
+  input.value = ''
+  api('/api/play', { url })
+}
+
+document.getElementById('progress').onclick = (e) => {
+  if (!state || !state.current || !state.current.duration) return
+  const rect = e.currentTarget.getBoundingClientRect()
+  const frac = (e.clientX - rect.left) / rect.width
+  api('/api/seek', { to: frac * state.current.duration })
+}
+
+function render() {
+  if (!state) return
+  const dot = document.getElementById('conn-dot')
+  const connText = document.getElementById('conn-text')
+  dot.classList.toggle('on', state.connected)
+  connText.textContent = state.connected
+    ? 'Conectado a 🔊 ' + (state.voiceChannel || '...')
+    : 'Desconectado del canal de voz'
+
+  updatePlayingButtons()
+  updateVolumeUI()
+
+  document.getElementById('np-title').textContent = state.current ? state.current.title : 'Nada reproduciéndose'
+  document.getElementById('btn-toggle').textContent = state.paused ? '▶' : '⏸'
+  document.getElementById('t-elapsed').textContent = state.current ? fmt(state.elapsed) : '0:00'
+  document.getElementById('t-total').textContent = state.current ? fmt(state.current.duration) : '–'
+
+  const fill = document.getElementById('progress-fill')
+  fill.style.width = (state.current && state.current.duration)
+    ? Math.min(100, state.elapsed / state.current.duration * 100) + '%' : '0%'
+
+  // No reconstruir la lista mientras se está arrastrando un elemento
+  if (dragIndex === null) {
+    const list = document.getElementById('queue-list')
+    if (state.queue.length === 0) {
+      list.innerHTML = '<li class="empty">La cola está vacía</li>'
+    } else {
+      list.innerHTML = state.queue.map((item, i) => `
+        <li class="queue-item" draggable="true" data-index="${i}">
+          <span class="grip" title="Arrastra para reordenar">☰</span>
+          <span class="num">${i + 1}.</span>
+          <span class="title" title="${esc(item.url)}">${esc(item.title)}</span>
+          <span class="num">${fmt(item.duration)}</span>
+          <button class="del" onclick="api('/api/queue/remove',{index:${i}})" title="Quitar">✕</button>
+        </li>`).join('')
+    }
+  }
+}
+
+// ── Reordenar la cola arrastrando ──
+let dragIndex = null
+const queueList = document.getElementById('queue-list')
+
+function endDrag() {
+  dragIndex = null
+  queueList.querySelectorAll('.dragging, .drag-over').forEach(el => el.classList.remove('dragging', 'drag-over'))
+}
+
+queueList.addEventListener('dragstart', (e) => {
+  const li = e.target.closest('.queue-item')
+  if (!li) return
+  dragIndex = +li.dataset.index
+  li.classList.add('dragging')
+  e.dataTransfer.effectAllowed = 'move'
+})
+
+queueList.addEventListener('dragover', (e) => {
+  if (dragIndex === null) return
+  e.preventDefault()
+  e.dataTransfer.dropEffect = 'move'
+  queueList.querySelectorAll('.drag-over').forEach(el => el.classList.remove('drag-over'))
+  const li = e.target.closest('.queue-item')
+  if (li && +li.dataset.index !== dragIndex) li.classList.add('drag-over')
+})
+
+queueList.addEventListener('drop', async (e) => {
+  e.preventDefault()
+  const li = e.target.closest('.queue-item')
+  const from = dragIndex
+  endDrag()
+  if (li && from !== null) {
+    const to = +li.dataset.index
+    if (to !== from) await api('/api/queue/reorder', { from, to })
+  }
+})
+
+queueList.addEventListener('dragend', endDrag)
+
+function esc(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+}
+
+async function refresh() {
+  try {
+    const res = await fetch('/api/state')
+    state = await res.json()
+    render()
+  } catch {}
+}
+
+// ── Soundboard estilo Soundpad ──
+let soundData = null      // árbol { name, sounds, folders }
+let selectedPath = ''     // '' = todos los sonidos
+const openFolders = new Set()
+let lastSoundsJSON = null
+
+function findNode(node, path) {
+  if (!path) return node
+  let n = node
+  for (const part of path.split('/')) {
+    n = (n.folders || []).find(f => f.name === part)
+    if (!n) return null
+  }
+  return n
+}
+
+function allSounds(node) {
+  let out = [...node.sounds]
+  for (const f of node.folders) out = out.concat(allSounds(f))
+  return out
+}
+
+function renderSidebar() {
+  if (!soundData) return
+  const rows = [`<div class="sb-row${selectedPath === '' ? ' selected' : ''}" data-path=""><span class="arrow"></span><span>🔊 Todos los sonidos</span></div>`]
+  const walk = (node, path, depth) => {
+    for (const f of node.folders) {
+      const p = path ? path + '/' + f.name : f.name
+      const hasKids = f.folders.length > 0
+      const open = openFolders.has(p)
+      rows.push(`<div class="sb-row${selectedPath === p ? ' selected' : ''}" data-path="${esc(p)}" style="padding-left:${8 + depth * 16}px"><span class="arrow" data-toggle="${esc(p)}">${hasKids ? (open ? '▾' : '▸') : ''}</span><span>📁 ${esc(f.name)}</span></div>`)
+      if (open) walk(f, p, depth + 1)
+    }
+  }
+  walk(soundData, '', 0)
+  document.getElementById('sb-sidebar').innerHTML = rows.join('')
+}
+
+// Normaliza para buscar: minúsculas, sin acentos, guiones/guiones bajos como espacios
+function norm(s) {
+  return String(s).toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[-_]+/g, ' ')
+    .replace(/\s+/g, ' ').trim()
+}
+
+function renderSoundGrid() {
+  if (!soundData) return
+  const q = norm(document.getElementById('sound-search').value)
+  let sounds
+  if (q) {
+    // Buscar en TODOS los sonidos (incluye el nombre de sus carpetas), sin importar la carpeta seleccionada
+    const tokens = q.split(' ')
+    sounds = allSounds(soundData).filter(s => {
+      const hay = norm(s.file.replace(/\.[^.]+$/, ''))
+      return tokens.every(t => hay.includes(t))
+    })
+  } else {
+    const node = findNode(soundData, selectedPath) || soundData
+    sounds = selectedPath === '' ? allSounds(soundData) : node.sounds
+  }
+  document.getElementById('sound-grid').innerHTML = sounds.length
+    ? sounds.map(s => `<button class="sound-btn" data-file="${esc(s.file)}" title="${esc(s.file)}">${esc(s.label)}</button>`).join('')
+    : `<p class="empty">${q ? 'Sin resultados para la búsqueda' : 'No hay sonidos en esta carpeta'}</p>`
+  updatePlayingButtons()
+}
+
+document.getElementById('sound-search').addEventListener('input', renderSoundGrid)
+document.getElementById('sound-search').addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') { e.target.value = ''; renderSoundGrid() }
+})
+
+// ── Volumen de sonidos ──
+const volSlider = document.getElementById('snd-vol')
+const volLabel = document.getElementById('snd-vol-label')
+let volTouchedAt = 0
+
+volSlider.addEventListener('input', () => {
+  volTouchedAt = Date.now()
+  volLabel.textContent = volSlider.value + '%'
+  clearTimeout(volSlider._t)
+  volSlider._t = setTimeout(() => api('/api/sound/volume', { volume: volSlider.value / 100 }), 150)
+})
+
+function updateVolumeUI() {
+  // No pisar el slider mientras el usuario lo está moviendo
+  if (!state || state.soundVolume == null || Date.now() - volTouchedAt < 1500) return
+  const pct = Math.round(state.soundVolume * 100)
+  volSlider.value = pct
+  volLabel.textContent = pct + '%'
+}
+
+function updatePlayingButtons() {
+  const playing = (state && state.playingSounds) || []
+  document.querySelectorAll('.sound-btn').forEach(b => {
+    b.classList.toggle('playing', playing.some(p => p.file === b.dataset.file))
+  })
+}
+
+async function loadSounds() {
+  try {
+    const res = await fetch('/api/sounds')
+    const text = await res.text()
+    if (text === lastSoundsJSON) return // sin cambios: no re-renderizar
+    lastSoundsJSON = text
+    soundData = JSON.parse(text)
+    if (selectedPath && !findNode(soundData, selectedPath)) selectedPath = ''
+    renderSidebar()
+    renderSoundGrid()
+  } catch {}
+}
+
+document.getElementById('sb-sidebar').addEventListener('click', (e) => {
+  const row = e.target.closest('.sb-row')
+  if (!row) return
+  const arrow = e.target.closest('.arrow')
+  if (arrow && arrow.dataset.toggle) {
+    const p = arrow.dataset.toggle
+    if (openFolders.has(p)) openFolders.delete(p)
+    else openFolders.add(p)
+    renderSidebar()
+    return
+  }
+  selectedPath = row.dataset.path
+  if (selectedPath) openFolders.add(selectedPath)
+  renderSidebar()
+  renderSoundGrid()
+})
+
+// Un clic reproduce; otro clic detiene si sigue sonando
+document.getElementById('sound-grid').addEventListener('click', async (e) => {
+  const btn = e.target.closest('.sound-btn')
+  if (!btn) return
+  const file = btn.dataset.file
+  const playing = state && state.playingSounds && state.playingSounds.find(p => p.file === file)
+  if (playing) {
+    btn.classList.remove('playing')
+    await api('/api/sound/stop', { id: playing.id })
+  } else {
+    btn.classList.add('playing')
+    await api('/api/sound', { name: file })
+  }
+})
+
+refresh()
+loadSounds()
+setInterval(refresh, 1000)
+setInterval(loadSounds, 5000)
+</script>
+</body>
+</html>
