@@ -1,5 +1,5 @@
 @echo off
-title AsherDev - Bot de Musica (DEV / rama dev)
+title AsherDev - Bot de Musica
 cd /d C:\discord-bot
 
 rem Levanta la web (login/uploads/playlists/historial) en otra ventana

@@ -13,8 +13,3 @@ object-store/
 *.db
 *.db-wal
 *.db-shm
-
-# Carpetas locales antiguas (en proceso de retiro)
-dev/
-prod/
-wispbyte/
