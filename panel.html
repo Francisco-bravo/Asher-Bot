@@ -6,124 +6,277 @@
 <title>Panel del Bot 🎵</title>
 <style>
   :root {
-    --bg: #1e1f22; --panel: #2b2d31; --panel2: #313338;
-    --accent: #5865f2; --accent2: #4752c4; --text: #f2f3f5;
-    --muted: #949ba4; --danger: #da373c; --ok: #23a55a;
+    --bg: #1a1b1e; --panel: #2b2d31; --panel2: #313338; --panel3: #3a3c42;
+    --accent: #5865f2; --accent2: #4752c4; --accent-glow: rgba(88,101,242,.35);
+    --text: #f2f3f5; --muted: #949ba4; --danger: #da373c; --ok: #23a55a;
+    --radius: 14px; --shadow: 0 6px 20px rgba(0,0,0,.28);
+    --border: 1px solid rgba(255,255,255,.06);
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { color-scheme: dark; }
   body {
-    background: var(--bg); color: var(--text);
+    background:
+      radial-gradient(1100px 520px at 110% -15%, rgba(88,101,242,.18), transparent 55%),
+      radial-gradient(900px 500px at -10% 0%, rgba(35,165,90,.08), transparent 50%),
+      var(--bg);
+    background-attachment: fixed;
+    color: var(--text);
     font-family: 'Segoe UI', system-ui, sans-serif;
     min-height: 100vh; padding: 24px;
+    -webkit-font-smoothing: antialiased;
   }
-  .container { max-width: 860px; margin: 0 auto; }
-  h1 { font-size: 1.4rem; margin-bottom: 4px; }
-  .status-line { color: var(--muted); font-size: 0.85rem; margin-bottom: 20px; }
-  .status-line .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--danger); margin-right: 6px; }
-  .status-line .dot.on { background: var(--ok); }
+  .container { max-width: 1500px; margin: 0 auto; }
 
+  /* Scrollbars */
+  * { scrollbar-width: thin; scrollbar-color: var(--panel3) transparent; }
+  *::-webkit-scrollbar { width: 10px; height: 10px; }
+  *::-webkit-scrollbar-track { background: transparent; }
+  *::-webkit-scrollbar-thumb { background: var(--panel3); border-radius: 8px; }
+  *::-webkit-scrollbar-thumb:hover { background: #50535b; }
+
+  /* Topbar */
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 16px; flex-wrap: wrap; margin-bottom: 22px;
+  }
+  .brand { display: flex; align-items: baseline; gap: 10px; }
+  .brand h1 { font-size: 1.55rem; font-weight: 700; letter-spacing: -.02em; }
+  .brand .sub { color: var(--muted); font-size: .8rem; }
+  .topbar-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .status-pill {
+    display: inline-flex; align-items: center; gap: 9px;
+    background: var(--panel); border: var(--border);
+    padding: 9px 16px; border-radius: 999px; font-size: .85rem; color: var(--muted);
+    box-shadow: var(--shadow);
+  }
+  .status-pill .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--danger); flex-shrink: 0; }
+  .status-pill .dot.on { background: var(--ok); animation: pulse 2.2s infinite; }
+  @keyframes pulse {
+    0% { box-shadow: 0 0 0 0 rgba(35,165,90,.5); }
+    70% { box-shadow: 0 0 0 8px rgba(35,165,90,0); }
+    100% { box-shadow: 0 0 0 0 rgba(35,165,90,0); }
+  }
+
+  /* Tabs (solo en pantallas angostas) */
   .tabs { display: flex; gap: 8px; margin-bottom: 16px; }
   .tab {
-    padding: 10px 20px; border: none; border-radius: 8px 8px 0 0;
+    flex: 1; padding: 12px 22px; border: none; border-radius: 10px;
     background: var(--panel); color: var(--muted); cursor: pointer;
-    font-size: 1rem; font-weight: 600;
+    font-size: 1rem; font-weight: 600; transition: background .15s, color .15s, box-shadow .15s;
   }
-  .tab.active { background: var(--panel2); color: var(--text); }
+  .tab:hover { color: var(--text); }
+  .tab.active { background: var(--accent); color: #fff; box-shadow: 0 4px 14px var(--accent-glow); }
 
-  .page { display: none; background: var(--panel2); border-radius: 0 12px 12px 12px; padding: 20px; }
+  .pages { display: block; }
+  .page { display: none; background: var(--panel2); border: var(--border); border-radius: var(--radius); padding: 22px; box-shadow: var(--shadow); }
   .page.active { display: block; }
+  .page-head { display: none; font-size: 1.1rem; font-weight: 700; margin-bottom: 18px; align-items: center; gap: 9px; }
+
+  /* Sub-pestañas dentro de Música (Reproductor / Biblioteca) */
+  .subtabs { display: flex; gap: 6px; margin-bottom: 16px; }
+  .subtab {
+    padding: 8px 16px; border: var(--border); border-radius: 8px;
+    background: var(--panel); color: var(--muted); cursor: pointer;
+    font-size: .9rem; font-weight: 600; transition: color .12s, background .12s;
+  }
+  .subtab:hover { color: var(--text); }
+  .subtab.active { background: var(--panel3); color: var(--text); border-color: transparent; }
+  .subpage { display: none; }
+  .subpage.active { display: block; }
+
+  /* Filas de la biblioteca */
+  .lib-item {
+    display: flex; align-items: center; gap: 10px;
+    background: var(--panel); border: var(--border); border-radius: 10px;
+    padding: 10px 14px; margin-bottom: 6px;
+  }
+  .lib-thumb {
+    position: relative; width: 40px; height: 40px; flex-shrink: 0;
+    border-radius: 6px; background: var(--panel2); overflow: hidden; display: grid; place-items: center;
+  }
+  .lib-thumb::after { content: '🎵'; font-size: 1rem; opacity: .5; }
+  .lib-thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  .lib-item .title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lib-item .num { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .lib-item button {
+    border: var(--border); background: var(--panel2); color: var(--text);
+    border-radius: 8px; padding: 7px 11px; cursor: pointer; font-size: .85rem; font-weight: 600;
+    white-space: nowrap; transition: background .12s;
+  }
+  .lib-item button:hover { background: var(--accent); border-color: transparent; }
+
+  /* Botón para alternar vista (solo visible en PC) */
+  .view-toggle {
+    display: none; align-items: center; gap: 7px;
+    background: var(--panel); border: var(--border); color: var(--muted);
+    padding: 9px 15px; border-radius: 999px; font-size: .85rem; font-weight: 600;
+    cursor: pointer; box-shadow: var(--shadow); transition: color .15s, background .15s;
+  }
+  .view-toggle:hover { color: var(--text); background: var(--panel3); }
+
+  /* === PC ancho: ambos paneles a la vez (salvo que se elija pestañas) === */
+  @media (min-width: 1100px) {
+    .view-toggle { display: inline-flex; }
+    body:not(.tabs-on-pc) .tabs { display: none; }
+    body:not(.tabs-on-pc) .pages {
+      display: grid;
+      grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr);
+      gap: 18px; align-items: start;
+    }
+    body:not(.tabs-on-pc) .page { display: block !important; }
+    body:not(.tabs-on-pc) .page-head { display: flex; }
+  }
+
+  @media (max-width: 640px) {
+    body { padding: 16px; }
+  }
 
   /* Soundboard: panel doble estilo Soundpad */
   .vol-row {
-    display: flex; align-items: center; gap: 10px;
-    background: var(--panel); border-radius: 10px;
-    padding: 10px 14px; margin-bottom: 14px;
+    display: flex; align-items: center; gap: 12px;
+    background: var(--panel); border: var(--border); border-radius: 12px;
+    padding: 12px 16px; margin-bottom: 14px;
   }
-  .vol-row input[type="range"] { flex: 1; accent-color: var(--accent); }
-  .vol-row .vol-label { min-width: 44px; text-align: right; color: var(--muted); font-size: 0.9rem; }
+  .vol-row input[type="range"] { flex: 1; accent-color: var(--accent); height: 6px; cursor: pointer; }
+  .vol-row .vol-label { min-width: 46px; text-align: right; color: var(--text); font-size: .9rem; font-variant-numeric: tabular-nums; }
   .sb-layout { display: flex; gap: 14px; align-items: stretch; }
   .sb-sidebar {
-    width: 230px; flex-shrink: 0; background: var(--panel);
-    border-radius: 10px; padding: 8px; overflow-y: auto;
-    max-height: 70vh; align-self: flex-start;
+    width: 240px; flex-shrink: 0; background: var(--panel); border: var(--border);
+    border-radius: 12px; padding: 8px; overflow-y: auto;
+    max-height: 66vh; align-self: flex-start;
   }
   .sb-row {
     display: flex; align-items: center; gap: 4px;
-    padding: 7px 8px; border-radius: 6px; cursor: pointer;
-    font-size: 0.92rem; user-select: none;
-    white-space: nowrap; overflow: hidden;
+    padding: 8px 9px; border-radius: 8px; cursor: pointer;
+    font-size: .92rem; user-select: none;
+    white-space: nowrap; overflow: hidden; transition: background .1s;
   }
   .sb-row:hover { background: var(--panel2); }
-  .sb-row.selected { background: var(--accent); }
+  .sb-row.selected { background: var(--accent); color: #fff; }
   .sb-row .arrow {
     width: 16px; flex-shrink: 0; text-align: center;
-    color: var(--muted); font-size: 0.7rem;
+    color: var(--muted); font-size: .7rem;
   }
-  .sb-row.selected .arrow { color: white; }
+  .sb-row.selected .arrow { color: #fff; }
   .sb-main { flex: 1; min-width: 0; }
   .sound-search {
-    width: 100%; padding: 10px 14px; border: none; border-radius: 8px;
-    background: var(--panel); color: var(--text); font-size: 0.95rem;
-    margin-bottom: 10px;
+    width: 100%; padding: 12px 16px; border: var(--border); border-radius: 10px;
+    background: var(--panel); color: var(--text); font-size: .95rem;
+    margin-bottom: 12px;
   }
-  .sound-search:focus { outline: 2px solid var(--accent); }
-  .sound-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
+  .sound-search:focus { outline: 2px solid var(--accent); border-color: transparent; }
+  .sound-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 10px; }
   .sound-grid .empty { grid-column: 1 / -1; }
-  .sound-btn.playing { background: var(--danger); }
-  .sound-btn.playing:hover { background: var(--danger); filter: brightness(1.2); }
+  .sound-btn.playing { background: var(--danger); border-color: transparent; }
+  .sound-btn.playing:hover { background: var(--danger); filter: brightness(1.15); }
   .sound-btn.playing::after { content: ' ⏹'; }
   @media (max-width: 640px) {
     .sb-layout { flex-direction: column; }
-    .sb-sidebar { width: 100%; max-height: 200px; }
+    .sb-sidebar { width: 100%; max-height: 220px; }
   }
   .sound-btn {
-    padding: 18px 10px; border: none; border-radius: 10px;
+    padding: 18px 12px; border: var(--border); border-radius: 12px;
     background: var(--panel); color: var(--text); cursor: pointer;
-    font-size: 0.95rem; font-weight: 600; word-break: break-word;
-    transition: background 0.1s, transform 0.05s;
+    font-size: .92rem; font-weight: 600; word-break: break-word; line-height: 1.25;
+    transition: background .1s, transform .05s, box-shadow .1s;
   }
-  .sound-btn:hover { background: var(--accent); }
-  .sound-btn:active { transform: scale(0.96); }
-  .hint { color: var(--muted); font-size: 0.85rem; margin-top: 16px; }
+  .sound-btn:hover { background: var(--accent); border-color: transparent; box-shadow: 0 4px 12px var(--accent-glow); }
+  .sound-btn:active { transform: scale(.96); }
+  .hint { color: var(--muted); font-size: .82rem; margin-top: 16px; line-height: 1.5; }
+  .hint code { background: var(--panel); padding: 2px 6px; border-radius: 5px; font-size: .9em; }
 
   /* Música */
-  .now-playing { background: var(--panel); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
-  .np-title { font-size: 1.05rem; font-weight: 600; margin-bottom: 10px; min-height: 1.3em; }
-  .np-times { display: flex; justify-content: space-between; color: var(--muted); font-size: 0.8rem; margin-top: 6px; }
-  .progress { height: 8px; background: var(--bg); border-radius: 4px; cursor: pointer; overflow: hidden; }
-  .progress-fill { height: 100%; background: var(--accent); border-radius: 4px; width: 0%; transition: width 0.5s linear; }
+  .now-playing {
+    background: linear-gradient(135deg, var(--panel), var(--panel) 55%, rgba(88,101,242,.10));
+    border: var(--border); border-radius: 12px; padding: 18px; margin-bottom: 16px;
+    display: flex; align-items: center; gap: 16px;
+  }
+  .np-thumb {
+    position: relative; width: 72px; height: 72px; flex-shrink: 0;
+    border-radius: 10px; background: var(--panel2); overflow: hidden; display: grid; place-items: center;
+  }
+  .np-thumb::after { content: '🎵'; font-size: 1.6rem; opacity: .5; }
+  .np-thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  .np-info { flex: 1; min-width: 0; }
+
+  /* Selector de canal de voz */
+  .voice-panel { background: var(--panel); border: var(--border); border-radius: 12px; padding: 14px; margin-bottom: 16px; }
+  .voice-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; font-weight: 700; }
+  .voice-toggle {
+    display: inline-flex; align-items: center; gap: 8px; flex: 1; min-width: 0;
+    background: none; border: none; color: var(--text); font-weight: 700; font-size: 1rem;
+    cursor: pointer; padding: 0; text-align: left;
+  }
+  .voice-toggle:hover { color: var(--accent); }
+  .vc-chevron { color: var(--muted); font-size: .75rem; transition: transform .15s; }
+  .voice-toggle:hover .vc-chevron { color: var(--accent); }
+  .voice-panel.collapsed .vc-chevron { transform: rotate(-90deg); }
+  .voice-panel.collapsed .voice-body { display: none; }
+  .voice-panel.collapsed .voice-head { margin-bottom: 0; }
+  .vc-disconnect {
+    padding: 8px 14px; border: var(--border); border-radius: 8px; cursor: pointer;
+    background: var(--panel2); color: var(--text); font-size: .85rem; font-weight: 600; transition: background .12s;
+  }
+  .vc-disconnect:hover:not(:disabled) { background: var(--danger); border-color: transparent; }
+  .vc-disconnect:disabled { opacity: .4; cursor: not-allowed; }
+  .vc-guild { color: var(--muted); font-size: .78rem; font-weight: 600; margin: 8px 2px 4px; }
+  .vc-item {
+    display: flex; align-items: center; gap: 10px;
+    background: var(--panel2); border: var(--border); border-radius: 10px; padding: 9px 12px; margin-bottom: 6px;
+  }
+  .vc-item.here { border-color: rgba(35,165,90,.5); background: linear-gradient(90deg, rgba(35,165,90,.12), var(--panel2)); }
+  .vc-main { flex: 1; min-width: 0; }
+  .vc-name { font-weight: 600; }
+  .vc-members { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; margin-top: 4px; color: var(--muted); font-size: .8rem; }
+  .vc-members .who { display: inline-flex; align-items: center; gap: 4px; background: var(--panel); border-radius: 999px; padding: 2px 8px 2px 2px; }
+  .vc-members .who img { width: 18px; height: 18px; border-radius: 50%; }
+  .vc-members .who.bot { opacity: .7; }
+  .vc-empty-members { color: var(--muted); font-size: .8rem; margin-top: 4px; font-style: italic; }
+  .vc-join {
+    padding: 8px 14px; border: none; border-radius: 8px; cursor: pointer;
+    background: var(--accent); color: #fff; font-weight: 600; font-size: .85rem; white-space: nowrap; transition: background .12s;
+  }
+  .vc-join:hover { background: var(--accent2); }
+  .vc-join.here { background: var(--ok); cursor: default; }
+  .np-title { font-size: 1.1rem; font-weight: 600; margin-bottom: 12px; min-height: 1.3em; }
+  .np-times { display: flex; justify-content: space-between; color: var(--muted); font-size: .8rem; margin-top: 8px; font-variant-numeric: tabular-nums; }
+  .progress { height: 9px; background: var(--bg); border-radius: 6px; cursor: pointer; overflow: hidden; }
+  .progress-fill { height: 100%; background: linear-gradient(90deg, var(--accent), #7c86ff); border-radius: 6px; width: 0%; transition: width .5s linear; }
 
   .controls { display: flex; gap: 8px; justify-content: center; margin: 16px 0; flex-wrap: wrap; }
   .ctrl {
-    padding: 10px 16px; border: none; border-radius: 8px;
+    padding: 11px 16px; border: var(--border); border-radius: 10px;
     background: var(--panel); color: var(--text); cursor: pointer;
-    font-size: 1.1rem; min-width: 56px;
+    font-size: 1.05rem; min-width: 54px; transition: background .12s, transform .05s;
   }
-  .ctrl:hover { background: var(--accent); }
+  .ctrl:hover { background: var(--accent); border-color: transparent; }
+  .ctrl:active { transform: scale(.95); }
   .ctrl.danger:hover { background: var(--danger); }
 
   .add-row { display: flex; gap: 8px; margin-bottom: 16px; }
   .add-row input {
-    flex: 1; padding: 10px 14px; border: none; border-radius: 8px;
-    background: var(--panel); color: var(--text); font-size: 0.95rem;
+    flex: 1; min-width: 0; padding: 12px 16px; border: var(--border); border-radius: 10px;
+    background: var(--panel); color: var(--text); font-size: .95rem;
   }
-  .add-row input:focus { outline: 2px solid var(--accent); }
+  .add-row input:focus { outline: 2px solid var(--accent); border-color: transparent; }
   .add-row button {
-    padding: 10px 20px; border: none; border-radius: 8px;
-    background: var(--accent); color: white; cursor: pointer; font-weight: 600;
+    padding: 12px 22px; border: none; border-radius: 10px;
+    background: var(--accent); color: #fff; cursor: pointer; font-weight: 600; white-space: nowrap;
+    transition: background .12s;
   }
   .add-row button:hover { background: var(--accent2); }
 
-  .queue-list { list-style: none; }
+  .queue-list { list-style: none; display: flex; flex-direction: column; gap: 6px; }
   .queue-item {
     display: flex; align-items: center; gap: 10px;
-    background: var(--panel); border-radius: 8px; padding: 10px 14px; margin-bottom: 6px;
-    cursor: grab;
+    background: var(--panel); border: var(--border); border-radius: 10px; padding: 11px 14px;
+    cursor: grab; transition: background .1s, box-shadow .1s, opacity .1s;
   }
-  .queue-item.dragging { opacity: 0.4; }
+  .queue-item:hover { background: var(--panel3); }
+  .queue-item.dragging { opacity: .4; }
   .queue-item.drag-over { box-shadow: 0 -3px 0 0 var(--accent); }
   .queue-item .grip { color: var(--muted); cursor: grab; user-select: none; }
-  .queue-item .num { color: var(--muted); min-width: 22px; }
+  .queue-item .num { color: var(--muted); min-width: 22px; font-variant-numeric: tabular-nums; }
   .queue-item .title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .queue-item button {
     border: none; background: transparent; color: var(--muted);
@@ -131,28 +284,119 @@
   }
   .queue-item button:hover { color: var(--text); }
   .queue-item button.del:hover { color: var(--danger); }
-  .empty { color: var(--muted); text-align: center; padding: 16px; }
+
+  /* Filas de reproducidas (gris) y de la que suena ahora */
+  .track-played, .track-current {
+    display: flex; align-items: center; gap: 10px;
+    border: var(--border); border-radius: 10px; padding: 11px 14px;
+  }
+  .track-played { background: transparent; opacity: .55; }
+  .track-played .title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-decoration: line-through; text-decoration-color: var(--muted); }
+  .track-played .num { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .track-played .status-ico { color: var(--ok); width: 18px; text-align: center; }
+  .track-played .re-add { border: none; background: transparent; color: var(--muted); cursor: pointer; font-size: 1rem; padding: 4px; }
+  .track-played .re-add:hover { color: var(--accent); }
+  .track-current {
+    background: linear-gradient(90deg, rgba(88,101,242,.18), var(--panel));
+    border-color: rgba(88,101,242,.4);
+  }
+  .track-current .title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+  .track-current .num { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .track-current .status-ico { color: var(--accent); width: 18px; text-align: center; }
+
+  .empty { color: var(--muted); text-align: center; padding: 18px; }
 
   #toast {
     position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
-    background: var(--danger); color: white; padding: 12px 24px;
-    border-radius: 8px; font-weight: 600; display: none; z-index: 10;
+    background: var(--danger); color: #fff; padding: 13px 26px;
+    border-radius: 10px; font-weight: 600; display: none; z-index: 10;
+    box-shadow: var(--shadow);
   }
+
+  /* === Caché de música === */
+  /* En PC dividido, la caché ocupa toda la fila debajo de los dos paneles */
+  @media (min-width: 1100px) {
+    body:not(.tabs-on-pc) #page-cache { grid-column: 1 / -1; }
+  }
+  .cache-toolbar { display: flex; gap: 10px; align-items: stretch; flex-wrap: wrap; }
+  .cache-toolbar .add-row { margin: 0; flex: 1; min-width: 240px; }
+  .sb-action {
+    padding: 12px 16px; border: var(--border); border-radius: 10px; cursor: pointer;
+    background: var(--panel); color: var(--text); font-weight: 600; font-size: .9rem;
+    white-space: nowrap; transition: background .12s;
+  }
+  .sb-action:hover { background: var(--panel3); }
+  .sb-action.primary { background: var(--accent); color: #fff; border-color: transparent; }
+  .sb-action.primary:hover { background: var(--accent2); }
+
+  .song-card { background: var(--panel); border: var(--border); border-radius: 12px; padding: 13px 15px; margin-bottom: 8px; }
+  .song-head { display: flex; align-items: center; gap: 8px; }
+  .song-title { font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .song-badges { display: flex; gap: 6px; flex-shrink: 0; }
+  .badge { font-size: .72rem; padding: 2px 9px; border-radius: 999px; font-weight: 600; background: var(--panel3); color: var(--muted); }
+  .badge.cached { background: #1e3a2e; color: var(--ok); }
+  .badge.perm { background: #3a2e1e; color: #e6a23c; }
+  .badge.store { background: #1e2a3a; color: #5b9bd5; }
+  .song-meta { color: var(--muted); font-size: .8rem; margin-top: 5px; word-break: break-all; }
+  .song-actions { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+  .song-actions button {
+    padding: 7px 12px; border: var(--border); border-radius: 8px; cursor: pointer;
+    background: var(--panel2); color: var(--text); font-size: .82rem; font-weight: 600; transition: background .12s;
+  }
+  .song-actions button:hover { background: var(--accent); border-color: transparent; }
+  .song-actions button.danger:hover { background: var(--danger); }
+
+  /* Modal (subir canción permanente) */
+  .modal-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,.6);
+    display: flex; align-items: center; justify-content: center; z-index: 20; padding: 16px;
+  }
+  .modal {
+    background: var(--panel2); border: var(--border); border-radius: 16px; padding: 24px;
+    width: 100%; max-width: 440px; box-shadow: 0 12px 48px rgba(0,0,0,.5);
+  }
+  .modal h2 { font-size: 1.2rem; margin-bottom: 6px; }
+  .modal-folder { color: var(--muted); font-size: .88rem; margin-bottom: 16px; }
+  .modal-folder b { color: var(--text); }
+  .upload-form { display: flex; flex-direction: column; gap: 12px; }
+  .upload-form label { display: flex; flex-direction: column; gap: 4px; font-size: .85rem; color: var(--muted); }
+  .upload-form input {
+    padding: 11px 13px; border: var(--border); border-radius: 10px;
+    background: var(--panel); color: var(--text); font-size: .95rem;
+  }
+  .upload-form input:focus { outline: 2px solid var(--accent); border-color: transparent; }
+  .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 4px; }
+  .modal-actions button { padding: 11px 18px; border: none; border-radius: 10px; cursor: pointer; background: var(--accent); color: #fff; font-weight: 600; }
+  .modal-actions button:hover { background: var(--accent2); }
+  .modal-actions .cancel { background: var(--panel); color: var(--muted); }
+  .modal-actions .cancel:hover { background: var(--bg); color: var(--text); }
+  .modal-actions button:disabled { opacity: .5; cursor: not-allowed; }
 </style>
 </head>
 <body>
 <div class="container">
-  <h1>Panel del Bot 🎵</h1>
-  <div class="status-line">
-    <span class="dot" id="conn-dot"></span><span id="conn-text">Desconectado del canal de voz</span>
+  <div class="topbar">
+    <div class="brand">
+      <h1>Panel del Bot 🎵</h1>
+      <span class="sub">música &amp; soundboard</span>
+    </div>
+    <div class="topbar-right">
+      <button id="view-toggle" class="view-toggle" title="Alternar entre vista dividida y pestañas"></button>
+      <div class="status-pill">
+        <span class="dot" id="conn-dot"></span><span id="conn-text">Desconectado del canal de voz</span>
+      </div>
+    </div>
   </div>
 
   <div class="tabs">
     <button class="tab active" data-page="sounds">🔊 Soundboard</button>
     <button class="tab" data-page="music">🎵 Música</button>
+    <button class="tab" id="tab-cache" data-page="cache">💾 Caché</button>
   </div>
 
+  <div class="pages">
   <div class="page active" id="page-sounds">
+    <div class="page-head">🔊 Soundboard</div>
     <div class="vol-row">
       <span>🔉</span>
       <input type="range" id="snd-vol" min="0" max="150" step="5" value="90" title="Volumen de los sonidos">
@@ -169,10 +413,28 @@
   </div>
 
   <div class="page" id="page-music">
+    <div class="page-head">🎵 Música</div>
+    <div class="subtabs">
+      <button class="subtab active" data-sub="player">▶ Reproductor</button>
+      <button class="subtab" data-sub="library">📚 Biblioteca</button>
+    </div>
+    <div class="subpage active" id="sub-player">
+    <div class="voice-panel" id="voice-panel">
+      <div class="voice-head">
+        <button class="voice-toggle" onclick="toggleVoicePanel()" title="Mostrar/ocultar canales">
+          <span class="vc-chevron">▾</span> 🔊 Canal de voz
+        </button>
+        <button id="btn-disconnect" class="vc-disconnect" onclick="disconnectVoice()" title="Desconectar del canal de voz">🔌 Desconectar</button>
+      </div>
+      <div class="voice-body" id="voice-list"><p class="empty">Cargando canales…</p></div>
+    </div>
     <div class="now-playing">
-      <div class="np-title" id="np-title">Nada reproduciéndose</div>
-      <div class="progress" id="progress"><div class="progress-fill" id="progress-fill"></div></div>
-      <div class="np-times"><span id="t-elapsed">0:00</span><span id="t-total">–</span></div>
+      <span class="np-thumb"><img id="np-art" alt=""></span>
+      <div class="np-info">
+        <div class="np-title" id="np-title">Nada reproduciéndose</div>
+        <div class="progress" id="progress"><div class="progress-fill" id="progress-fill"></div></div>
+        <div class="np-times"><span id="t-elapsed">0:00</span><span id="t-total">–</span></div>
+      </div>
     </div>
 
     <div class="controls">
@@ -181,8 +443,7 @@
       <button class="ctrl" id="btn-toggle" onclick="togglePause()" title="Pausar/Reanudar">⏸</button>
       <button class="ctrl" onclick="api('/api/seek',{delta:10})" title="Adelantar 10s">+10s</button>
       <button class="ctrl" onclick="api('/api/skip',{})" title="Siguiente">⏭</button>
-      <button class="ctrl danger" onclick="api('/api/stop',{})" title="Detener todo">⏹</button>
-      <button class="ctrl danger" onclick="api('/api/disconnect',{})" title="Desconectar del canal de voz">🔌</button>
+      <button class="ctrl danger" onclick="api('/api/stop',{})" title="Detener (la canción pasa a reproducidas; el bot no se desconecta)">⏹</button>
     </div>
 
     <div class="add-row">
@@ -191,6 +452,51 @@
     </div>
 
     <ul class="queue-list" id="queue-list"></ul>
+    </div>
+
+    <div class="subpage" id="sub-library">
+      <input type="text" id="library-search" class="sound-search" placeholder="🔍 Buscar canción en la biblioteca...">
+      <div id="library-list"></div>
+    </div>
+  </div>
+
+  <div class="page" id="page-cache">
+    <div class="page-head">💾 Caché</div>
+    <div class="cache-toolbar">
+      <div class="add-row">
+        <input type="text" id="cache-url" placeholder="URL o nombre para forzar a caché (YouTube, SoundCloud...)" onkeydown="if(event.key==='Enter')forceCacheUrl()">
+        <button onclick="forceCacheUrl()">⬇️ Forzar caché</button>
+      </div>
+      <button class="sb-action primary" id="btn-upload-song">⬆️ Subir canción permanente</button>
+    </div>
+    <p class="hint" style="margin:12px 0 16px">
+      <b>Forzar caché</b>: descarga la canción ya para que suene al instante (puede evictarse luego).
+      <b>Permanente</b> 📌: queda fijada, nunca se borra de la caché. Las subidas nacen permanentes.
+    </p>
+    <div id="cache-list"></div>
+  </div>
+  </div>
+
+  <div class="modal-overlay" id="song-modal" style="display:none">
+    <div class="modal">
+      <h2>Subir canción permanente</h2>
+      <p class="modal-folder">Quedará fijada en la caché (📌 permanente) y respaldada.</p>
+      <form class="upload-form" id="song-form">
+        <label>Archivo de audio (.mp3 .wav .ogg .m4a .flac .webm .opus)
+          <input type="file" id="song-file" accept=".mp3,.wav,.ogg,.m4a,.flac,.webm,.opus" required>
+        </label>
+        <label>Título
+          <input type="text" id="song-title" placeholder="Título de la canción" required>
+        </label>
+        <label>Artista (opcional)
+          <input type="text" id="song-artist" placeholder="Artista">
+        </label>
+        <div class="modal-actions">
+          <button type="button" class="cancel" id="song-cancel">Cancelar</button>
+          <button type="submit" id="song-submit">Subir</button>
+        </div>
+      </form>
+    </div>
   </div>
 </div>
 
@@ -199,6 +505,52 @@
 <script>
 let state = null
 
+// ── Identidad vía web.mjs (login compartido por cookie) ──
+// bot.mjs inyecta window.WEB_BASE al servir el panel. Los endpoints de música
+// (biblioteca/permanente/subir) viven en web.mjs; los de control, en el bot.
+const WEB_BASE = (window.WEB_BASE || '').replace(/\/$/, '')
+let me = null // perfil del usuario logueado (para saber si es admin)
+
+function webUrl(path) { return WEB_BASE + path }
+async function webFetch(path, opts = {}) {
+  return fetch(webUrl(path), { credentials: 'include', ...opts })
+}
+async function loadMe() {
+  try {
+    const res = await webFetch('/api/me')
+    me = res.ok ? await res.json() : null
+  } catch { me = null }
+  applyAdminUI()
+  loadMusic()
+}
+
+// La caché es interna: la pestaña 💾 Caché (y su panel, visible en modo dividido)
+// solo se muestran a administradores.
+function applyAdminUI() {
+  const isAdmin = me && (me.roles || []).includes('admin')
+  // La pestaña Caché y el selector de canal de voz son solo para administradores.
+  for (const id of ['tab-cache', 'page-cache', 'voice-panel']) {
+    const el = document.getElementById(id)
+    if (!el) continue
+    if (isAdmin) el.style.removeProperty('display')
+    else el.style.setProperty('display', 'none', 'important')
+  }
+}
+
+// Alternar vista en PC: dividida (lado a lado) o por pestañas. Se recuerda.
+const viewToggle = document.getElementById('view-toggle')
+function applyView(mode) {
+  document.body.classList.toggle('tabs-on-pc', mode === 'tabs')
+  viewToggle.textContent = mode === 'tabs' ? '🔲 Vista dividida' : '🗂️ Pestañas'
+}
+let viewMode = localStorage.getItem('panelView') === 'tabs' ? 'tabs' : 'split'
+applyView(viewMode)
+viewToggle.onclick = () => {
+  viewMode = viewMode === 'tabs' ? 'split' : 'tabs'
+  localStorage.setItem('panelView', viewMode)
+  applyView(viewMode)
+}
+
 // Tabs
 document.querySelectorAll('.tab').forEach(tab => {
   tab.onclick = () => {
@@ -206,6 +558,18 @@ document.querySelectorAll('.tab').forEach(tab => {
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'))
     tab.classList.add('active')
     document.getElementById('page-' + tab.dataset.page).classList.add('active')
+    if (tab.dataset.page === 'cache') loadMusic()
+  }
+})
+
+// Sub-pestañas dentro de Música (Reproductor / Biblioteca)
+document.querySelectorAll('.subtab').forEach(st => {
+  st.onclick = () => {
+    document.querySelectorAll('.subtab').forEach(t => t.classList.remove('active'))
+    document.querySelectorAll('.subpage').forEach(p => p.classList.remove('active'))
+    st.classList.add('active')
+    document.getElementById('sub-' + st.dataset.sub).classList.add('active')
+    if (st.dataset.sub === 'library') loadMusic()
   }
 })
 
@@ -259,6 +623,24 @@ document.getElementById('progress').onclick = (e) => {
   api('/api/seek', { to: frac * state.current.duration })
 }
 
+// Carátula del now-playing. Se setea una vez por canción; si aún no está lista
+// (se baja en segundo plano al reproducir), reintenta a los pocos segundos.
+let npArtId = null
+function updateNpArt() {
+  const img = document.getElementById('np-art')
+  const id = state && state.current && state.current.songId
+  if (!id) { img.removeAttribute('src'); img.style.display = 'none'; npArtId = null; return }
+  if (id === npArtId) return
+  npArtId = id
+  img.style.display = ''
+  img.onload = () => { img.style.display = '' }
+  img.onerror = () => {
+    img.style.display = 'none'
+    setTimeout(() => { if (npArtId === id) img.src = webUrl('/art/' + id + '?t=' + Date.now()) }, 4000)
+  }
+  img.src = webUrl('/art/' + id)
+}
+
 function render() {
   if (!state) return
   const dot = document.getElementById('conn-dot')
@@ -267,11 +649,14 @@ function render() {
   connText.textContent = state.connected
     ? 'Conectado a 🔊 ' + (state.voiceChannel || '...')
     : 'Desconectado del canal de voz'
+  const dcBtn = document.getElementById('btn-disconnect')
+  if (dcBtn) dcBtn.disabled = !state.connected
 
   updatePlayingButtons()
   updateVolumeUI()
 
   document.getElementById('np-title').textContent = state.current ? state.current.title : 'Nada reproduciéndose'
+  updateNpArt()
   document.getElementById('btn-toggle').textContent = state.paused ? '▶' : '⏸'
   document.getElementById('t-elapsed').textContent = state.current ? fmt(state.elapsed) : '0:00'
   document.getElementById('t-total').textContent = state.current ? fmt(state.current.duration) : '–'
@@ -283,18 +668,36 @@ function render() {
   // No reconstruir la lista mientras se está arrastrando un elemento
   if (dragIndex === null) {
     const list = document.getElementById('queue-list')
-    if (state.queue.length === 0) {
-      list.innerHTML = '<li class="empty">La cola está vacía</li>'
-    } else {
-      list.innerHTML = state.queue.map((item, i) => `
-        <li class="queue-item" draggable="true" data-index="${i}">
-          <span class="grip" title="Arrastra para reordenar">☰</span>
-          <span class="num">${i + 1}.</span>
-          <span class="title" title="${esc(item.url)}">${esc(item.title)}</span>
-          <span class="num">${fmt(item.duration)}</span>
-          <button class="del" onclick="api('/api/queue/remove',{index:${i}})" title="Quitar">✕</button>
-        </li>`).join('')
+    const played = state.played || []
+    const rows = []
+    // 1) Reproducidas (en gris, no se quitan; ↻ para re-agregar)
+    for (const item of played) {
+      rows.push(`<li class="track-played">
+        <span class="status-ico" title="Ya reproducida">✓</span>
+        <span class="title" title="${esc(item.url)}">${esc(item.title)}</span>
+        <span class="num">${fmt(item.duration)}</span>
+        <button class="re-add" data-url="${esc(item.url)}" title="Volver a agregar a la cola">↻</button>
+      </li>`)
     }
+    // 2) Sonando ahora (resaltada)
+    if (state.current) {
+      rows.push(`<li class="track-current">
+        <span class="status-ico" title="Sonando">▶</span>
+        <span class="title" title="${esc(state.current.url)}">${esc(state.current.title)}</span>
+        <span class="num">${fmt(state.current.duration)}</span>
+      </li>`)
+    }
+    // 3) Próximas (arrastrables / quitables, por índice de la cola)
+    state.queue.forEach((item, i) => {
+      rows.push(`<li class="queue-item" draggable="true" data-index="${i}">
+        <span class="grip" title="Arrastra para reordenar">☰</span>
+        <span class="num">${i + 1}.</span>
+        <span class="title" title="${esc(item.url)}">${esc(item.title)}</span>
+        <span class="num">${fmt(item.duration)}</span>
+        <button class="del" onclick="api('/api/queue/remove',{index:${i}})" title="Quitar">✕</button>
+      </li>`)
+    })
+    list.innerHTML = rows.length ? rows.join('') : '<li class="empty">La cola está vacía</li>'
   }
 }
 
@@ -336,6 +739,12 @@ queueList.addEventListener('drop', async (e) => {
 })
 
 queueList.addEventListener('dragend', endDrag)
+
+// Re-agregar a la cola una canción ya reproducida (botón ↻)
+queueList.addEventListener('click', (e) => {
+  const btn = e.target.closest('.re-add')
+  if (btn) api('/api/play', { url: btn.dataset.url })
+})
 
 function esc(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
@@ -493,10 +902,286 @@ document.getElementById('sound-grid').addEventListener('click', async (e) => {
   }
 })
 
+// ── Gestión de caché de música ──
+function fmtBytes(n) {
+  if (!n) return '–'
+  const u = ['B', 'KB', 'MB', 'GB']; let i = 0; n = Number(n)
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++ }
+  return n.toFixed(n < 10 && i > 0 ? 1 : 0) + ' ' + u[i]
+}
+function fmtDate(ts) { return ts ? new Date(Number(ts)).toLocaleString('es') : '–' }
+
+let musicSongs = [] // última lista cargada, para resolver acciones por id
+
+async function loadMusic() {
+  const cacheBox = document.getElementById('cache-list')
+  if (!me) {
+    cacheBox.innerHTML = '<p class="empty">Inicia sesión con Discord.</p>'
+    renderLibrary()
+    return
+  }
+  try {
+    const res = await webFetch('/api/music')
+    if (!res.ok) { cacheBox.innerHTML = '<p class="empty">No se pudo cargar.</p>'; return }
+    musicSongs = await res.json()
+    renderMusicList(musicSongs)   // pestaña 💾 Caché (solo admin)
+    renderLibrary()               // Música › Biblioteca (todos)
+  } catch { cacheBox.innerHTML = '<p class="empty">No se pudo cargar.</p>' }
+}
+
+// Biblioteca unificada: lista única de canciones para agregar a la cola.
+// No distingue caché/historial (la caché es interna, solo del admin).
+function renderLibrary() {
+  const box = document.getElementById('library-list')
+  if (!box) return
+  const q = norm(document.getElementById('library-search').value)
+  let list = musicSongs
+  if (q) {
+    const tokens = q.split(' ')
+    list = list.filter(s => {
+      const hay = norm((s.title || '') + ' ' + (s.artist || '') + ' ' + (s.source_url || ''))
+      return tokens.every(t => hay.includes(t))
+    })
+  }
+  if (!list.length) {
+    box.innerHTML = `<p class="empty">${q ? 'Sin resultados' : 'No hay canciones todavía. Reproduce alguna y aparecerá aquí.'}</p>`
+    return
+  }
+  box.innerHTML = list.map(s => {
+    const sub = [s.artist ? esc(s.artist) : null, s.duration_ms ? fmt(s.duration_ms / 1000) : null].filter(Boolean).join(' · ')
+    const thumb = s.art_key
+      ? `<span class="lib-thumb"><img src="${esc(webUrl('/art/' + s.id))}" alt="" onerror="this.remove()"></span>`
+      : `<span class="lib-thumb"></span>`
+    return `<div class="lib-item">
+      ${thumb}
+      <span class="title" title="${esc(s.title || s.source_url)}">${esc(s.title || '(sin título)')}${sub ? ` <span class="num">— ${sub}</span>` : ''}</span>
+      <button onclick="queueSong(${s.id})" title="Agregar a la cola">➕ Agregar a la cola</button>
+    </div>`
+  }).join('')
+}
+
+async function queueSong(id) {
+  const data = await api('/api/music/play', { id })
+  if (data && data.ok) toast('Agregada a la cola ✓')
+}
+
+document.getElementById('library-search').addEventListener('input', renderLibrary)
+
+// ── Canales de voz ──
+async function loadVoiceChannels() {
+  const box = document.getElementById('voice-list')
+  if (!box) return
+  // Solo admin: el selector de canal de voz está oculto para el resto.
+  if (me && !(me.roles || []).includes('admin')) return
+  try {
+    const res = await fetch('/api/voice-channels')
+    if (!res.ok) { box.innerHTML = '<p class="empty">No se pudo cargar los canales.</p>'; return }
+    renderVoiceChannels(await res.json())
+  } catch { box.innerHTML = '<p class="empty">No se pudo cargar los canales.</p>' }
+}
+
+function renderVoiceChannels(guilds) {
+  const box = document.getElementById('voice-list')
+  const multi = guilds.length > 1
+  const parts = []
+  let total = 0
+  for (const g of guilds) {
+    if (!g.channels.length) continue
+    if (multi) parts.push(`<div class="vc-guild">${esc(g.guildName)}</div>`)
+    for (const ch of g.channels) {
+      total++
+      const membersHtml = ch.members.length
+        ? `<div class="vc-members">${ch.members.map(m =>
+            `<span class="who${m.bot ? ' bot' : ''}">${m.avatar ? `<img src="${esc(m.avatar)}" alt="">` : ''}${esc(m.name)}</span>`
+          ).join('')}</div>`
+        : `<div class="vc-empty-members">vacío</div>`
+      const btn = ch.botHere
+        ? `<button class="vc-join here" disabled>✓ Aquí</button>`
+        : `<button class="vc-join" onclick="joinChannel('${ch.id}')">Entrar</button>`
+      parts.push(`<div class="vc-item${ch.botHere ? ' here' : ''}">
+        <div class="vc-main">
+          <div class="vc-name">🔊 ${esc(ch.name)}</div>
+          ${membersHtml}
+        </div>
+        ${btn}
+      </div>`)
+    }
+  }
+  box.innerHTML = total ? parts.join('') : '<p class="empty">No hay canales de voz.</p>'
+}
+
+async function joinChannel(id) {
+  const data = await api('/api/voice/join', { channelId: id })
+  if (data && data.ok) toast('Entrando a ' + (data.channel || 'el canal') + ' ✓')
+  loadVoiceChannels()
+}
+
+async function disconnectVoice() {
+  await api('/api/disconnect', {})
+  loadVoiceChannels()
+}
+
+// Contraer/expandir el selector de canal de voz (como un spoiler). Se recuerda.
+function toggleVoicePanel() {
+  const p = document.getElementById('voice-panel')
+  const collapsed = p.classList.toggle('collapsed')
+  localStorage.setItem('voiceCollapsed', collapsed ? '1' : '0')
+}
+if (localStorage.getItem('voiceCollapsed') === '1') {
+  document.getElementById('voice-panel').classList.add('collapsed')
+}
+
+function renderMusicList(songs) {
+  musicSongs = songs
+  const box = document.getElementById('cache-list')
+  const isAdmin = me && (me.roles || []).includes('admin')
+  if (!songs.length) { box.innerHTML = '<p class="empty">No hay canciones en la caché todavía.</p>'; return }
+  box.innerHTML = songs.map(s => {
+    const isUpload = String(s.source_url).startsWith('upload:')
+    const badges = [
+      s.cached ? '<span class="badge cached">en caché</span>' : '',
+      s.persisted ? '<span class="badge store">respaldada</span>' : '',
+      s.permanent ? '<span class="badge perm">📌 permanente</span>' : '',
+    ].join('')
+    const meta = [
+      s.artist ? esc(s.artist) : null,
+      s.duration_ms ? fmt(s.duration_ms / 1000) : null,
+      `${s.play_count} repr.`,
+      s.cached ? 'caché ' + fmtBytes(s.cache_size) : null,
+      s.last_played_at ? 'última: ' + fmtDate(s.last_played_at) : 'sin reproducir',
+    ].filter(Boolean).join(' · ')
+    const actions = [
+      `<button onclick="playSong(${s.id})">▶ Reproducir</button>`,
+      (!s.cached && !isUpload) ? `<button onclick="forceCacheId(${s.id})">⬇️ Forzar caché</button>` : '',
+      (isAdmin && !isUpload) ? `<button onclick="renameSong(${s.id})">✏️ Renombrar</button>` : '',
+      isAdmin ? `<button onclick="togglePermanent(${s.id},${s.permanent ? 0 : 1})">${s.permanent ? 'Quitar 📌' : 'Hacer 📌'}</button>` : '',
+      isAdmin ? `<button class="danger" onclick="deleteSong(${s.id})">🗑 Eliminar</button>` : '',
+    ].join('')
+    return `<div class="song-card">
+      <div class="song-head">
+        <span class="song-title" title="${esc(s.title || s.source_url)}">${esc(s.title || '(sin título)')}</span>
+        <span class="song-badges">${badges}</span>
+      </div>
+      <div class="song-meta">${meta}</div>
+      <div class="song-meta">${isUpload ? '📁 archivo subido' : esc(s.source_url)}</div>
+      <div class="song-actions">${actions}</div>
+    </div>`
+  }).join('')
+}
+
+async function forceCacheUrl() {
+  const inp = document.getElementById('cache-url')
+  const url = inp.value.trim()
+  if (!url) return
+  inp.value = ''
+  toast('Descargando a caché...')
+  try {
+    const res = await fetch('/api/music/cache', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }),
+    })
+    const data = await res.json().catch(() => null)
+    if (!res.ok) { toast(data && data.error ? data.error : 'Error'); return }
+    toast('En caché ✓')
+    loadMusic()
+  } catch { toast('No se pudo contactar al bot') }
+}
+
+function forceCacheId(id) {
+  const s = musicSongs.find(x => x.id === id)
+  if (!s) return
+  document.getElementById('cache-url').value = s.source_url
+  forceCacheUrl()
+}
+
+async function renameSong(id) {
+  const s = musicSongs.find(x => x.id === id)
+  const title = (prompt('Nuevo nombre de la canción:', (s && s.title) || '') || '').trim()
+  if (!title || (s && title === s.title)) return
+  try {
+    const res = await webFetch('/api/music/' + id + '/rename', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title }),
+    })
+    if (!res.ok) { const d = await res.json().catch(() => null); toast(d && d.error ? d.error : 'Error'); return }
+    toast('Renombrada ✓')
+    loadMusic()
+  } catch { toast('Error') }
+}
+
+async function playSong(id) {
+  const data = await api('/api/music/play', { id })
+  if (data && data.ok) toast('Agregado a la cola ✓')
+}
+
+async function togglePermanent(id, val) {
+  try {
+    const res = await webFetch('/api/music/' + id + '/permanent', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ permanent: !!val }),
+    })
+    if (!res.ok) { const d = await res.json().catch(() => null); toast(d && d.error ? d.error : 'Error'); return }
+    loadMusic()
+  } catch { toast('Error') }
+}
+
+async function deleteSong(id) {
+  if (!confirm('¿Eliminar esta canción de la caché y del respaldo?')) return
+  try {
+    const res = await webFetch('/api/music/' + id, { method: 'DELETE' })
+    if (!res.ok) { const d = await res.json().catch(() => null); toast(d && d.error ? d.error : 'Error'); return }
+    toast('Eliminada ✓')
+    loadMusic()
+  } catch { toast('Error') }
+}
+
+// Modal: subir canción permanente
+function openSongModal() {
+  if (!me) { toast('Inicia sesión con Discord para subir canciones'); return }
+  if (!(me.roles || []).includes('admin')) { toast('Solo un admin puede subir canciones permanentes'); return }
+  document.getElementById('song-modal').style.display = 'flex'
+  document.getElementById('song-title').focus()
+}
+function closeSongModal() {
+  document.getElementById('song-modal').style.display = 'none'
+  document.getElementById('song-form').reset()
+}
+document.getElementById('btn-upload-song').addEventListener('click', openSongModal)
+document.getElementById('song-cancel').addEventListener('click', closeSongModal)
+document.getElementById('song-modal').addEventListener('click', (e) => {
+  if (e.target.id === 'song-modal') closeSongModal()
+})
+document.getElementById('song-form').addEventListener('submit', async (e) => {
+  e.preventDefault()
+  const file = document.getElementById('song-file').files[0]
+  const title = document.getElementById('song-title').value.trim()
+  const artist = document.getElementById('song-artist').value.trim()
+  if (!file || !title) { toast('Falta el archivo o el título'); return }
+  const ext = (file.name.split('.').pop() || '').toLowerCase()
+  const btn = document.getElementById('song-submit')
+  btn.disabled = true; btn.textContent = 'Subiendo...'
+  try {
+    const buf = await file.arrayBuffer()
+    const qs = new URLSearchParams({ title, artist, ext })
+    const res = await webFetch('/api/music/upload?' + qs, {
+      method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: buf,
+    })
+    const data = await res.json().catch(() => null)
+    if (!res.ok) { toast(data && data.error ? data.error : 'Error al subir'); return }
+    toast('Canción subida ✓')
+    closeSongModal()
+    loadMusic()
+  } catch {
+    toast('No se pudo subir la canción')
+  } finally {
+    btn.disabled = false; btn.textContent = 'Subir'
+  }
+})
+
 refresh()
+loadMe()
 loadSounds()
+loadVoiceChannels()
 setInterval(refresh, 1000)
 setInterval(loadSounds, 5000)
+setInterval(loadVoiceChannels, 5000)
 </script>
 </body>
 </html>

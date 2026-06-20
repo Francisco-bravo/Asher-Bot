@@ -10,7 +10,7 @@
 //    a IPs de datacenter)
 import {
   Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle,
-  StringSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle
+  StringSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ChannelType
 } from 'discord.js'
 import {
   joinVoiceChannel, createAudioPlayer, createAudioResource,
@@ -19,9 +19,9 @@ import {
 import { spawn } from 'node:child_process'
 import {
   readdirSync, existsSync, mkdirSync, readFileSync, writeFileSync,
-  createWriteStream, chmodSync
+  createWriteStream, chmodSync, renameSync
 } from 'node:fs'
-import { join, extname, dirname } from 'node:path'
+import { join, extname, dirname, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { pipeline } from 'node:stream/promises'
 import { Readable } from 'node:stream'
@@ -30,6 +30,10 @@ import ffmpegStatic from 'ffmpeg-static'
 import { getDb } from './lib/db.mjs'
 import * as soundLib from './lib/sounds.mjs'
 import * as playHistory from './lib/history.mjs'
+import * as auth from './lib/auth.mjs'
+import * as rbac from './lib/rbac.mjs'
+import * as musicCache from './lib/music-cache.mjs'
+import * as art from './lib/art.mjs'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const IS_WIN = process.platform === 'win32'
@@ -51,6 +55,12 @@ const PANEL_HTML = join(ROOT, 'panel.html')
 const SETTINGS_FILE = join(ROOT, 'settings.json')
 const PORT = Number(process.env.PANEL_PORT || process.env.PORT || 8765)
 const PANEL_PASSWORD = process.env.PANEL_PASSWORD || ''
+// Login compartido con la capa web (web.mjs). El panel valida la cookie de
+// sesión `sid` contra la misma DB; si no hay sesión, redirige al login OAuth
+// de la web y ésta vuelve al panel. WEB_URL es la web vista desde el navegador
+// y PANEL_URL es a dónde debe volver la web tras el login.
+const WEB_URL = (process.env.WEB_URL || 'http://localhost:8770').replace(/\/$/, '')
+const PANEL_URL = (process.env.PANEL_URL || `http://localhost:${PORT}`).replace(/\/$/, '')
 const SOUND_EXTS = new Set(['.mp3', '.wav', '.ogg', '.m4a', '.flac', '.webm'])
 const MUSIC_DUCK = 0.35 // volumen de la música mientras suena un efecto
 const MAX_QUEUE = 100
@@ -289,6 +299,98 @@ function waitIdle(player) {
   })
 }
 
+// ── Caché de música (lib/music-cache) ──────────────────────────────────────
+// Lee un único campo de metadatos con yt-dlp (resuelve búsquedas a URL real).
+function ytdlpPrint(url, field) {
+  return new Promise(resolve => {
+    const proc = spawn(YTDLP, ytdlpArgs(['--skip-download', '--print', `%(${field})s`, url]))
+    let out = ''
+    proc.stdout.on('data', d => out += d)
+    proc.on('error', () => resolve(null))
+    proc.on('close', () => resolve(out.trim() || null))
+  })
+}
+
+// URL canónica para indexar la caché: las URLs directas se usan tal cual; las
+// búsquedas (ytsearch1: de nombre/Spotify/Apple) se resuelven al video real.
+// Si ya es una clave conocida (p.ej. una canción subida), se usa directo.
+async function resolveSource(item) {
+  if (/^https?:\/\//i.test(item.url)) return item.url
+  if (musicCache.findByUrl(item.url)) return item.url
+  return (await ytdlpPrint(item.url, 'webpage_url')) || item.url
+}
+
+// Descarga el audio a un archivo exacto (destPath). yt-dlp escribe con su propia
+// extensión, así que bajamos a destPath.<ext> y renombramos a destPath.
+function downloadToFile(url, destPath) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(YTDLP, ytdlpArgs(['-f', 'bestaudio/best', '-o', `${destPath}.%(ext)s`, url]))
+    let err = ''
+    proc.stderr.on('data', d => err += d)
+    proc.on('error', reject)
+    proc.on('close', code => {
+      if (code !== 0) return reject(new Error(`yt-dlp salió con código ${code}: ${err.trim()}`))
+      const dir = dirname(destPath)
+      const prefix = basename(destPath) + '.'
+      const produced = readdirSync(dir).find(f => f.startsWith(prefix))
+      if (!produced) return reject(new Error('yt-dlp no produjo ningún archivo'))
+      renameSync(join(dir, produced), destPath)
+      resolve()
+    })
+  })
+}
+
+// Obtiene la carátula con yt-dlp y la guarda con la misma lógica del caché:
+// se baja una sola vez y queda persistida en el object-store (art_key). Si ya
+// está guardada, no hace nada. Best-effort: nunca rompe la reproducción.
+async function ensureSongArt(song, sourceUrl) {
+  if (!song || song.art_key) return
+  try {
+    const thumb = await ytdlpPrint(sourceUrl, 'thumbnail')
+    if (!thumb || !/^https?:\/\//i.test(thumb)) return
+    const res = await fetch(thumb)
+    if (!res.ok) return
+    const buf = Buffer.from(await res.arrayBuffer())
+    if (!buf.length) return
+    let ext = (thumb.split(/[?#]/)[0].split('.').pop() || '').toLowerCase()
+    if (!/^(jpg|jpeg|png|webp|gif)$/.test(ext)) ext = 'jpg'
+    await art.store(song.id, buf, ext)
+    song.art_key = `art/${song.id}.${ext}`
+  } catch { /* sin carátula: no pasa nada */ }
+}
+
+// Devuelve la ruta local del audio, usando/poblando la caché de music-cache.
+async function prepareCachedAudio(item) {
+  const sourceUrl = await resolveSource(item)
+  const song = musicCache.findByUrl(sourceUrl)
+    || musicCache.upsertSong({ sourceUrl, title: item.title })
+  item.songId = song.id
+  ensureSongArt(song, sourceUrl) // en segundo plano, no bloquea la reproducción
+  return musicCache.getLocalAudio(song, destPath => downloadToFile(sourceUrl, destPath))
+}
+
+// Descarga a la caché SIN reproducir ni contar reproducción ("forzar caché").
+async function forceCacheAudio(item) {
+  const sourceUrl = await resolveSource(item)
+  const song = musicCache.findByUrl(sourceUrl)
+    || musicCache.upsertSong({ sourceUrl, title: item.title })
+  await musicCache.ensureCached(song, destPath => downloadToFile(sourceUrl, destPath))
+  await ensureSongArt(song, sourceUrl) // al forzar caché, también traemos la carátula
+  return song
+}
+
+// Reproduce desde un archivo local ya descargado (el seek es seek de archivo).
+function startFileStream(filePath, seekSec) {
+  const args = ['-loglevel', 'error']
+  if (seekSec > 0) args.push('-ss', String(seekSec))
+  args.push('-i', filePath, '-vn', '-ar', '48000', '-ac', '2', '-f', 's16le', 'pipe:1')
+  const ff = spawn(FFMPEG, args)
+  ff.on('error', err => console.error('ffmpeg:', err.message))
+  ff.stderr.on('data', d => process.stderr.write(d))
+  activeProcs = [ff]
+  return ff.stdout
+}
+
 // ── Conexión de voz ───────────────────────────────────────────────────────
 async function ensureConnection(voiceChannelId, guildId) {
   if (connection && currentChannelId === voiceChannelId) return
@@ -324,23 +426,6 @@ function destroyConnection() {
   }
 }
 
-async function findActiveVoiceChannel() {
-  // Usar voiceStates (no channel.members): los miembros que ya estaban en voz
-  // antes de que el bot arrancara no están en la caché de miembros.
-  for (const guild of client.guilds.cache.values()) {
-    const counts = new Map()
-    for (const vs of guild.voiceStates.cache.values()) {
-      if (!vs.channelId || vs.id === client.user.id) continue
-      if (vs.member?.user?.bot) continue
-      counts.set(vs.channelId, (counts.get(vs.channelId) || 0) + 1)
-    }
-    let bestId = null, bestN = 0
-    for (const [id, n] of counts) if (n > bestN) { bestId = id; bestN = n }
-    if (bestId) return await client.channels.fetch(bestId)
-  }
-  return null
-}
-
 // ── Motor de reproducción ─────────────────────────────────────────────────
 async function ensurePlaying() {
   if (playing) return
@@ -363,7 +448,14 @@ async function ensurePlaying() {
       seekOffset = seekTarget
       seekTarget = 0
       console.log(`Reproduciendo: ${current.title || current.url}${seekOffset ? ` (desde ${seekOffset}s)` : ''}`)
-      const stream = startStream(current, seekOffset)
+      let stream
+      try {
+        const filePath = await prepareCachedAudio(current)
+        stream = startFileStream(filePath, seekOffset)
+      } catch (err) {
+        console.warn('Caché de música no disponible, streaming directo:', err.message)
+        stream = startStream(current, seekOffset)
+      }
       currentMixer = new MixerStream(stream, () => currentResource ? currentResource.playbackDuration : 0)
       currentResource = createAudioResource(currentMixer, { inputType: StreamType.Raw })
       musicPlayer.play(currentResource)
@@ -390,6 +482,10 @@ async function ensurePlaying() {
       } else if (t === 'seek') {
         // current se mantiene, seekTarget ya viene seteado
       } else if (t === 'stop') {
+        // Stop: la canción se trata como terminada (pasa a reproducidas), pero
+        // NO se avanza a la siguiente. El bot queda detenido sin desconectarse.
+        history.push(current)
+        if (history.length > MAX_HISTORY) history.shift()
         current = null
         break
       }
@@ -398,7 +494,8 @@ async function ensurePlaying() {
     playing = false
     currentResource = null
     currentMixer = null
-    if (!current && queue.length === 0 && soundActive === 0) destroyConnection()
+    // El bot NO se desconecta solo al quedar inactivo: permanece en el canal
+    // hasta que alguien use el botón Desconectar.
     updatePanel()
   }
 }
@@ -516,13 +613,13 @@ function cmdResume() {
 }
 
 function cmdStop() {
-  queue.length = 0
-  if (current) {
-    transition = 'stop'
-    musicPlayer.stop()
-  } else if (soundActive === 0) {
-    destroyConnection()
-  }
+  // Detiene la canción actual como si hubiera terminado (pasa a reproducidas);
+  // NO inicia la siguiente, NO borra la cola y NO se desconecta. El bot queda
+  // detenido en el canal hasta que alguien reproduzca o agregue una canción.
+  if (!current) return false
+  transition = 'stop'
+  musicPlayer.stop()
+  return true
 }
 
 // ── Panel de control en el chat de Discord ────────────────────────────────
@@ -810,12 +907,9 @@ async function playSound(soundId) {
     return id
   }
 
-  // Sin música: reproducir directo
-  if (!connection) {
-    const ch = await findActiveVoiceChannel()
-    if (!ch) throw new Error('No hay nadie en un canal de voz')
-    await ensureConnection(ch.id, ch.guild.id)
-  }
+  // Sin música: reproducir directo. Requiere que el bot YA esté en un canal;
+  // no se conecta solo a ningún canal de voz.
+  if (!connection) throw new Error('El bot no está en un canal de voz')
 
   finishDirectSound() // si había otro sonido directo, limpiarlo: play() lo reemplaza sin pasar por Idle
   soundActive = 1
@@ -924,7 +1018,7 @@ client.on('messageCreate', async (message) => {
 
   if (content === '!stop') {
     cmdStop()
-    await message.reply('Reproducción detenida y cola vaciada.')
+    await message.reply('Reproducción detenida. Reproduce o agrega una canción para continuar.')
     return
   }
 
@@ -944,10 +1038,13 @@ client.on('messageCreate', async (message) => {
 // ── Servidor HTTP del panel ───────────────────────────────────────────────
 function getState() {
   return {
-    current: current ? { url: current.url, title: current.title, duration: current.duration } : null,
+    current: current ? { url: current.url, title: current.title, duration: current.duration, songId: current.songId ?? null } : null,
     elapsed: elapsed(),
     paused: musicPlayer.state.status === AudioPlayerStatus.Paused,
     queue: queue.map(i => ({ url: i.url, title: i.title, duration: i.duration })),
+    // Reproducidas recientes (en memoria), de más antigua a más reciente,
+    // para mostrarlas en gris en la cola sin que desaparezcan.
+    played: history.slice(-20).map(i => ({ url: i.url, title: i.title, duration: i.duration })),
     historyCount: history.length,
     connected: !!connection,
     voiceChannel: currentChannelName,
@@ -956,8 +1053,30 @@ function getState() {
   }
 }
 
-function authorized(req) {
-  if (!PANEL_PASSWORD) return true
+function parseCookies(req) {
+  const out = {}
+  for (const part of (req.headers.cookie || '').split(';')) {
+    const i = part.indexOf('=')
+    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim())
+  }
+  return out
+}
+
+// Usuario del panel a partir de la cookie de sesión compartida con la web.
+function panelUser(req) {
+  const token = parseCookies(req).sid
+  return token ? auth.getSession(token) : null
+}
+
+// ¿El usuario del panel es administrador? (controles de canal de voz solo-admin)
+function isPanelAdmin(req) {
+  const u = panelUser(req)
+  return !!(u && rbac.isAdmin(u.id))
+}
+
+// Fallback legado: HTTP Basic con PANEL_PASSWORD (solo si está configurada).
+function authorizedByPassword(req) {
+  if (!PANEL_PASSWORD) return false
   const h = req.headers.authorization || ''
   if (!h.startsWith('Basic ')) return false
   const decoded = Buffer.from(h.slice(6), 'base64').toString()
@@ -978,26 +1097,81 @@ function readBody(req) {
   })
 }
 
+// Canal de voz objetivo SOLO si el bot ya está en un canal. No se mete solo a
+// ningún canal: las acciones del panel exigen que el bot ya esté conectado.
+function currentVoiceTarget() {
+  if (current) return { vcId: current.voiceChannelId, gId: current.guildId }
+  if (connection) return { vcId: currentChannelId, gId: connection.joinConfig.guildId }
+  return null
+}
+
+// Lista los canales de voz de cada servidor con los usuarios que hay dentro,
+// para que el panel deje elegir a cuál entrar.
+function listVoiceChannels() {
+  const out = []
+  for (const guild of client.guilds.cache.values()) {
+    const channels = []
+    for (const ch of guild.channels.cache.values()) {
+      if (ch.type !== ChannelType.GuildVoice && ch.type !== ChannelType.GuildStageVoice) continue
+      const members = []
+      for (const vs of guild.voiceStates.cache.values()) {
+        if (vs.channelId !== ch.id) continue
+        const m = vs.member
+        members.push({
+          id: vs.id,
+          name: m?.displayName || m?.user?.username || 'usuario',
+          bot: !!m?.user?.bot,
+          avatar: m?.user?.displayAvatarURL?.({ size: 32, extension: 'png' }) || null,
+        })
+      }
+      channels.push({
+        id: ch.id, name: ch.name, position: ch.rawPosition ?? 0,
+        members, botHere: currentChannelId === ch.id,
+      })
+    }
+    channels.sort((a, b) => a.position - b.position)
+    out.push({ guildId: guild.id, guildName: guild.name, channels })
+  }
+  return out
+}
+
 http.createServer(async (req, res) => {
   const sendJson = (data, status = 200) => {
     res.writeHead(status, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify(data))
   }
-  if (!authorized(req)) {
-    res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="Panel del bot"' })
-    res.end('Contraseña requerida')
+  const path = new URL(req.url, 'http://x').pathname
+  // Autenticación: sesión compartida con la web; contraseña como respaldo.
+  if (!panelUser(req) && !authorizedByPassword(req)) {
+    // Si piden la página del panel sin sesión, mándalos al login de la web,
+    // que tras autenticar OAuth vuelve a este panel.
+    if (req.method === 'GET' && path === '/') {
+      const ret = encodeURIComponent(PANEL_URL + '/')
+      res.writeHead(302, { Location: `${WEB_URL}/auth/login?return=${ret}` })
+      res.end()
+      return
+    }
+    res.writeHead(401, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: 'No autenticado' }))
     return
   }
-  const path = new URL(req.url, 'http://x').pathname
   try {
     if (req.method === 'GET') {
       if (path === '/') {
+        // Inyecta la URL de web.mjs para que el panel sepa a dónde mandar el
+        // login/uploads y los endpoints de música sin hardcodearla en el HTML.
+        const html = readFileSync(PANEL_HTML, 'utf8')
+          .replace('</head>', `<script>window.WEB_BASE=${JSON.stringify(WEB_URL)}</script>\n</head>`)
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
-        res.end(readFileSync(PANEL_HTML))
+        res.end(html)
         return
       }
       if (path === '/api/state') return sendJson(getState())
       if (path === '/api/sounds') return sendJson(soundLib.tree(soundLib.listForUser(null)))
+      if (path === '/api/voice-channels') {
+        if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)
+        return sendJson(listVoiceChannels())
+      }
     }
     if (req.method === 'POST') {
       const body = await readBody(req)
@@ -1005,15 +1179,23 @@ http.createServer(async (req, res) => {
         case '/api/play': {
           if (!body.url) return sendJson({ error: 'Falta la URL' }, 400)
           const resolved = await resolveInput(body.url)
-          let vcId, gId
-          if (current) { vcId = current.voiceChannelId; gId = current.guildId }
-          else if (connection) { vcId = currentChannelId; gId = connection.joinConfig.guildId }
-          else {
-            const ch = await findActiveVoiceChannel()
-            if (!ch) return sendJson({ error: 'No hay nadie en un canal de voz' }, 400)
-            vcId = ch.id; gId = ch.guild.id
-          }
-          const r = addToQueue(resolved.url, vcId, gId, null, resolved.title)
+          const t = currentVoiceTarget()
+          if (!t) return sendJson({ error: 'El bot no está en un canal de voz' }, 400)
+          const r = addToQueue(resolved.url, t.vcId, t.gId, null, resolved.title)
+          return sendJson({ ok: true, ...r })
+        }
+        case '/api/music/cache': {
+          if (!body.url) return sendJson({ error: 'Falta la URL' }, 400)
+          const resolved = await resolveInput(body.url)
+          const song = await forceCacheAudio({ url: resolved.url, title: resolved.title })
+          return sendJson({ ok: true, id: song.id, title: song.title })
+        }
+        case '/api/music/play': {
+          const song = musicCache.getById(body.id)
+          if (!song) return sendJson({ error: 'Canción no encontrada' }, 404)
+          const t = currentVoiceTarget()
+          if (!t) return sendJson({ error: 'El bot no está en un canal de voz' }, 400)
+          const r = addToQueue(song.source_url, t.vcId, t.gId, null, song.title || song.source_url)
           return sendJson({ ok: true, ...r })
         }
         case '/api/skip': return sendJson({ ok: cmdSkip() })
@@ -1058,9 +1240,25 @@ http.createServer(async (req, res) => {
         case '/api/sound/stop': return sendJson({ ok: cmdStopSound(body.id) })
         case '/api/sound/volume': return sendJson({ ok: cmdSoundVolume(body.volume) })
         case '/api/disconnect': {
+          if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)
           cmdStop()
+          queue.length = 0   // al desconectar sí se vacía la cola (reset completo)
           destroyConnection()
           return sendJson({ ok: true })
+        }
+        case '/api/voice/join': {
+          if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador puede mover el bot de canal' }, 403)
+          if (!body.channelId) return sendJson({ error: 'Falta el canal' }, 400)
+          const ch = await client.channels.fetch(body.channelId).catch(() => null)
+          if (!ch || (ch.type !== ChannelType.GuildVoice && ch.type !== ChannelType.GuildStageVoice))
+            return sendJson({ error: 'Canal de voz no válido' }, 400)
+          try {
+            await ensureConnection(ch.id, ch.guild.id)
+            updatePanel()
+            return sendJson({ ok: true, channel: ch.name })
+          } catch (err) {
+            return sendJson({ error: err.message }, 500)
+          }
         }
       }
     }

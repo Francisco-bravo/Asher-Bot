@@ -18,13 +18,17 @@ const sounds = await import('./lib/sounds.mjs')
 const playlists = await import('./lib/playlists.mjs')
 const playHistory = await import('./lib/history.mjs')
 const music = await import('./lib/music-cache.mjs')
+const { getStore } = await import('./lib/storage/index.mjs')
 
 const PORT = Number(process.env.WEB_PORT || 8770)
+const ART_MIME = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif' }
 const CLIENT_ID = process.env.DISCORD_CLIENT_ID
 const CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET
 const REDIRECT_URI = process.env.DISCORD_REDIRECT_URI || `http://localhost:${PORT}/auth/callback`
 const SOUND_EXTS = new Set(['mp3', 'wav', 'ogg', 'm4a', 'flac', 'webm'])
 const MAX_UPLOAD = 10 * 1024 * 1024 // 10 MB por sonido
+const MUSIC_EXTS = new Set(['mp3', 'wav', 'ogg', 'm4a', 'flac', 'webm', 'opus'])
+const MAX_MUSIC = 50 * 1024 * 1024 // 50 MB por canción
 
 getDb() // dispara migraciones
 
@@ -71,18 +75,23 @@ function currentUser(req) {
 }
 
 // ── OAuth de Discord ────────────────────────────────────────────────────────
-function authLoginRedirect(res) {
+// Solo se permite volver a hosts locales conocidos (evita open redirect).
+const SAFE_RETURN = /^https?:\/\/(localhost|127\.0\.0\.1):\d+(\/|$)/
+function authLoginRedirect(req, res, url) {
   if (!CLIENT_ID) return send(res, 500, { error: 'Falta DISCORD_CLIENT_ID en el entorno' })
   const state = randomBytes(16).toString('hex')
   setCookie(res, 'oauth_state', state, { maxAge: 600 })
-  const url = 'https://discord.com/oauth2/authorize?' + new URLSearchParams({
+  // Guarda a dónde volver tras el login (p.ej. el panel del bot en otro puerto).
+  const ret = url.searchParams.get('return')
+  if (ret && SAFE_RETURN.test(ret)) setCookie(res, 'oauth_return', ret, { maxAge: 600 })
+  const authUrl = 'https://discord.com/oauth2/authorize?' + new URLSearchParams({
     response_type: 'code',
     client_id: CLIENT_ID,
     scope: 'identify',
     state,
     redirect_uri: REDIRECT_URI,
   })
-  res.writeHead(302, { Location: url })
+  res.writeHead(302, { Location: authUrl })
   res.end()
 }
 
@@ -131,7 +140,11 @@ async function authCallback(req, res, url) {
   const token = auth.createSession(user.id)
   setCookie(res, 'sid', token, { maxAge: 30 * 24 * 60 * 60 })
   setCookie(res, 'oauth_state', '', { clear: true })
-  res.writeHead(302, { Location: '/' })
+  // Vuelve al destino guardado (panel del bot) si es seguro; si no, a la home.
+  const ret = cookies.oauth_return
+  const dest = ret && SAFE_RETURN.test(ret) ? ret : '/'
+  setCookie(res, 'oauth_return', '', { clear: true })
+  res.writeHead(302, { Location: dest })
   res.end()
 }
 
@@ -168,7 +181,18 @@ http.createServer(async (req, res) => {
   try {
     // Rutas públicas
     if (req.method === 'GET' && path === '/') return landing(res, currentUser(req))
-    if (req.method === 'GET' && path === '/auth/login') return authLoginRedirect(res)
+    // Carátula de una canción (imagen pública, servida desde el object-store).
+    const mArt = path.match(/^\/art\/(\d+)$/)
+    if (mArt && req.method === 'GET') {
+      const song = music.getById(Number(mArt[1]))
+      const store = getStore()
+      if (!song || !song.art_key || !store.exists(song.art_key)) { res.writeHead(404); res.end('Sin carátula'); return }
+      const ext = song.art_key.split('.').pop().toLowerCase()
+      res.writeHead(200, { 'Content-Type': ART_MIME[ext] || 'application/octet-stream', 'Cache-Control': 'public, max-age=86400' })
+      store.getStream(song.art_key).pipe(res)
+      return
+    }
+    if (req.method === 'GET' && path === '/auth/login') return authLoginRedirect(req, res, url)
     if (req.method === 'GET' && path === '/auth/callback') return await authCallback(req, res, url)
     if (req.method === 'POST' && path === '/auth/logout') {
       const token = parseCookies(req).sid
@@ -241,6 +265,51 @@ http.createServer(async (req, res) => {
       if (!pl || pl.owner_user_id !== user.id) return send(res, 404, { error: 'Lista no encontrada' })
       playlists.remove(pl.id)
       return send(res, 200, { ok: true })
+    }
+
+    // ── Música / caché ────────────────────────────────────────────────────
+    if (req.method === 'GET' && path === '/api/music') {
+      return send(res, 200, music.listAll())
+    }
+    // Subir una canción permanente (archivo de audio del usuario). Solo admin.
+    if (req.method === 'POST' && path === '/api/music/upload') {
+      if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un admin puede subir canciones permanentes' })
+      const title = (url.searchParams.get('title') || '').trim()
+      const artist = (url.searchParams.get('artist') || '').trim() || null
+      const ext = (url.searchParams.get('ext') || '').toLowerCase().trim()
+      if (!title) return send(res, 400, { error: 'Falta el título' })
+      if (!MUSIC_EXTS.has(ext)) return send(res, 400, { error: `Extensión no permitida: ${ext}` })
+      const buffer = await readBody(req, MAX_MUSIC)
+      if (!buffer.length) return send(res, 400, { error: 'Cuerpo vacío' })
+      const song = await music.uploadPermanent({ title, artist, ext, buffer })
+      return send(res, 201, { id: song.id, title: song.title })
+    }
+    // Renombrar una canción (editar el título). Solo admin.
+    const mRename = path.match(/^\/api\/music\/(\d+)\/rename$/)
+    if (mRename && req.method === 'POST') {
+      if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un admin' })
+      const body = JSON.parse((await readBody(req)).toString() || '{}')
+      const title = (body.title || '').trim()
+      if (!title) return send(res, 400, { error: 'Falta el título' })
+      const song = music.setTitle(Number(mRename[1]), title)
+      if (!song) return send(res, 404, { error: 'Canción no encontrada' })
+      return send(res, 200, { id: song.id, title: song.title })
+    }
+    // Fijar/desfijar como permanente. Solo admin.
+    const mPerm = path.match(/^\/api\/music\/(\d+)\/permanent$/)
+    if (mPerm && req.method === 'POST') {
+      if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un admin' })
+      const body = JSON.parse((await readBody(req)).toString() || '{}')
+      const song = music.setPermanent(Number(mPerm[1]), !!body.permanent)
+      if (!song) return send(res, 404, { error: 'Canción no encontrada' })
+      return send(res, 200, { id: song.id, permanent: song.permanent })
+    }
+    // Borrar una canción (caché + object-store + fila). Solo admin.
+    const mId = path.match(/^\/api\/music\/(\d+)$/)
+    if (mId && req.method === 'DELETE') {
+      if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un admin' })
+      const ok = await music.removeSong(Number(mId[1]))
+      return send(res, ok ? 200 : 404, ok ? { ok: true } : { error: 'Canción no encontrada' })
     }
 
     send(res, 404, { error: 'No encontrado' })
