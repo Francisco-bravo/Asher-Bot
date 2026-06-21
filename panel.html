@@ -4,6 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Panel del Bot 🎵</title>
+<!-- En Cloudflare Pages, config.js define window.BOT_BASE/WEB_BASE (URLs absolutas
+     del VPS). En dev (panel servido por bot.mjs, mismo origen) este archivo no
+     existe: el 404 es inofensivo y bot.mjs inyecta window.WEB_BASE al servir. -->
+<script src="/config.js"></script>
 <style>
   :root {
     --bg: #1a1b1e; --panel: #2b2d31; --panel2: #313338; --panel3: #3a3c42;
@@ -505,9 +509,14 @@
 <script>
 let state = null
 
-// ── Identidad vía web.mjs (login compartido por cookie) ──
-// bot.mjs inyecta window.WEB_BASE al servir el panel. Los endpoints de música
-// (biblioteca/permanente/subir) viven en web.mjs; los de control, en el bot.
+// ── Bases de API (login compartido por cookie) ──
+// El panel habla con DOS backends: el control en vivo (state/play/sonidos/voz)
+// vive en bot.mjs y los datos/identidad (login, música, uploads, /art) en web.mjs.
+// En dev el panel lo sirve bot.mjs (mismo origen → BOT_BASE vacío y relativo) e
+// inyecta window.WEB_BASE. En Cloudflare Pages, un config.js define ambas bases
+// absolutas (bot-test/web-test.aronne.dev). Por eso TODAS las llamadas llevan
+// credentials:'include' (la cookie de sesión es cross-subdominio).
+const BOT_BASE = (window.BOT_BASE || '').replace(/\/$/, '')
 const WEB_BASE = (window.WEB_BASE || '').replace(/\/$/, '')
 let me = null // perfil del usuario logueado (para saber si es admin)
 
@@ -515,10 +524,21 @@ function webUrl(path) { return WEB_BASE + path }
 async function webFetch(path, opts = {}) {
   return fetch(webUrl(path), { credentials: 'include', ...opts })
 }
+function botUrl(path) { return BOT_BASE + path }
+async function botFetch(path, opts = {}) {
+  return fetch(botUrl(path), { credentials: 'include', ...opts })
+}
 async function loadMe() {
   try {
     const res = await webFetch('/api/me')
     me = res.ok ? await res.json() : null
+    // En modo Pages (WEB_BASE absoluto) no hay 302 del servidor: si no hay sesión
+    // redirige al login OAuth de la web y vuelve a este panel tras autenticar.
+    if (!me && WEB_BASE && res.status === 401) {
+      const ret = encodeURIComponent(location.origin + '/')
+      location.href = webUrl('/auth/login?return=' + ret)
+      return
+    }
   } catch { me = null }
   applyAdminUI()
   loadMusic()
@@ -583,9 +603,9 @@ function toast(msg) {
 
 async function api(path, body) {
   try {
-    const res = await fetch(path, body !== undefined
+    const res = await botFetch(path, body !== undefined
       ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
-      : undefined)
+      : {})
     const data = await res.json().catch(() => null)
     if (!res.ok) toast(data && data.error ? data.error : 'Error')
     else refresh()
@@ -752,7 +772,7 @@ function esc(s) {
 
 async function refresh() {
   try {
-    const res = await fetch('/api/state')
+    const res = await botFetch('/api/state')
     state = await res.json()
     render()
   } catch {}
@@ -859,7 +879,7 @@ function updatePlayingButtons() {
 
 async function loadSounds() {
   try {
-    const res = await fetch('/api/sounds')
+    const res = await botFetch('/api/sounds')
     const text = await res.text()
     if (text === lastSoundsJSON) return // sin cambios: no re-renderizar
     lastSoundsJSON = text
@@ -974,7 +994,7 @@ async function loadVoiceChannels() {
   // Solo admin: el selector de canal de voz está oculto para el resto.
   if (me && !(me.roles || []).includes('admin')) return
   try {
-    const res = await fetch('/api/voice-channels')
+    const res = await botFetch('/api/voice-channels')
     if (!res.ok) { box.innerHTML = '<p class="empty">No se pudo cargar los canales.</p>'; return }
     renderVoiceChannels(await res.json())
   } catch { box.innerHTML = '<p class="empty">No se pudo cargar los canales.</p>' }
@@ -1076,7 +1096,7 @@ async function forceCacheUrl() {
   inp.value = ''
   toast('Descargando a caché...')
   try {
-    const res = await fetch('/api/music/cache', {
+    const res = await botFetch('/api/music/cache', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }),
     })
     const data = await res.json().catch(() => null)

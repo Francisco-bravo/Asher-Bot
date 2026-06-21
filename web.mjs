@@ -25,6 +25,8 @@ const ART_MIME = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp
 const CLIENT_ID = process.env.DISCORD_CLIENT_ID
 const CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET
 const REDIRECT_URI = process.env.DISCORD_REDIRECT_URI || `http://localhost:${PORT}/auth/callback`
+// Orígenes del panel autorizados (CORS + retorno OAuth). Lista por coma en Pages.
+const PANEL_ORIGINS = new Set((process.env.PANEL_ORIGIN || '').split(',').map(s => s.trim().replace(/\/$/, '')).filter(Boolean))
 const SOUND_EXTS = new Set(['mp3', 'wav', 'ogg', 'm4a', 'flac', 'webm'])
 const MAX_UPLOAD = 10 * 1024 * 1024 // 10 MB por sonido
 const MUSIC_EXTS = new Set(['mp3', 'wav', 'ogg', 'm4a', 'flac', 'webm', 'opus'])
@@ -42,8 +44,17 @@ function parseCookies(req) {
   return out
 }
 
+// En Pages el panel y la API viven en subdominios distintos de aronne.dev. La
+// cookie se comparte poniendo Domain=.aronne.dev (COOKIE_DOMAIN) y, al ir por
+// HTTPS cross-site, debe ser SameSite=None; Secure. En dev (localhost, http) se
+// deja SameSite=Lax sin Secure. Configurable por env para no romper dev.
+const COOKIE_DOMAIN = process.env.COOKIE_DOMAIN || ''           // ej: .aronne.dev
+const COOKIE_CROSS_SITE = process.env.COOKIE_CROSS_SITE === '1' // None;Secure
 function setCookie(res, name, value, { maxAge, clear } = {}) {
-  const attrs = [`${name}=${clear ? '' : encodeURIComponent(value)}`, 'Path=/', 'HttpOnly', 'SameSite=Lax']
+  const sameSite = COOKIE_CROSS_SITE ? 'None' : 'Lax'
+  const attrs = [`${name}=${clear ? '' : encodeURIComponent(value)}`, 'Path=/', 'HttpOnly', `SameSite=${sameSite}`]
+  if (COOKIE_CROSS_SITE) attrs.push('Secure')
+  if (COOKIE_DOMAIN) attrs.push(`Domain=${COOKIE_DOMAIN}`)
   if (clear) attrs.push('Max-Age=0')
   else if (maxAge) attrs.push(`Max-Age=${maxAge}`)
   const prev = res.getHeader('Set-Cookie')
@@ -75,15 +86,20 @@ function currentUser(req) {
 }
 
 // ── OAuth de Discord ────────────────────────────────────────────────────────
-// Solo se permite volver a hosts locales conocidos (evita open redirect).
-const SAFE_RETURN = /^https?:\/\/(localhost|127\.0\.0\.1):\d+(\/|$)/
+// Solo se permite volver a destinos en la allowlist (evita open redirect):
+// hosts locales (dev) o los orígenes del panel configurados (Pages).
+function isSafeReturn(ret) {
+  if (/^https?:\/\/(localhost|127\.0\.0\.1):\d+(\/|$)/.test(ret)) return true
+  for (const o of PANEL_ORIGINS) if (ret === o || ret.startsWith(o + '/')) return true
+  return false
+}
 function authLoginRedirect(req, res, url) {
   if (!CLIENT_ID) return send(res, 500, { error: 'Falta DISCORD_CLIENT_ID en el entorno' })
   const state = randomBytes(16).toString('hex')
   setCookie(res, 'oauth_state', state, { maxAge: 600 })
   // Guarda a dónde volver tras el login (p.ej. el panel del bot en otro puerto).
   const ret = url.searchParams.get('return')
-  if (ret && SAFE_RETURN.test(ret)) setCookie(res, 'oauth_return', ret, { maxAge: 600 })
+  if (ret && isSafeReturn(ret)) setCookie(res, 'oauth_return', ret, { maxAge: 600 })
   const authUrl = 'https://discord.com/oauth2/authorize?' + new URLSearchParams({
     response_type: 'code',
     client_id: CLIENT_ID,
@@ -142,7 +158,7 @@ async function authCallback(req, res, url) {
   setCookie(res, 'oauth_state', '', { clear: true })
   // Vuelve al destino guardado (panel del bot) si es seguro; si no, a la home.
   const ret = cookies.oauth_return
-  const dest = ret && SAFE_RETURN.test(ret) ? ret : '/'
+  const dest = ret && isSafeReturn(ret) ? ret : '/'
   setCookie(res, 'oauth_return', '', { clear: true })
   res.writeHead(302, { Location: dest })
   res.end()
@@ -166,12 +182,15 @@ const escapeHtml = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': 
 
 // ── Servidor ──────────────────────────────────────────────────────────────
 http.createServer(async (req, res) => {
-  // CORS para el panel servido por bot.mjs en dev (mismo host, otro puerto)
+  // CORS: en dev el panel lo sirve bot.mjs (otro puerto localhost); en Pages vive
+  // en panel-test.aronne.dev (PANEL_ORIGIN). Ambos llaman con credenciales.
   const origin = req.headers.origin
-  if (origin && /^http:\/\/localhost:\d+$/.test(origin)) {
+  if (origin && (PANEL_ORIGINS.has(origin.replace(/\/$/, '')) || /^https?:\/\/localhost:\d+$/.test(origin))) {
     res.setHeader('Access-Control-Allow-Origin', origin)
     res.setHeader('Access-Control-Allow-Credentials', 'true')
+    res.setHeader('Vary', 'Origin')
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS')
   }
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return }
 

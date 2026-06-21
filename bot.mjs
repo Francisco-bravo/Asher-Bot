@@ -61,6 +61,10 @@ const PANEL_PASSWORD = process.env.PANEL_PASSWORD || ''
 // y PANEL_URL es a dónde debe volver la web tras el login.
 const WEB_URL = (process.env.WEB_URL || 'http://localhost:8770').replace(/\/$/, '')
 const PANEL_URL = (process.env.PANEL_URL || `http://localhost:${PORT}`).replace(/\/$/, '')
+// Orígenes del navegador autorizados a llamar a esta API con credenciales (CORS).
+// En Pages el panel vive en otro subdominio (panel-test.aronne.dev). Lista por
+// coma en PANEL_ORIGIN; en dev cualquier localhost se permite automáticamente.
+const PANEL_ORIGINS = new Set((process.env.PANEL_ORIGIN || '').split(',').map(s => s.trim().replace(/\/$/, '')).filter(Boolean))
 const SOUND_EXTS = new Set(['.mp3', '.wav', '.ogg', '.m4a', '.flac', '.webm'])
 const MUSIC_DUCK = 0.35 // volumen de la música mientras suena un efecto
 const MAX_QUEUE = 100
@@ -1140,6 +1144,18 @@ http.createServer(async (req, res) => {
     res.writeHead(status, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify(data))
   }
+  // CORS: el panel en Pages (otro subdominio) llama con credenciales. Se permite
+  // el origen exacto configurado (o cualquier localhost en dev). setHeader persiste
+  // en todas las respuestas (incluido sendJson).
+  const origin = req.headers.origin
+  if (origin && (PANEL_ORIGINS.has(origin.replace(/\/$/, '')) || /^https?:\/\/localhost:\d+$/.test(origin))) {
+    res.setHeader('Access-Control-Allow-Origin', origin)
+    res.setHeader('Access-Control-Allow-Credentials', 'true')
+    res.setHeader('Vary', 'Origin')
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS')
+  }
+  if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return }
   const path = new URL(req.url, 'http://x').pathname
   // Autenticación: sesión compartida con la web; contraseña como respaldo.
   if (!panelUser(req) && !authorizedByPassword(req)) {

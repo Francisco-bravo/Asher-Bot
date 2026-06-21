@@ -7,6 +7,9 @@ yt-dlp.exe
 *.key
 *.log
 
+# Build de Cloudflare Pages (se genera con scripts/build-pages.mjs)
+dist-pages/
+
 # Runtime de la capa de almacenamiento (no versionar)
 data/
 object-store/
