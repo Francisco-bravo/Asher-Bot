@@ -186,10 +186,11 @@ http.createServer(async (req, res) => {
     if (mArt && req.method === 'GET') {
       const song = music.getById(Number(mArt[1]))
       const store = getStore()
-      if (!song || !song.art_key || !store.exists(song.art_key)) { res.writeHead(404); res.end('Sin carátula'); return }
+      // exists/getStream son sync en local-store y async en s3-store; await unifica ambos.
+      if (!song || !song.art_key || !(await store.exists(song.art_key))) { res.writeHead(404); res.end('Sin carátula'); return }
       const ext = song.art_key.split('.').pop().toLowerCase()
       res.writeHead(200, { 'Content-Type': ART_MIME[ext] || 'application/octet-stream', 'Cache-Control': 'public, max-age=86400' })
-      store.getStream(song.art_key).pipe(res)
+      ;(await store.getStream(song.art_key)).pipe(res)
       return
     }
     if (req.method === 'GET' && path === '/auth/login') return authLoginRedirect(req, res, url)
