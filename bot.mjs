@@ -258,18 +258,23 @@ class MixerStream extends Readable {
 let currentMixer = null
 
 // ── Streaming ─────────────────────────────────────────────────────────────
+// Prioridad: cuando hay un stream de reproducción, marca streamDownloading para
+// que el cacheador/carátula/metadata NO lancen otro yt-dlp en paralelo (la VM
+// tiene 2 vCPU y el solve de YouTube se starva si compiten).
 function startStream(item, seekSec) {
   const yt = spawn(YTDLP, ytdlpArgs(['-f', 'bestaudio/best', '-o', '-', item.url]))
   const args = ['-loglevel', 'error', '-i', 'pipe:0']
   if (seekSec > 0) args.push('-ss', String(seekSec))
   args.push('-vn', '-ar', '48000', '-ac', '2', '-f', 's16le', 'pipe:1')
   const ff = spawn(FFMPEG, args)
+  streamDownloading = true
   yt.stdout.pipe(ff.stdin)
   yt.stdout.on('error', () => {})
   ff.stdin.on('error', () => {})
   yt.on('error', err => console.error('yt-dlp:', err.message))
   ff.on('error', err => console.error('ffmpeg:', err.message))
   ff.stderr.on('data', d => process.stderr.write(d))
+  yt.on('close', () => { streamDownloading = false })
   activeProcs = [yt, ff]
   return ff.stdout
 }
@@ -325,18 +330,21 @@ function killStreamProcs() {
 }
 
 function fetchMeta(item) {
-  const proc = spawn(YTDLP, ytdlpArgs([
-    '--skip-download', '--print', '%(title)s\n%(duration)s', item.url
-  ]))
-  let out = ''
-  proc.stdout.on('data', d => out += d)
-  proc.on('error', () => {})
-  proc.on('close', () => {
-    const [title, dur] = out.trim().split('\n')
-    if (title) item.title = title
-    const d = parseFloat(dur)
-    if (!isNaN(d)) item.duration = d
-    updatePanel()
+  return new Promise(resolve => {
+    const proc = spawn(YTDLP, ytdlpArgs([
+      '--skip-download', '--print', '%(title)s\n%(duration)s', item.url
+    ]))
+    let out = ''
+    proc.stdout.on('data', d => out += d)
+    proc.on('error', () => resolve())
+    proc.on('close', () => {
+      const [title, dur] = out.trim().split('\n')
+      if (title) item.title = title
+      const d = parseFloat(dur)
+      if (!isNaN(d)) item.duration = d
+      updatePanel()
+      resolve()
+    })
   })
 }
 
@@ -431,11 +439,15 @@ async function forceCacheAudio(item) {
 // siempre es por stream; este proceso solo "calienta" la caché en los huecos.
 async function idleCacheTick() {
   if (streamDownloading || prefetching) return // hay descarga activa: no interferir
-  if (!queue.length) return
   prefetching = true
   try {
+    // UNA sola tarea yt-dlp por tick, en orden de prioridad, para no solapar.
+    // 1) Metadata faltante (duración → barra de progreso) de current o cola.
+    const needMeta = [current, ...queue].find(it => it && !it.duration && it.url)
+    if (needMeta) { await fetchMeta(needMeta); return }
+    // 2) Cachear (y traer carátula vía forceCacheAudio) una canción de la cola.
     for (const item of queue) {
-      if (streamDownloading) break // empezó un stream: cede de inmediato
+      if (streamDownloading) break
       const sourceUrl = await resolveSource(item)
       const song = musicCache.findByUrl(sourceUrl)
         || musicCache.upsertSong({ sourceUrl, title: item.title })
@@ -443,7 +455,17 @@ async function idleCacheTick() {
       if (musicCache.hasLocal(song) || song.persisted) continue // ya disponible
       await forceCacheAudio({ ...item, url: sourceUrl })
       console.log(`Caché en inactividad: canción ${song.id}`)
-      break // una por tick, para revisar de nuevo el estado del bot
+      return
+    }
+    // 3) Carátula faltante de una canción ya cacheada (p.ej. cacheada por el tee
+    //    del stream, que no baja carátula). current y cola.
+    for (const item of [current, ...queue]) {
+      if (!item || !/^https?:\/\//i.test(item.url)) continue
+      const song = musicCache.findByUrl(item.url)
+      if (song && !song.art_key && (musicCache.hasLocal(song) || song.persisted)) {
+        await ensureSongArt(song, item.url)
+        return
+      }
     }
   } catch { /* reintenta en el próximo tick */ } finally {
     prefetching = false
@@ -520,20 +542,27 @@ async function ensurePlaying() {
       seekOffset = seekTarget
       seekTarget = 0
       console.log(`Reproduciendo: ${current.title || current.url}${seekOffset ? ` (desde ${seekOffset}s)` : ''}`)
+      // PRIORIDAD: arrancar la reproducción cuanto antes, con UN solo yt-dlp.
+      // No se resuelve ni se baja carátula/metadata aquí (eso lo hace el proceso
+      // de inactividad). Solo se usa el archivo si ya está COMPLETO en caché.
       let stream
       try {
-        const sourceUrl = await resolveSource(current)
-        const song = musicCache.findByUrl(sourceUrl)
-          || musicCache.upsertSong({ sourceUrl, title: current.title })
-        current.songId = song.id
-        ensureSongArt(song, sourceUrl) // en segundo plano, no bloquea
-        if (musicCache.hasLocal(song) || song.persisted) {
-          // Ya disponible (caché local u object-store): archivo → instantáneo y con seek.
-          const filePath = await musicCache.getLocalAudio(song, dest => downloadToFile(sourceUrl, dest))
+        const raw = current.url
+        const isUrl = /^https?:\/\//i.test(raw)
+        const song = isUrl ? musicCache.findByUrl(raw) : null
+        if (song && (musicCache.hasLocal(song) || song.persisted)) {
+          // Cacheada completa → archivo (instantáneo, con seek). Sin yt-dlp.
+          const filePath = await musicCache.getLocalAudio(song, dest => downloadToFile(raw, dest))
           stream = startFileStream(filePath, seekOffset)
+        } else if (isUrl) {
+          // URL no cacheada: stream + tee a caché en la MISMA descarga (1 yt-dlp).
+          const s = song || musicCache.upsertSong({ sourceUrl: raw, title: current.title })
+          current.songId = s.id
+          stream = startStreamAndCache({ ...current, url: raw }, seekOffset, s)
         } else {
-          // Nueva: stream inmediato + cacheo en 2º plano desde la misma descarga.
-          stream = startStreamAndCache({ ...current, url: sourceUrl }, seekOffset, song)
+          // Término de búsqueda: stream directo (yt-dlp resuelve y reproduce en una
+          // sola pasada). El cacheo/resolución lo hará el proceso de inactividad.
+          stream = startStream(current, seekOffset)
         }
       } catch (err) {
         console.warn('Reproducción: fallback a streaming directo:', err.message)
@@ -644,7 +673,8 @@ async function resolveInput(url) {
 function addToQueue(url, voiceChannelId, guildId, textChannelId, title) {
   if (queue.length >= MAX_QUEUE) throw new Error(`La cola está llena (máximo ${MAX_QUEUE})`)
   const item = { url, title: title || url, duration: null, voiceChannelId, guildId, textChannelId }
-  fetchMeta(item)
+  // La metadata (título/duración) NO se pide aquí para no lanzar otro yt-dlp que
+  // compita con el arranque del stream; la rellena idleCacheTick en inactividad.
   queue.push(item)
   const startsNow = !current && queue.length === 1
   ensurePlaying()
