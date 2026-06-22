@@ -103,11 +103,12 @@ const queue = []
 const history = []
 let current = null
 let currentResource = null
-// Prefetch: mientras suena una canción se cachea la siguiente de la cola para
-// que arranque al instante. Serial (1 a la vez) para no saturar la VM de 1 GB.
-let prefetching = false
-let streamDownloading = false // hay un yt-dlp activo descargando el stream actual
-const PREFETCH_AHEAD = 1
+// Caché en inactividad: la reproducción siempre es por stream; un proceso aparte
+// baja canciones de la cola a disco SOLO cuando no hay un stream descargando, así
+// nunca corren dos yt-dlp a la vez en la VM de 1 GB.
+let prefetching = false        // el cacheador de inactividad está trabajando
+let streamDownloading = false  // hay un yt-dlp activo descargando el stream actual
+const IDLE_CACHE_INTERVAL = 20000 // cada 20s revisa si puede cachear en inactividad
 let seekOffset = 0      // segundos ya descartados por seek en el stream actual
 let seekTarget = 0      // desde dónde arrancar el próximo stream
 let transition = 'next' // qué hacer cuando el player quede idle: next | previous | seek | stop
@@ -313,7 +314,6 @@ function startStreamAndCache(item, seekSec, song) {
     } else {
       try { rmSync(partPath, { force: true }) } catch {}
     }
-    prefetchQueue() // ya libre el yt-dlp: adelanta la siguiente de la cola
   })
   activeProcs = [yt, ff]
   return ff.stdout
@@ -424,31 +424,32 @@ async function forceCacheAudio(item) {
   return song
 }
 
-// Pre-cachea en segundo plano las próximas canciones de la cola (serial, máx
-// PREFETCH_AHEAD) para que arranquen al instante. Cede si hay un yt-dlp activo
-// (stream en curso) para no correr dos descargas a la vez en la VM de 1 GB.
-async function prefetchQueue() {
-  if (prefetching || streamDownloading) return
+// Cacheador en INACTIVIDAD: cuando NO hay un stream descargando (el bot está
+// ocioso o reproduciendo desde caché), baja a disco UNA canción no cacheada de
+// la cola. Nunca corre junto a un stream de reproducción → no hay dos yt-dlp a
+// la vez ni descargas a medias que choquen con un "siguiente". La reproducción
+// siempre es por stream; este proceso solo "calienta" la caché en los huecos.
+async function idleCacheTick() {
+  if (streamDownloading || prefetching) return // hay descarga activa: no interferir
+  if (!queue.length) return
   prefetching = true
   try {
-    let done = 0
     for (const item of queue) {
-      if (done >= PREFETCH_AHEAD || streamDownloading) break
-      try {
-        const sourceUrl = await resolveSource(item)
-        const song = musicCache.findByUrl(sourceUrl)
-          || musicCache.upsertSong({ sourceUrl, title: item.title })
-        item.songId = song.id
-        if (musicCache.hasLocal(song) || song.persisted) continue // ya disponible
-        await forceCacheAudio({ ...item, url: sourceUrl })
-        console.log(`Prefetch: cola precacheada (canción ${song.id})`)
-        done++
-      } catch (e) { /* sigue con la siguiente de la cola */ }
+      if (streamDownloading) break // empezó un stream: cede de inmediato
+      const sourceUrl = await resolveSource(item)
+      const song = musicCache.findByUrl(sourceUrl)
+        || musicCache.upsertSong({ sourceUrl, title: item.title })
+      item.songId = song.id
+      if (musicCache.hasLocal(song) || song.persisted) continue // ya disponible
+      await forceCacheAudio({ ...item, url: sourceUrl })
+      console.log(`Caché en inactividad: canción ${song.id}`)
+      break // una por tick, para revisar de nuevo el estado del bot
     }
-  } finally {
+  } catch { /* reintenta en el próximo tick */ } finally {
     prefetching = false
   }
 }
+setInterval(() => { idleCacheTick() }, IDLE_CACHE_INTERVAL)
 
 // Reproduce desde un archivo local ya descargado (el seek es seek de archivo).
 function startFileStream(filePath, seekSec) {
@@ -542,7 +543,6 @@ async function ensurePlaying() {
       currentResource = createAudioResource(currentMixer, { inputType: StreamType.Raw })
       musicPlayer.play(currentResource)
       updatePanel()
-      prefetchQueue() // adelanta la siguiente de la cola (cede si hay stream activo)
 
       const err = await waitIdle(musicPlayer)
       killStreamProcs()
@@ -648,7 +648,6 @@ function addToQueue(url, voiceChannelId, guildId, textChannelId, title) {
   queue.push(item)
   const startsNow = !current && queue.length === 1
   ensurePlaying()
-  prefetchQueue() // si ya hay algo sonando, adelanta la descarga de lo encolado
   updatePanel()
   return { startsNow, position: queue.length }
 }
