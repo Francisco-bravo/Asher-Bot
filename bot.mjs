@@ -92,7 +92,12 @@ async function ensureYtDlp() {
 }
 
 function ytdlpArgs(extra) {
-  const args = ['--no-playlist', '--quiet', '--no-cache-dir', '--js-runtimes', 'node:/usr/bin/node']
+  // Runtimes JS para el desafío de YouTube: Bun (primario) y Node (respaldo).
+  // Se quitó Deno de la VM porque, si está presente, yt-dlp lo prefiere siempre.
+  // Sin --no-cache-dir para que yt-dlp cachee el solve y repetir un tema sea rápido.
+  const args = ['--no-playlist', '--quiet',
+    '--js-runtimes', 'bun:/usr/local/bin/bun',
+    '--js-runtimes', 'node:/usr/bin/node']
   if (existsSync(COOKIES)) args.push('--cookies', COOKIES)
   return args.concat(extra)
 }
