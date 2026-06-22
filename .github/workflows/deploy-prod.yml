@@ -36,3 +36,15 @@ jobs:
             echo '== music-bot =='; journalctl -u music-bot -n 5 --no-pager; \
             echo '== music-web =='; journalctl -u music-web -n 5 --no-pager || echo 'music-web aún no configurado'"
           rm key.pem
+
+      - name: Build Cloudflare Pages (prod)
+        env:
+          BOT_BASE: https://bot.aronne.dev
+          WEB_BASE: https://web.aronne.dev
+        run: node scripts/build-pages.mjs
+
+      - name: Deploy to Cloudflare Pages (prod)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx wrangler@latest pages deploy dist-pages --project-name=asher
