@@ -269,6 +269,84 @@ class MixerStream extends Readable {
   }
 }
 
+// Mixer del soundboard SIN música: base de SILENCIO sobre la que se mezclan N
+// sonidos a la vez (sin límite, sin "uno a la vez"). Paceado a tiempo real. Se
+// auto-cierra tras unos segundos sin sonidos y devuelve la conexión al player de
+// música. El volumen (soundVolume) se aplica al mezclar, en vivo.
+class SoundMixer extends Readable {
+  constructor() {
+    super()
+    this.overlays = new Set()
+    this.pushedBytes = 0
+    this.startMs = Date.now()
+    this.lastActive = Date.now()
+    this.closed = false
+    this.timer = null
+    this._schedule()
+  }
+  addOverlay(stream) {
+    const ov = { chunks: [], length: 0, ended: false }
+    stream.on('data', d => { ov.chunks.push(d); ov.length += d.length })
+    stream.on('end', () => { ov.ended = true })
+    stream.on('error', () => { ov.ended = true })
+    this.overlays.add(ov)
+    this.lastActive = Date.now()
+    return ov
+  }
+  _takeFrom(ov, n) {
+    const parts = []
+    let need = n
+    while (need > 0 && ov.chunks.length > 0) {
+      const head = ov.chunks[0]
+      if (head.length <= need) { parts.push(head); ov.chunks.shift(); need -= head.length }
+      else { parts.push(head.subarray(0, need)); ov.chunks[0] = head.subarray(need); need = 0 }
+    }
+    ov.length -= n - need
+    return parts.length === 1 ? parts[0] : Buffer.concat(parts)
+  }
+  _read() {}
+  _mix() {
+    const out = Buffer.alloc(SILENCE.length) // base de silencio
+    for (const ov of [...this.overlays]) {
+      if (ov.ended && ov.length === 0) { this.overlays.delete(ov); continue }
+      const avail = Math.min(out.length, ov.length) & ~1
+      if (avail === 0) continue
+      const data = this._takeFrom(ov, avail)
+      for (let i = 0; i + 1 < data.length; i += 2) {
+        let v = out.readInt16LE(i) + ((data.readInt16LE(i) * soundVolume) | 0)
+        if (v > 32767) v = 32767
+        else if (v < -32768) v = -32768
+        out.writeInt16LE(v, i)
+      }
+    }
+    return out
+  }
+  _schedule() {
+    this.timer = setTimeout(() => {
+      if (this.closed) return
+      const now = Date.now()
+      const target = (now - this.startMs) * BYTES_PER_MS // realtime: nunca adelantarse
+      while (this.pushedBytes < target) {
+        const out = this._mix()
+        this.pushedBytes += out.length
+        this.push(out)
+      }
+      if (this.overlays.size > 0) this.lastActive = now
+      if (now - this.lastActive > 2000) { this.close(); return } // sin sonidos: cerrar
+      this._schedule()
+    }, 20)
+  }
+  close() {
+    if (this.closed) return
+    this.closed = true
+    if (this.timer) clearTimeout(this.timer)
+    try { this.push(null) } catch {}
+    if (soundMixer === this) soundMixer = null
+    if (connection) { try { connection.subscribe(musicPlayer) } catch {} }
+  }
+}
+let soundMixer = null
+
 let currentMixer = null
 
 // ── Streaming ─────────────────────────────────────────────────────────────
@@ -1098,19 +1176,19 @@ async function playSound(soundId) {
     return id
   }
 
-  // Sin música: reproducir directo. Requiere que el bot YA esté en un canal;
-  // no se conecta solo a ningún canal de voz.
+  // Sin música: mezclar sobre un SoundMixer dedicado para que suenen VARIOS a la
+  // vez (sin límite). Requiere que el bot YA esté en un canal; no se conecta solo.
   if (!connection) throw new Error('El bot no está en un canal de voz')
 
-  finishDirectSound() // si había otro sonido directo, limpiarlo: play() lo reemplaza sin pasar por Idle
-  soundActive = 1
-  currentDirectId = id
+  if (!soundMixer) {
+    soundMixer = new SoundMixer()
+    const res = createAudioResource(soundMixer, { inputType: StreamType.Raw })
+    connection.subscribe(soundPlayer)
+    soundPlayer.play(res)
+  }
   const ff = spawnSoundFfmpeg(filePath)
-  activeSounds.set(id, { file: key, proc: ff, direct: true })
-  connection.subscribe(soundPlayer)
-  directResource = createAudioResource(ff.stdout, { inputType: StreamType.Raw, inlineVolume: true })
-  directResource.volume.setVolume(soundVolume)
-  soundPlayer.play(directResource)
+  const ov = soundMixer.addOverlay(ff.stdout)
+  activeSounds.set(id, { file: key, proc: ff, ov, mixer: soundMixer })
   return id
 }
 
@@ -1126,9 +1204,11 @@ function cmdSoundVolume(v) {
 function playingSounds() {
   const out = []
   for (const [id, e] of activeSounds) {
-    if (e.direct) { out.push({ id, file: e.file }); continue }
-    if (e.mixer === currentMixer && e.mixer.overlays.has(e.ov)) out.push({ id, file: e.file })
-    else activeSounds.delete(id)
+    if (e.ov && e.mixer && (e.mixer === currentMixer || e.mixer === soundMixer) && e.mixer.overlays.has(e.ov)) {
+      out.push({ id, file: e.file })
+    } else {
+      activeSounds.delete(id)
+    }
   }
   return out
 }
