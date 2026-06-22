@@ -504,27 +504,29 @@ async function cacheToDisk(item) {
 }
 
 // Trabajo de fondo. Corre SOLO cuando no hay un stream descargando (regla
-// estricta: nunca dos yt-dlp). UNA tarea por llamada, en orden de prioridad:
-//   1) enriquecer la canción ACTUAL (para el panel)
-//   2) PRE-CACHEAR la siguiente de la cola a disco (gapless)
-//   3) enriquecer la cola
-//   4) cachear el resto de la cola
+// estricta: nunca dos yt-dlp). UNA tarea por llamada, en este orden de prioridad:
+//   PRIORIDAD 0 (implícita): la descarga del stream que va a sonar — por eso esto
+//      se gatea con streamDownloading y se mata al arrancar una reproducción.
+//   1) METADATA + CARÁTULA de la canción actual, y luego de toda la cola.
+//   2) PRE-CACHEO a disco de la cola (la siguiente primero) para reproducir gapless.
+// Es decir: los datos/carátula tienen MÁS prioridad que el pre-cacheo.
 // Se encadena cada 1.5s mientras haya trabajo y siga libre el yt-dlp.
 async function backgroundWork() {
   if (streamDownloading || prefetching) return
   prefetching = true
   let didWork = false
   try {
+    // 1) Enriquecer: primero la actual, luego TODA la cola (mayor prioridad).
     if (await enrich(current)) didWork = true
-    else if (!streamDownloading && await cacheToDisk(queue[0])) didWork = true
-    else {
-      for (const item of queue) { if (streamDownloading) break; if (await enrich(item)) { didWork = true; break } }
-      if (!didWork && !streamDownloading) {
-        for (const item of queue.slice(1)) {
-          if (streamDownloading) break
-          if (await cacheToDisk(item)) { didWork = true; break }
-        }
-      }
+    else for (const item of queue) {
+      if (streamDownloading) break
+      if (await enrich(item)) { didWork = true; break }
+    }
+    // 2) Pre-cachear a disco solo cuando ya no queda metadata/carátula pendiente.
+    //    La siguiente de la cola primero, luego el resto.
+    if (!didWork && !streamDownloading) for (const item of queue) {
+      if (streamDownloading) break
+      if (await cacheToDisk(item)) { didWork = true; break }
     }
   } catch { /* reintenta en el próximo tick */ } finally {
     prefetching = false
