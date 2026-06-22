@@ -116,7 +116,9 @@ let currentResource = null
 // sonar, la siguiente ya está en disco y arranca sin la extracción de ~10s.
 let prefetching = false        // el trabajo de fondo está activo
 let streamDownloading = false  // hay un yt-dlp de reproducción descargando (incluye la
-                               // extracción inicial): el fondo NO corre mientras esté true
+                               // extracción inicial)
+let currentPlaying = false     // la canción actual YA está sonando (pasó la extracción
+                               // inicial) → se permite enriquecer en paralelo al stream
 let bgProc = null              // proceso yt-dlp de fondo en curso (para poder matarlo)
 let bgSongId = null            // id de la canción que el fondo está pre-cacheando
 let bgPromise = null           // promesa del pre-cacheo en curso (para esperarlo si toca)
@@ -503,27 +505,27 @@ async function cacheToDisk(item) {
   return true
 }
 
-// Trabajo de fondo. Corre SOLO cuando no hay un stream descargando (regla
-// estricta: nunca dos yt-dlp). UNA tarea por llamada, en este orden de prioridad:
-//   PRIORIDAD 0 (implícita): la descarga del stream que va a sonar — por eso esto
-//      se gatea con streamDownloading y se mata al arrancar una reproducción.
-//   1) METADATA + CARÁTULA de la canción actual, y luego de toda la cola.
-//   2) PRE-CACHEO a disco de la cola (la siguiente primero) para reproducir gapless.
-// Es decir: los datos/carátula tienen MÁS prioridad que el pre-cacheo.
-// Se encadena cada 1.5s mientras haya trabajo y siga libre el yt-dlp.
+// Trabajo de fondo. UNA tarea por llamada, en este orden de prioridad:
+//   PRIORIDAD 0: la descarga del stream que va a sonar — no se toca; el enriquecido
+//      NO corre durante la extracción inicial (currentPlaying=false) para no frenar
+//      el arranque, y al arrancar una reproducción se mata el yt-dlp de fondo.
+//   1) METADATA + CARÁTULA de la actual y de la cola — corre mientras la canción
+//      SUENA, aunque el stream siga descargando (se acepta un 2º yt-dlp: el audio
+//      ya está buffereado y no se interrumpe). Tiene MÁS prioridad que el pre-cacheo.
+//   2) PRE-CACHEO a disco (la siguiente primero) — solo cuando NO hay un stream
+//      descargando (para no correr dos descargas sostenidas a la vez).
+// Se encadena cada 1.5s mientras haya trabajo.
 async function backgroundWork() {
-  if (streamDownloading || prefetching) return
+  if (prefetching) return
   prefetching = true
   let didWork = false
   try {
-    // 1) Enriquecer: primero la actual, luego TODA la cola (mayor prioridad).
-    if (await enrich(current)) didWork = true
-    else for (const item of queue) {
-      if (streamDownloading) break
-      if (await enrich(item)) { didWork = true; break }
+    // 1) Enriquecer (metadata + carátula) mientras la canción ya suena.
+    if (currentPlaying) {
+      if (await enrich(current)) didWork = true
+      else for (const item of queue) { if (await enrich(item)) { didWork = true; break } }
     }
-    // 2) Pre-cachear a disco solo cuando ya no queda metadata/carátula pendiente.
-    //    La siguiente de la cola primero, luego el resto.
+    // 2) Pre-cachear a disco la cola (la siguiente primero), solo sin stream activo.
     if (!didWork && !streamDownloading) for (const item of queue) {
       if (streamDownloading) break
       if (await cacheToDisk(item)) { didWork = true; break }
@@ -531,7 +533,7 @@ async function backgroundWork() {
   } catch { /* reintenta en el próximo tick */ } finally {
     prefetching = false
   }
-  if (didWork && !streamDownloading) setTimeout(() => backgroundWork(), 1500)
+  if (didWork) setTimeout(() => backgroundWork(), 1500)
 }
 setInterval(() => { backgroundWork() }, BG_WORK_INTERVAL)
 
@@ -603,6 +605,7 @@ async function ensurePlaying() {
 
       seekOffset = seekTarget
       seekTarget = 0
+      currentPlaying = false // aún en extracción/carga: no enriquecer hasta que suene
       console.log(`Reproduciendo: ${current.title || current.url}${seekOffset ? ` (desde ${seekOffset}s)` : ''}`)
       // PRIORIDAD: arrancar la reproducción cuanto antes, con UN solo yt-dlp.
       // No se resuelve ni se baja carátula/metadata aquí (eso lo hace el proceso
@@ -640,12 +643,12 @@ async function ensurePlaying() {
       currentResource = createAudioResource(currentMixer, { inputType: StreamType.Raw })
       musicPlayer.play(currentResource)
       updatePanel()
-      // Si esta canción salió de CACHÉ (no descarga stream), al empezar a sonar
-      // arranca el trabajo de fondo (enriquecer + pre-cachear la siguiente). Si es
-      // un stream, backgroundWork ya se dispara al cerrar su yt-dlp (descarga lista).
-      musicPlayer.once(AudioPlayerStatus.Playing, () => { backgroundWork() })
+      // Cuando el audio EMPIEZA a sonar (pasó la extracción inicial), se habilita el
+      // enriquecido en paralelo (metadata + carátula) aunque el stream siga bajando.
+      musicPlayer.once(AudioPlayerStatus.Playing, () => { currentPlaying = true; backgroundWork() })
 
       const err = await waitIdle(musicPlayer)
+      currentPlaying = false // terminó: no enriquecer esta canción ya
       killStreamProcs()
       currentResource = null
       currentMixer = null
