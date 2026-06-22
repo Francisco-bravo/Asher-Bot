@@ -437,6 +437,26 @@ async function forceCacheAudio(item) {
   return song
 }
 
+// Enriquecer la canción ACTUAL cuando ya empezó a sonar: título/duración y
+// carátula, y refrescar el panel. Se llama desde el evento Playing del reproductor
+// (la extracción ya pasó), así no afecta la latencia de arranque. Usa `prefetching`
+// como candado para no solaparse con el cacheador de inactividad.
+async function enrichCurrent(item) {
+  if (!item || item !== current || prefetching) return
+  prefetching = true
+  try {
+    if (!item.duration) await fetchMeta(item) // título/duración + updatePanel
+    const sourceUrl = await resolveSource(item) // instantáneo si ya es URL
+    const song = musicCache.findByUrl(sourceUrl)
+      || musicCache.upsertSong({ sourceUrl, title: item.title })
+    item.songId = song.id
+    updatePanel() // el panel ya puede pedir /art con el songId
+    if (!song.art_key) { await ensureSongArt(song, sourceUrl); updatePanel() }
+  } catch { /* sin metadata/carátula: no rompe la reproducción */ } finally {
+    prefetching = false
+  }
+}
+
 // Cacheador en INACTIVIDAD: cuando NO hay un stream descargando (el bot está
 // ocioso o reproduciendo desde caché), baja a disco UNA canción no cacheada de
 // la cola. Nunca corre junto a un stream de reproducción → no hay dos yt-dlp a
@@ -577,6 +597,11 @@ async function ensurePlaying() {
       currentResource = createAudioResource(currentMixer, { inputType: StreamType.Raw })
       musicPlayer.play(currentResource)
       updatePanel()
+      // Cuando el audio EMPIEZA a sonar (ya pasó la extracción lenta), recién ahí
+      // se obtienen metadatos + carátula y se refresca el panel, para no competir
+      // con la extracción del stream durante el arranque.
+      const enrichItem = current
+      musicPlayer.once(AudioPlayerStatus.Playing, () => { enrichCurrent(enrichItem) })
 
       const err = await waitIdle(musicPlayer)
       killStreamProcs()
