@@ -108,13 +108,18 @@ const queue = []
 const history = []
 let current = null
 let currentResource = null
-// Caché en inactividad: la reproducción siempre es por stream; un proceso aparte
-// baja canciones de la cola a disco SOLO cuando no hay un stream descargando, así
-// nunca corren dos yt-dlp a la vez en la VM de 1 GB.
-let prefetching = false        // el trabajo de fondo (meta/carátula/caché) está activo
-let streamDownloading = false  // hay un yt-dlp activo descargando el stream actual
-let buffering = false          // EXTRACCIÓN INICIAL: el stream arrancó pero el audio
-                               // aún no suena → no se hace NADA de fondo (prioridad total)
+// Trabajo de fondo (metadata/carátula/pre-cacheo): corre SOLO cuando no hay un
+// stream de reproducción descargando → JAMÁS dos yt-dlp a la vez (regla estricta).
+// Cuando arranca una reproducción se mata el yt-dlp de fondo en curso.
+// Gapless: al cerrar el yt-dlp de la canción actual (descarga terminada) se
+// dispara el pre-cacheo a DISCO de la siguiente; cuando la actual termina de
+// sonar, la siguiente ya está en disco y arranca sin la extracción de ~10s.
+let prefetching = false        // el trabajo de fondo está activo
+let streamDownloading = false  // hay un yt-dlp de reproducción descargando (incluye la
+                               // extracción inicial): el fondo NO corre mientras esté true
+let bgProc = null              // proceso yt-dlp de fondo en curso (para poder matarlo)
+let bgSongId = null            // id de la canción que el fondo está pre-cacheando
+let bgPromise = null           // promesa del pre-cacheo en curso (para esperarlo si toca)
 const BG_WORK_INTERVAL = 10000 // cada 10s intenta enriquecer/cachear de fondo
 let seekOffset = 0      // segundos ya descartados por seek en el stream actual
 let seekTarget = 0      // desde dónde arrancar el próximo stream
@@ -269,20 +274,21 @@ let currentMixer = null
 // que el cacheador/carátula/metadata NO lancen otro yt-dlp en paralelo (la VM
 // tiene 2 vCPU y el solve de YouTube se starva si compiten).
 function startStream(item, seekSec) {
+  killBgYtdlp() // prioridad a la reproducción: jamás dos yt-dlp a la vez
   const yt = spawn(YTDLP, ytdlpArgs(['-f', 'bestaudio/best', '-o', '-', item.url]))
   const args = ['-loglevel', 'error', '-i', 'pipe:0']
   if (seekSec > 0) args.push('-ss', String(seekSec))
   args.push('-vn', '-ar', '48000', '-ac', '2', '-f', 's16le', 'pipe:1')
   const ff = spawn(FFMPEG, args)
   streamDownloading = true
-  buffering = true // extracción inicial: nada de fondo hasta que suene (evento Playing)
   yt.stdout.pipe(ff.stdin)
   yt.stdout.on('error', () => {})
   ff.stdin.on('error', () => {})
   yt.on('error', err => console.error('yt-dlp:', err.message))
   ff.on('error', err => console.error('ffmpeg:', err.message))
   ff.stderr.on('data', d => process.stderr.write(d))
-  yt.on('close', () => { streamDownloading = false; buffering = false })
+  // Al cerrar (descarga terminada) ya hay CPU libre: pre-cachea la siguiente.
+  yt.on('close', () => { streamDownloading = false; backgroundWork() })
   activeProcs = [yt, ff]
   return ff.stdout
 }
@@ -292,6 +298,7 @@ function startStream(item, seekSec) {
 // doblar la carga de la VM). El archivo cacheado solo se valida si yt-dlp
 // termina limpio (código 0 y no se saltó/cortó la canción).
 function startStreamAndCache(item, seekSec, song) {
+  killBgYtdlp() // prioridad a la reproducción: jamás dos yt-dlp a la vez
   const yt = spawn(YTDLP, ytdlpArgs(['-f', 'bestaudio/best', '-o', '-', item.url]))
   const args = ['-loglevel', 'error', '-i', 'pipe:0']
   if (seekSec > 0) args.push('-ss', String(seekSec))
@@ -303,7 +310,6 @@ function startStreamAndCache(item, seekSec, song) {
   let cacheFile = null
   try { cacheFile = createWriteStream(partPath) } catch { cacheFile = null }
   streamDownloading = true // ocupa el yt-dlp: el trabajo de fondo cede hasta que termine
-  buffering = true         // extracción inicial: nada de fondo hasta que suene (Playing)
 
   yt.stdout.pipe(ff.stdin)
   if (cacheFile) { yt.stdout.pipe(cacheFile); cacheFile.on('error', () => { cacheFile = null }) }
@@ -314,7 +320,6 @@ function startStreamAndCache(item, seekSec, song) {
   ff.stderr.on('data', d => process.stderr.write(d))
   yt.on('close', async code => {
     streamDownloading = false
-    buffering = false
     if (cacheFile) { try { cacheFile.end() } catch {} }
     const ok = code === 0 && cacheFile && existsSync(partPath)
     if (ok) {
@@ -329,6 +334,7 @@ function startStreamAndCache(item, seekSec, song) {
     } else {
       try { rmSync(partPath, { force: true }) } catch {}
     }
+    backgroundWork() // descarga terminada → pre-cachea la siguiente (gapless)
   })
   activeProcs = [yt, ff]
   return ff.stdout
@@ -344,10 +350,12 @@ function fetchMeta(item) {
     const proc = spawn(YTDLP, ytdlpArgs([
       '--skip-download', '--print', '%(title)s\n%(duration)s', item.url
     ]))
+    bgProc = proc
     let out = ''
     proc.stdout.on('data', d => out += d)
-    proc.on('error', () => resolve())
+    proc.on('error', () => { if (bgProc === proc) bgProc = null; resolve() })
     proc.on('close', () => {
+      if (bgProc === proc) bgProc = null
       const [title, dur] = out.trim().split('\n')
       if (title) item.title = title
       const d = parseFloat(dur)
@@ -377,11 +385,18 @@ function waitIdle(player) {
 function ytdlpPrint(url, field) {
   return new Promise(resolve => {
     const proc = spawn(YTDLP, ytdlpArgs(['--skip-download', '--print', `%(${field})s`, url]))
+    bgProc = proc
     let out = ''
     proc.stdout.on('data', d => out += d)
-    proc.on('error', () => resolve(null))
-    proc.on('close', () => resolve(out.trim() || null))
+    proc.on('error', () => { if (bgProc === proc) bgProc = null; resolve(null) })
+    proc.on('close', () => { if (bgProc === proc) bgProc = null; resolve(out.trim() || null) })
   })
+}
+
+// Mata el yt-dlp de fondo en curso (si lo hay). Se llama al arrancar una
+// reproducción para garantizar que nunca corran dos yt-dlp a la vez.
+function killBgYtdlp() {
+  if (bgProc) { try { bgProc.kill() } catch {} bgProc = null }
 }
 
 // URL canónica para indexar la caché: las URLs directas se usan tal cual; las
@@ -398,10 +413,12 @@ async function resolveSource(item) {
 function downloadToFile(url, destPath) {
   return new Promise((resolve, reject) => {
     const proc = spawn(YTDLP, ytdlpArgs(['-f', 'bestaudio/best', '-o', `${destPath}.%(ext)s`, url]))
+    bgProc = proc
     let err = ''
     proc.stderr.on('data', d => err += d)
-    proc.on('error', reject)
+    proc.on('error', e => { if (bgProc === proc) bgProc = null; reject(e) })
     proc.on('close', code => {
+      if (bgProc === proc) bgProc = null
       if (code !== 0) return reject(new Error(`yt-dlp salió con código ${code}: ${err.trim()}`))
       const dir = dirname(destPath)
       const prefix = basename(destPath) + '.'
@@ -442,11 +459,6 @@ async function forceCacheAudio(item) {
   return song
 }
 
-// Trabajo de fondo: metadatos + carátula (current y luego la COLA) y, cuando no
-// hay descarga de stream en curso, cacheo de la cola. UNA sola tarea yt-dlp por
-// llamada (en orden de prioridad) para no solapar dos yt-dlp.
-// REGLA: NO corre durante la extracción inicial (`buffering`) — mientras la
-// canción aún no suena, la prioridad es total para el arranque del stream.
 // Resuelve la canción de un item SIN gastar yt-dlp si ya se conoce (songId o URL
 // directa ya registrada). Solo resuelve (yt-dlp) términos de búsqueda nuevos.
 function songForItem(item) {
@@ -455,50 +467,69 @@ function songForItem(item) {
   return null
 }
 
+// Enriquece un item (metadata + carátula). Devuelve true si hizo una tarea yt-dlp.
+async function enrich(item) {
+  if (!item || !item.url) return false
+  if (!item.duration) { await fetchMeta(item); return true } // título/duración + panel
+  let song = songForItem(item)
+  const sourceUrl = song ? song.source_url : await resolveSource(item)
+  if (!song) song = musicCache.findByUrl(sourceUrl) || musicCache.upsertSong({ sourceUrl, title: item.title })
+  if (item.songId !== song.id) { item.songId = song.id; updatePanel() }
+  if (!song.art_key) { await ensureSongArt(song, sourceUrl); updatePanel(); return true }
+  return false
+}
+
+// Pre-cachea un item a DISCO si no está ya. Devuelve true si descargó algo.
+// Rastrea la canción/promesa en curso para que la reproducción pueda esperarla
+// (si va a sonar justo esa) en vez de re-extraerla.
+async function cacheToDisk(item) {
+  if (!item || !item.url) return false
+  let song = songForItem(item)
+  const sourceUrl = song ? song.source_url : await resolveSource(item)
+  if (!song) song = musicCache.findByUrl(sourceUrl) || musicCache.upsertSong({ sourceUrl, title: item.title })
+  item.songId = song.id
+  if (musicCache.hasLocal(song) || song.persisted) return false // ya lista
+  // bgPromise = SOLO la descarga del audio (lo que la reproducción necesita
+  // esperar para arrancar gapless); la carátula va después, sin bloquear el play.
+  bgSongId = song.id
+  bgPromise = musicCache.ensureCached(song, dest => downloadToFile(sourceUrl, dest))
+  try {
+    await bgPromise
+    console.log(`Pre-cacheada a disco (gapless): canción ${song.id}`)
+  } finally {
+    if (bgSongId === song.id) { bgSongId = null; bgPromise = null }
+  }
+  await ensureSongArt(song, sourceUrl) // carátula serial (dentro del candado), ya no la espera el play
+  return true
+}
+
+// Trabajo de fondo. Corre SOLO cuando no hay un stream descargando (regla
+// estricta: nunca dos yt-dlp). UNA tarea por llamada, en orden de prioridad:
+//   1) enriquecer la canción ACTUAL (para el panel)
+//   2) PRE-CACHEAR la siguiente de la cola a disco (gapless)
+//   3) enriquecer la cola
+//   4) cachear el resto de la cola
+// Se encadena cada 1.5s mientras haya trabajo y siga libre el yt-dlp.
 async function backgroundWork() {
-  if (buffering || prefetching) return
+  if (streamDownloading || prefetching) return
   prefetching = true
   let didWork = false
   try {
-    // 1) Metadata faltante (título/duración → barra) — current primero, luego cola.
-    const needMeta = [current, ...queue].find(it => it && !it.duration && it.url)
-    if (needMeta) {
-      await fetchMeta(needMeta); didWork = true
-    } else {
-      // 2) songId + carátula faltante — current primero, luego cola.
-      for (const item of [current, ...queue]) {
-        if (buffering) break // empezó una extracción: cede de inmediato
-        if (!item || !item.url) continue
-        let song = songForItem(item)
-        let sourceUrl = song ? song.source_url : await resolveSource(item)
-        if (!song) {
-          song = musicCache.findByUrl(sourceUrl) || musicCache.upsertSong({ sourceUrl, title: item.title })
-        }
-        if (item.songId !== song.id) { item.songId = song.id; updatePanel() }
-        if (!song.art_key) { await ensureSongArt(song, sourceUrl); updatePanel(); didWork = true; break }
-      }
-      // 3) Cachear una canción de la cola — solo si el stream actual NO está
-      //    descargando (operación pesada: evita dos descargas a la vez).
+    if (await enrich(current)) didWork = true
+    else if (!streamDownloading && await cacheToDisk(queue[0])) didWork = true
+    else {
+      for (const item of queue) { if (streamDownloading) break; if (await enrich(item)) { didWork = true; break } }
       if (!didWork && !streamDownloading) {
-        for (const item of queue) {
-          if (buffering || streamDownloading) break
-          const sourceUrl = (songForItem(item)?.source_url) || await resolveSource(item)
-          const song = musicCache.findByUrl(sourceUrl)
-            || musicCache.upsertSong({ sourceUrl, title: item.title })
-          item.songId = song.id
-          if (musicCache.hasLocal(song) || song.persisted) continue // ya disponible
-          await forceCacheAudio({ ...item, url: sourceUrl })
-          console.log(`Caché en inactividad: canción ${song.id}`)
-          didWork = true; break
+        for (const item of queue.slice(1)) {
+          if (streamDownloading) break
+          if (await cacheToDisk(item)) { didWork = true; break }
         }
       }
     }
   } catch { /* reintenta en el próximo tick */ } finally {
     prefetching = false
   }
-  // Si hubo trabajo y no empezó una extracción, encadena pronto para drenar la
-  // cola de tareas rápido (con 1.5s de respiro para no ahogar al stream).
-  if (didWork && !buffering) setTimeout(() => backgroundWork(), 1500)
+  if (didWork && !streamDownloading) setTimeout(() => backgroundWork(), 1500)
 }
 setInterval(() => { backgroundWork() }, BG_WORK_INTERVAL)
 
@@ -575,11 +606,16 @@ async function ensurePlaying() {
       // No se resuelve ni se baja carátula/metadata aquí (eso lo hace el proceso
       // de inactividad). Solo se usa el archivo si ya está COMPLETO en caché.
       let stream
-      buffering = false // el camino de archivo (caché) no extrae; los streams lo ponen true
       try {
         const raw = current.url
         const isUrl = /^https?:\/\//i.test(raw)
-        const song = isUrl ? musicCache.findByUrl(raw) : null
+        let song = isUrl ? musicCache.findByUrl(raw) : null
+        // Si el fondo está pre-cacheando JUSTO esta canción, espera a que termine
+        // (segundos de descarga) en vez de matarla y re-extraer (~10s). Gapless.
+        if (song && bgSongId === song.id && bgPromise) {
+          try { await bgPromise } catch {}
+          song = musicCache.findByUrl(raw) // refresca el estado tras el pre-cacheo
+        }
         if (song && (musicCache.hasLocal(song) || song.persisted)) {
           // Cacheada completa → archivo (instantáneo, con seek). Sin yt-dlp.
           const filePath = await musicCache.getLocalAudio(song, dest => downloadToFile(raw, dest))
@@ -602,11 +638,10 @@ async function ensurePlaying() {
       currentResource = createAudioResource(currentMixer, { inputType: StreamType.Raw })
       musicPlayer.play(currentResource)
       updatePanel()
-      // Cuando el audio EMPIEZA a sonar (terminó la extracción inicial), se levanta
-      // el flag de buffering y arranca el trabajo de fondo: metadatos + carátula de
-      // la canción actual y de la cola, y refresco del panel. No corre antes (durante
-      // la extracción) para no competir con el arranque del stream.
-      musicPlayer.once(AudioPlayerStatus.Playing, () => { buffering = false; backgroundWork() })
+      // Si esta canción salió de CACHÉ (no descarga stream), al empezar a sonar
+      // arranca el trabajo de fondo (enriquecer + pre-cachear la siguiente). Si es
+      // un stream, backgroundWork ya se dispara al cerrar su yt-dlp (descarga lista).
+      musicPlayer.once(AudioPlayerStatus.Playing, () => { backgroundWork() })
 
       const err = await waitIdle(musicPlayer)
       killStreamProcs()
@@ -714,9 +749,9 @@ function addToQueue(url, voiceChannelId, guildId, textChannelId, title) {
   const startsNow = !current && queue.length === 1
   ensurePlaying()
   updatePanel()
-  // No se dispara backgroundWork aquí: si esta canción arranca ahora, marcaría
-  // buffering un instante después y competiríamos con la extracción. El intervalo
-  // y el evento Playing ya enriquecen la cola mientras algo suena.
+  // No se dispara backgroundWork aquí: si esta canción arranca ahora, su stream
+  // marcará streamDownloading y backgroundWork se gatea solo. El intervalo, el
+  // cierre del yt-dlp y el evento Playing ya cubren el enriquecido/pre-cacheo.
   return { startsNow, position: queue.length }
 }
 
