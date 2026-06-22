@@ -119,6 +119,7 @@ let streamDownloading = false  // hay un yt-dlp de reproducción descargando (in
                                // extracción inicial)
 let currentPlaying = false     // la canción actual YA está sonando (pasó la extracción
                                // inicial) → se permite enriquecer en paralelo al stream
+const metaBackfillTried = new Set() // ids de canciones ya intentadas en el backfill de metadata
 let bgProc = null              // proceso yt-dlp de fondo en curso (para poder matarlo)
 let bgSongId = null            // id de la canción que el fondo está pre-cacheando
 let bgPromise = null           // promesa del pre-cacheo en curso (para esperarlo si toca)
@@ -547,14 +548,34 @@ function songForItem(item) {
   return null
 }
 
+// ¿El título guardado es "pobre"? (vacío o es la propia URL/un enlace)
+function isPoorTitle(t, sourceUrl) {
+  return !t || t === sourceUrl || /^https?:\/\//i.test(t)
+}
+
 // Enriquece un item (metadata + carátula). Devuelve true si hizo una tarea yt-dlp.
+// Importante: persiste el título/duración en la FILA de la canción (Biblioteca y
+// Caché leen de ahí); antes solo se actualizaba el item en memoria y quedaban
+// guardadas con la URL como título.
 async function enrich(item) {
   if (!item || !item.url) return false
-  if (!item.duration) { await fetchMeta(item); return true } // título/duración + panel
+  // Resolver/crear la canción primero, para poder actualizar su fila.
   let song = songForItem(item)
   const sourceUrl = song ? song.source_url : await resolveSource(item)
   if (!song) song = musicCache.findByUrl(sourceUrl) || musicCache.upsertSong({ sourceUrl, title: item.title })
   if (item.songId !== song.id) { item.songId = song.id; updatePanel() }
+  // 1) Metadata (una sola vez por item): obtiene título/duración reales y los
+  //    GUARDA en la canción. Se hace si falta la duración o el título es pobre.
+  if (!item.metaTried && (!item.duration || isPoorTitle(song.title, song.source_url))) {
+    item.metaTried = true
+    await fetchMeta(item) // setea item.title/duration reales (si los hay)
+    const goodTitle = !isPoorTitle(item.title, sourceUrl) ? item.title : null
+    const durationMs = (item.duration && !isNaN(item.duration)) ? item.duration * 1000 : null
+    song = musicCache.setMeta(song.id, { title: goodTitle, durationMs })
+    updatePanel()
+    return true
+  }
+  // 2) Carátula.
   if (!song.art_key) { await ensureSongArt(song, sourceUrl); updatePanel(); return true }
   return false
 }
@@ -608,11 +629,21 @@ async function backgroundWork() {
       if (streamDownloading) break
       if (await cacheToDisk(item)) { didWork = true; break }
     }
+    // 3) Backfill (lo más bajo): arregla metadata de UNA canción ya guardada con
+    //    título pobre (Biblioteca/Caché viejas). Una por ciclo, sin reintentos.
+    if (!didWork) {
+      const broken = musicCache.listAll().find(s => isPoorTitle(s.title, s.source_url) && !metaBackfillTried.has(s.id))
+      if (broken) {
+        metaBackfillTried.add(broken.id)
+        if (await enrich({ url: broken.source_url, songId: broken.id })) didWork = true
+      }
+    }
   } catch { /* reintenta en el próximo tick */ } finally {
     prefetching = false
   }
   if (didWork) setTimeout(() => backgroundWork(), 1500)
 }
+setInterval(() => { backgroundWork() }, BG_WORK_INTERVAL)
 setInterval(() => { backgroundWork() }, BG_WORK_INTERVAL)
 
 // Reproduce desde un archivo local ya descargado (el seek es seek de archivo).
