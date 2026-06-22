@@ -280,7 +280,7 @@ class SoundMixer extends Readable {
     this.pushedBytes = 0
     this.startMs = Date.now()
     this.lastActive = Date.now()
-    this.closed = false
+    this._closed = false
     this.timer = null
     this._schedule()
   }
@@ -323,7 +323,7 @@ class SoundMixer extends Readable {
   }
   _schedule() {
     this.timer = setTimeout(() => {
-      if (this.closed) return
+      if (this._closed) return
       const now = Date.now()
       const target = (now - this.startMs) * BYTES_PER_MS // realtime: nunca adelantarse
       while (this.pushedBytes < target) {
@@ -337,8 +337,8 @@ class SoundMixer extends Readable {
     }, 20)
   }
   close() {
-    if (this.closed) return
-    this.closed = true
+    if (this._closed) return
+    this._closed = true
     if (this.timer) clearTimeout(this.timer)
     try { this.push(null) } catch {}
     if (soundMixer === this) soundMixer = null
