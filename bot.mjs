@@ -19,7 +19,7 @@ import {
 import { spawn } from 'node:child_process'
 import {
   readdirSync, existsSync, mkdirSync, readFileSync, writeFileSync,
-  createWriteStream, chmodSync, renameSync
+  createWriteStream, chmodSync, renameSync, rmSync
 } from 'node:fs'
 import { join, extname, dirname, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -268,6 +268,46 @@ function startStream(item, seekSec) {
   return ff.stdout
 }
 
+// Stream-first: reproduce mientras descarga (arranque rápido) y, con la MISMA
+// descarga de yt-dlp, guarda el archivo en la caché para la próxima vez (sin
+// doblar la carga de la VM). El archivo cacheado solo se valida si yt-dlp
+// termina limpio (código 0 y no se saltó/cortó la canción).
+function startStreamAndCache(item, seekSec, song) {
+  const yt = spawn(YTDLP, ytdlpArgs(['-f', 'bestaudio/best', '-o', '-', item.url]))
+  const args = ['-loglevel', 'error', '-i', 'pipe:0']
+  if (seekSec > 0) args.push('-ss', String(seekSec))
+  args.push('-vn', '-ar', '48000', '-ac', '2', '-f', 's16le', 'pipe:1')
+  const ff = spawn(FFMPEG, args)
+
+  const cp = musicCache.cachePath(song)
+  const partPath = `${cp}.${process.pid}.${Date.now()}.part`
+  let cacheFile = null
+  try { cacheFile = createWriteStream(partPath) } catch { cacheFile = null }
+
+  yt.stdout.pipe(ff.stdin)
+  if (cacheFile) { yt.stdout.pipe(cacheFile); cacheFile.on('error', () => { cacheFile = null }) }
+  yt.stdout.on('error', () => {})
+  ff.stdin.on('error', () => {})
+  yt.on('error', err => console.error('yt-dlp:', err.message))
+  ff.on('error', err => console.error('ffmpeg:', err.message))
+  ff.stderr.on('data', d => process.stderr.write(d))
+  yt.on('close', async code => {
+    if (cacheFile) { try { cacheFile.end() } catch {} }
+    const ok = code === 0 && cacheFile && existsSync(partPath)
+    if (!ok) { try { rmSync(partPath, { force: true }) } catch {}; return }
+    try {
+      renameSync(partPath, cp)
+      await musicCache.registerPlay(song, cp) // contabiliza + persiste al cruzar umbral
+      console.log(`Cacheado en segundo plano: canción ${song.id}`)
+    } catch (e) {
+      console.warn('Cacheo en segundo plano falló:', e.message)
+      try { rmSync(partPath, { force: true }) } catch {}
+    }
+  })
+  activeProcs = [yt, ff]
+  return ff.stdout
+}
+
 function killStreamProcs() {
   for (const p of activeProcs) { try { p.kill() } catch {} }
   activeProcs = []
@@ -363,16 +403,6 @@ async function ensureSongArt(song, sourceUrl) {
   } catch { /* sin carátula: no pasa nada */ }
 }
 
-// Devuelve la ruta local del audio, usando/poblando la caché de music-cache.
-async function prepareCachedAudio(item) {
-  const sourceUrl = await resolveSource(item)
-  const song = musicCache.findByUrl(sourceUrl)
-    || musicCache.upsertSong({ sourceUrl, title: item.title })
-  item.songId = song.id
-  ensureSongArt(song, sourceUrl) // en segundo plano, no bloquea la reproducción
-  return musicCache.getLocalAudio(song, destPath => downloadToFile(sourceUrl, destPath))
-}
-
 // Descarga a la caché SIN reproducir ni contar reproducción ("forzar caché").
 async function forceCacheAudio(item) {
   const sourceUrl = await resolveSource(item)
@@ -454,10 +484,21 @@ async function ensurePlaying() {
       console.log(`Reproduciendo: ${current.title || current.url}${seekOffset ? ` (desde ${seekOffset}s)` : ''}`)
       let stream
       try {
-        const filePath = await prepareCachedAudio(current)
-        stream = startFileStream(filePath, seekOffset)
+        const sourceUrl = await resolveSource(current)
+        const song = musicCache.findByUrl(sourceUrl)
+          || musicCache.upsertSong({ sourceUrl, title: current.title })
+        current.songId = song.id
+        ensureSongArt(song, sourceUrl) // en segundo plano, no bloquea
+        if (musicCache.hasLocal(song) || song.persisted) {
+          // Ya disponible (caché local u object-store): archivo → instantáneo y con seek.
+          const filePath = await musicCache.getLocalAudio(song, dest => downloadToFile(sourceUrl, dest))
+          stream = startFileStream(filePath, seekOffset)
+        } else {
+          // Nueva: stream inmediato + cacheo en 2º plano desde la misma descarga.
+          stream = startStreamAndCache({ ...current, url: sourceUrl }, seekOffset, song)
+        }
       } catch (err) {
-        console.warn('Caché de música no disponible, streaming directo:', err.message)
+        console.warn('Reproducción: fallback a streaming directo:', err.message)
         stream = startStream(current, seekOffset)
       }
       currentMixer = new MixerStream(stream, () => currentResource ? currentResource.playbackDuration : 0)
