@@ -111,9 +111,11 @@ let currentResource = null
 // Caché en inactividad: la reproducción siempre es por stream; un proceso aparte
 // baja canciones de la cola a disco SOLO cuando no hay un stream descargando, así
 // nunca corren dos yt-dlp a la vez en la VM de 1 GB.
-let prefetching = false        // el cacheador de inactividad está trabajando
+let prefetching = false        // el trabajo de fondo (meta/carátula/caché) está activo
 let streamDownloading = false  // hay un yt-dlp activo descargando el stream actual
-const IDLE_CACHE_INTERVAL = 20000 // cada 20s revisa si puede cachear en inactividad
+let buffering = false          // EXTRACCIÓN INICIAL: el stream arrancó pero el audio
+                               // aún no suena → no se hace NADA de fondo (prioridad total)
+const BG_WORK_INTERVAL = 10000 // cada 10s intenta enriquecer/cachear de fondo
 let seekOffset = 0      // segundos ya descartados por seek en el stream actual
 let seekTarget = 0      // desde dónde arrancar el próximo stream
 let transition = 'next' // qué hacer cuando el player quede idle: next | previous | seek | stop
@@ -273,13 +275,14 @@ function startStream(item, seekSec) {
   args.push('-vn', '-ar', '48000', '-ac', '2', '-f', 's16le', 'pipe:1')
   const ff = spawn(FFMPEG, args)
   streamDownloading = true
+  buffering = true // extracción inicial: nada de fondo hasta que suene (evento Playing)
   yt.stdout.pipe(ff.stdin)
   yt.stdout.on('error', () => {})
   ff.stdin.on('error', () => {})
   yt.on('error', err => console.error('yt-dlp:', err.message))
   ff.on('error', err => console.error('ffmpeg:', err.message))
   ff.stderr.on('data', d => process.stderr.write(d))
-  yt.on('close', () => { streamDownloading = false })
+  yt.on('close', () => { streamDownloading = false; buffering = false })
   activeProcs = [yt, ff]
   return ff.stdout
 }
@@ -299,7 +302,8 @@ function startStreamAndCache(item, seekSec, song) {
   const partPath = `${cp}.${process.pid}.${Date.now()}.part`
   let cacheFile = null
   try { cacheFile = createWriteStream(partPath) } catch { cacheFile = null }
-  streamDownloading = true // ocupa el yt-dlp: el prefetch cede hasta que termine
+  streamDownloading = true // ocupa el yt-dlp: el trabajo de fondo cede hasta que termine
+  buffering = true         // extracción inicial: nada de fondo hasta que suene (Playing)
 
   yt.stdout.pipe(ff.stdin)
   if (cacheFile) { yt.stdout.pipe(cacheFile); cacheFile.on('error', () => { cacheFile = null }) }
@@ -310,6 +314,7 @@ function startStreamAndCache(item, seekSec, song) {
   ff.stderr.on('data', d => process.stderr.write(d))
   yt.on('close', async code => {
     streamDownloading = false
+    buffering = false
     if (cacheFile) { try { cacheFile.end() } catch {} }
     const ok = code === 0 && cacheFile && existsSync(partPath)
     if (ok) {
@@ -437,66 +442,65 @@ async function forceCacheAudio(item) {
   return song
 }
 
-// Enriquecer la canción ACTUAL cuando ya empezó a sonar: título/duración y
-// carátula, y refrescar el panel. Se llama desde el evento Playing del reproductor
-// (la extracción ya pasó), así no afecta la latencia de arranque. Usa `prefetching`
-// como candado para no solaparse con el cacheador de inactividad.
-async function enrichCurrent(item) {
-  if (!item || item !== current || prefetching) return
-  prefetching = true
-  try {
-    if (!item.duration) await fetchMeta(item) // título/duración + updatePanel
-    const sourceUrl = await resolveSource(item) // instantáneo si ya es URL
-    const song = musicCache.findByUrl(sourceUrl)
-      || musicCache.upsertSong({ sourceUrl, title: item.title })
-    item.songId = song.id
-    updatePanel() // el panel ya puede pedir /art con el songId
-    if (!song.art_key) { await ensureSongArt(song, sourceUrl); updatePanel() }
-  } catch { /* sin metadata/carátula: no rompe la reproducción */ } finally {
-    prefetching = false
-  }
+// Trabajo de fondo: metadatos + carátula (current y luego la COLA) y, cuando no
+// hay descarga de stream en curso, cacheo de la cola. UNA sola tarea yt-dlp por
+// llamada (en orden de prioridad) para no solapar dos yt-dlp.
+// REGLA: NO corre durante la extracción inicial (`buffering`) — mientras la
+// canción aún no suena, la prioridad es total para el arranque del stream.
+// Resuelve la canción de un item SIN gastar yt-dlp si ya se conoce (songId o URL
+// directa ya registrada). Solo resuelve (yt-dlp) términos de búsqueda nuevos.
+function songForItem(item) {
+  if (item.songId) { const s = musicCache.getById(item.songId); if (s) return s }
+  if (/^https?:\/\//i.test(item.url)) { const s = musicCache.findByUrl(item.url); if (s) return s }
+  return null
 }
 
-// Cacheador en INACTIVIDAD: cuando NO hay un stream descargando (el bot está
-// ocioso o reproduciendo desde caché), baja a disco UNA canción no cacheada de
-// la cola. Nunca corre junto a un stream de reproducción → no hay dos yt-dlp a
-// la vez ni descargas a medias que choquen con un "siguiente". La reproducción
-// siempre es por stream; este proceso solo "calienta" la caché en los huecos.
-async function idleCacheTick() {
-  if (streamDownloading || prefetching) return // hay descarga activa: no interferir
+async function backgroundWork() {
+  if (buffering || prefetching) return
   prefetching = true
+  let didWork = false
   try {
-    // UNA sola tarea yt-dlp por tick, en orden de prioridad, para no solapar.
-    // 1) Metadata faltante (duración → barra de progreso) de current o cola.
+    // 1) Metadata faltante (título/duración → barra) — current primero, luego cola.
     const needMeta = [current, ...queue].find(it => it && !it.duration && it.url)
-    if (needMeta) { await fetchMeta(needMeta); return }
-    // 2) Cachear (y traer carátula vía forceCacheAudio) una canción de la cola.
-    for (const item of queue) {
-      if (streamDownloading) break
-      const sourceUrl = await resolveSource(item)
-      const song = musicCache.findByUrl(sourceUrl)
-        || musicCache.upsertSong({ sourceUrl, title: item.title })
-      item.songId = song.id
-      if (musicCache.hasLocal(song) || song.persisted) continue // ya disponible
-      await forceCacheAudio({ ...item, url: sourceUrl })
-      console.log(`Caché en inactividad: canción ${song.id}`)
-      return
-    }
-    // 3) Carátula faltante de una canción ya cacheada (p.ej. cacheada por el tee
-    //    del stream, que no baja carátula). current y cola.
-    for (const item of [current, ...queue]) {
-      if (!item || !/^https?:\/\//i.test(item.url)) continue
-      const song = musicCache.findByUrl(item.url)
-      if (song && !song.art_key && (musicCache.hasLocal(song) || song.persisted)) {
-        await ensureSongArt(song, item.url)
-        return
+    if (needMeta) {
+      await fetchMeta(needMeta); didWork = true
+    } else {
+      // 2) songId + carátula faltante — current primero, luego cola.
+      for (const item of [current, ...queue]) {
+        if (buffering) break // empezó una extracción: cede de inmediato
+        if (!item || !item.url) continue
+        let song = songForItem(item)
+        let sourceUrl = song ? song.source_url : await resolveSource(item)
+        if (!song) {
+          song = musicCache.findByUrl(sourceUrl) || musicCache.upsertSong({ sourceUrl, title: item.title })
+        }
+        if (item.songId !== song.id) { item.songId = song.id; updatePanel() }
+        if (!song.art_key) { await ensureSongArt(song, sourceUrl); updatePanel(); didWork = true; break }
+      }
+      // 3) Cachear una canción de la cola — solo si el stream actual NO está
+      //    descargando (operación pesada: evita dos descargas a la vez).
+      if (!didWork && !streamDownloading) {
+        for (const item of queue) {
+          if (buffering || streamDownloading) break
+          const sourceUrl = (songForItem(item)?.source_url) || await resolveSource(item)
+          const song = musicCache.findByUrl(sourceUrl)
+            || musicCache.upsertSong({ sourceUrl, title: item.title })
+          item.songId = song.id
+          if (musicCache.hasLocal(song) || song.persisted) continue // ya disponible
+          await forceCacheAudio({ ...item, url: sourceUrl })
+          console.log(`Caché en inactividad: canción ${song.id}`)
+          didWork = true; break
+        }
       }
     }
   } catch { /* reintenta en el próximo tick */ } finally {
     prefetching = false
   }
+  // Si hubo trabajo y no empezó una extracción, encadena pronto para drenar la
+  // cola de tareas rápido (con 1.5s de respiro para no ahogar al stream).
+  if (didWork && !buffering) setTimeout(() => backgroundWork(), 1500)
 }
-setInterval(() => { idleCacheTick() }, IDLE_CACHE_INTERVAL)
+setInterval(() => { backgroundWork() }, BG_WORK_INTERVAL)
 
 // Reproduce desde un archivo local ya descargado (el seek es seek de archivo).
 function startFileStream(filePath, seekSec) {
@@ -571,6 +575,7 @@ async function ensurePlaying() {
       // No se resuelve ni se baja carátula/metadata aquí (eso lo hace el proceso
       // de inactividad). Solo se usa el archivo si ya está COMPLETO en caché.
       let stream
+      buffering = false // el camino de archivo (caché) no extrae; los streams lo ponen true
       try {
         const raw = current.url
         const isUrl = /^https?:\/\//i.test(raw)
@@ -597,11 +602,11 @@ async function ensurePlaying() {
       currentResource = createAudioResource(currentMixer, { inputType: StreamType.Raw })
       musicPlayer.play(currentResource)
       updatePanel()
-      // Cuando el audio EMPIEZA a sonar (ya pasó la extracción lenta), recién ahí
-      // se obtienen metadatos + carátula y se refresca el panel, para no competir
-      // con la extracción del stream durante el arranque.
-      const enrichItem = current
-      musicPlayer.once(AudioPlayerStatus.Playing, () => { enrichCurrent(enrichItem) })
+      // Cuando el audio EMPIEZA a sonar (terminó la extracción inicial), se levanta
+      // el flag de buffering y arranca el trabajo de fondo: metadatos + carátula de
+      // la canción actual y de la cola, y refresco del panel. No corre antes (durante
+      // la extracción) para no competir con el arranque del stream.
+      musicPlayer.once(AudioPlayerStatus.Playing, () => { buffering = false; backgroundWork() })
 
       const err = await waitIdle(musicPlayer)
       killStreamProcs()
@@ -704,11 +709,14 @@ function addToQueue(url, voiceChannelId, guildId, textChannelId, title) {
   if (queue.length >= MAX_QUEUE) throw new Error(`La cola está llena (máximo ${MAX_QUEUE})`)
   const item = { url, title: title || url, duration: null, voiceChannelId, guildId, textChannelId }
   // La metadata (título/duración) NO se pide aquí para no lanzar otro yt-dlp que
-  // compita con el arranque del stream; la rellena idleCacheTick en inactividad.
+  // compita con el arranque del stream; la rellena backgroundWork cuando ya suena.
   queue.push(item)
   const startsNow = !current && queue.length === 1
   ensurePlaying()
   updatePanel()
+  // No se dispara backgroundWork aquí: si esta canción arranca ahora, marcaría
+  // buffering un instante después y competiríamos con la extracción. El intervalo
+  // y el evento Playing ya enriquecen la cola mientras algo suena.
   return { startsNow, position: queue.length }
 }
 
