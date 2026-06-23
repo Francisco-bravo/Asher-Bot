@@ -1481,7 +1481,10 @@ http.createServer(async (req, res) => {
         return
       }
       if (path === '/api/state') return sendJson(getState())
-      if (path === '/api/sounds') return sendJson(soundLib.tree(soundLib.listForUser(null)))
+      if (path === '/api/sounds') {
+        const pu = panelUser(req)
+        return sendJson(soundLib.tree(soundLib.listForUser(pu ? pu.id : null)))
+      }
       if (path === '/api/voice-channels') {
         if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)
         return sendJson(listVoiceChannels())
@@ -1548,6 +1551,12 @@ http.createServer(async (req, res) => {
           return sendJson({ ok: true })
         }
         case '/api/sound': {
+          // Un sonido privado solo lo reproduce quien lo ve (su dueño o un admin).
+          const snd = soundLib.getById(Number(body.name))
+          if (snd) {
+            const pu = panelUser(req)
+            if (!rbac.canSeeSound(pu ? pu.id : null, snd)) return sendJson({ error: 'Sonido no disponible' }, 403)
+          }
           const id = await playSound(body.name)
           return sendJson({ ok: true, id })
         }

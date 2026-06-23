@@ -163,12 +163,17 @@
   }
   .sb-row.selected .arrow { color: #fff; }
   .sb-main { flex: 1; min-width: 0; }
+  .sb-search-row { display: flex; gap: 8px; align-items: stretch; margin-bottom: 12px; }
+  .sb-search-row .sound-search { margin-bottom: 0; }
+  .sb-search-row #btn-upload-sound { flex-shrink: 0; white-space: nowrap; }
   .sound-search {
     width: 100%; padding: 12px 16px; border: var(--border); border-radius: 10px;
     background: var(--panel); color: var(--text); font-size: .95rem;
     margin-bottom: 12px;
   }
   .sound-search:focus { outline: 2px solid var(--accent); border-color: transparent; }
+  .sound-btn.private { border-color: var(--accent); }
+  .sound-btn .lock { opacity: .7; font-size: .8em; margin-left: 3px; }
   .sound-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 10px; }
   .sound-grid .empty { grid-column: 1 / -1; }
   .sound-btn.playing { background: var(--danger); border-color: transparent; }
@@ -364,11 +369,11 @@
   .modal-folder b { color: var(--text); }
   .upload-form { display: flex; flex-direction: column; gap: 12px; }
   .upload-form label { display: flex; flex-direction: column; gap: 4px; font-size: .85rem; color: var(--muted); }
-  .upload-form input {
+  .upload-form input, .upload-form select {
     padding: 11px 13px; border: var(--border); border-radius: 10px;
     background: var(--panel); color: var(--text); font-size: .95rem;
   }
-  .upload-form input:focus { outline: 2px solid var(--accent); border-color: transparent; }
+  .upload-form input:focus, .upload-form select:focus { outline: 2px solid var(--accent); border-color: transparent; }
   .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 4px; }
   .modal-actions button { padding: 11px 18px; border: none; border-radius: 10px; cursor: pointer; background: var(--accent); color: #fff; font-weight: 600; }
   .modal-actions button:hover { background: var(--accent2); }
@@ -409,7 +414,10 @@
     <div class="sb-layout">
       <div class="sb-sidebar" id="sb-sidebar"></div>
       <div class="sb-main">
-        <input type="text" id="sound-search" class="sound-search" placeholder="🔍 Buscar sonidos...">
+        <div class="sb-search-row">
+          <input type="text" id="sound-search" class="sound-search" placeholder="🔍 Buscar sonidos...">
+          <button class="sb-action primary" id="btn-upload-sound" title="Subir un sonido nuevo">⬆️ Subir sonido</button>
+        </div>
         <div class="sound-grid" id="sound-grid"></div>
       </div>
     </div>
@@ -498,6 +506,34 @@
         <div class="modal-actions">
           <button type="button" class="cancel" id="song-cancel">Cancelar</button>
           <button type="submit" id="song-submit">Subir</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="sound-modal" style="display:none">
+    <div class="modal">
+      <h2>Subir sonido</h2>
+      <p class="modal-folder">Aparecerá en el <b>soundboard</b>. Elige si es solo para ti (privado) o para todos (público).</p>
+      <form class="upload-form" id="sound-form">
+        <label>Archivo de audio (.mp3 .wav .ogg .m4a .flac .webm)
+          <input type="file" id="sound-file" accept=".mp3,.wav,.ogg,.m4a,.flac,.webm" required>
+        </label>
+        <label>Nombre
+          <input type="text" id="sound-label" placeholder="Nombre del sonido" required>
+        </label>
+        <label>Carpeta (opcional)
+          <input type="text" id="sound-folder" placeholder="Ej: memes/risas">
+        </label>
+        <label>Visibilidad
+          <select id="sound-visibility">
+            <option value="private">🔒 Privado (solo yo)</option>
+            <option value="global">🌐 Público (todos)</option>
+          </select>
+        </label>
+        <div class="modal-actions">
+          <button type="button" class="cancel" id="sound-cancel">Cancelar</button>
+          <button type="submit" id="sound-submit">Subir</button>
         </div>
       </form>
     </div>
@@ -840,7 +876,11 @@ function renderSoundGrid() {
     sounds = selectedPath === '' ? allSounds(soundData) : node.sounds
   }
   document.getElementById('sound-grid').innerHTML = sounds.length
-    ? sounds.map(s => `<button class="sound-btn" data-file="${esc(s.file)}" title="${esc(s.label)}">${esc(s.label)}</button>`).join('')
+    ? sounds.map(s => {
+        const priv = s.visibility === 'private'
+        const tip = s.label + (s.owner ? ' — subido por ' + s.owner : '') + (priv ? ' (privado)' : '')
+        return `<button class="sound-btn${priv ? ' private' : ''}" data-file="${esc(s.file)}" title="${esc(tip)}">${esc(s.label)}${priv ? '<span class="lock">🔒</span>' : ''}</button>`
+      }).join('')
     : `<p class="empty">${q ? 'Sin resultados para la búsqueda' : 'No hay sonidos en esta carpeta'}</p>`
   updatePlayingButtons()
 }
@@ -1190,6 +1230,56 @@ document.getElementById('song-form').addEventListener('submit', async (e) => {
     loadMusic()
   } catch {
     toast('No se pudo subir la canción')
+  } finally {
+    btn.disabled = false; btn.textContent = 'Subir'
+  }
+})
+
+// Modal: subir sonido al soundboard (privado o público)
+function openSoundModal() {
+  if (!me) { toast('Inicia sesión con Discord para subir sonidos'); return }
+  const isAdmin = (me.roles || []).includes('admin')
+  const sel = document.getElementById('sound-visibility')
+  const globalOpt = sel.querySelector('option[value="global"]')
+  // Solo un admin puede subir sonidos públicos (el backend también lo exige).
+  globalOpt.disabled = !isAdmin
+  globalOpt.textContent = isAdmin ? '🌐 Público (todos)' : '🌐 Público (solo admin)'
+  if (!isAdmin) sel.value = 'private'
+  document.getElementById('sound-modal').style.display = 'flex'
+  document.getElementById('sound-label').focus()
+}
+function closeSoundModal() {
+  document.getElementById('sound-modal').style.display = 'none'
+  document.getElementById('sound-form').reset()
+}
+document.getElementById('btn-upload-sound').addEventListener('click', openSoundModal)
+document.getElementById('sound-cancel').addEventListener('click', closeSoundModal)
+document.getElementById('sound-modal').addEventListener('click', (e) => {
+  if (e.target.id === 'sound-modal') closeSoundModal()
+})
+document.getElementById('sound-form').addEventListener('submit', async (e) => {
+  e.preventDefault()
+  const file = document.getElementById('sound-file').files[0]
+  const label = document.getElementById('sound-label').value.trim()
+  const folder = document.getElementById('sound-folder').value.trim()
+  const visibility = document.getElementById('sound-visibility').value
+  if (!file || !label) { toast('Falta el archivo o el nombre'); return }
+  const ext = (file.name.split('.').pop() || '').toLowerCase()
+  const btn = document.getElementById('sound-submit')
+  btn.disabled = true; btn.textContent = 'Subiendo...'
+  try {
+    const buf = await file.arrayBuffer()
+    const qs = new URLSearchParams({ label, folder, ext, visibility })
+    const res = await webFetch('/api/sounds/upload?' + qs, {
+      method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: buf,
+    })
+    const data = await res.json().catch(() => null)
+    if (!res.ok) { toast(data && data.error ? data.error : 'Error al subir'); return }
+    toast('Sonido subido ✓')
+    closeSoundModal()
+    loadSounds()
+  } catch {
+    toast('No se pudo subir el sonido')
   } finally {
     btn.disabled = false; btn.textContent = 'Subir'
   }
