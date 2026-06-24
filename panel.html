@@ -195,8 +195,17 @@
   /* Modo gestión del soundboard (renombrar/ocultar, solo para ti) */
   .sb-action.on { background: var(--accent); border-color: transparent; color: #fff; }
   .sound-grid.managing { display: flex; flex-direction: column; gap: 8px; }
-  .sound-manage { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: var(--border); border-radius: 12px; background: var(--panel); }
+  .sound-manage { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: var(--border); border-radius: 12px; background: var(--panel); position: relative; }
   .sound-manage.hidden { opacity: .5; }
+  /* Estado "cargando cambios": bloquea la tarjeta y muestra un spinner */
+  .sound-manage.busy { pointer-events: none; opacity: .6; }
+  .sound-manage.busy .sm-actions { visibility: hidden; }
+  .sound-manage.busy::after {
+    content: '⏳ Guardando…'; position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
+    font-size: .8rem; color: var(--muted); white-space: nowrap;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .sb-row.busy { pointer-events: none; opacity: .6; }
   .sm-info { flex: 1; min-width: 0; }
   .sm-name { font-weight: 600; word-break: break-word; }
   .sm-orig { font-size: .72rem; color: var(--muted); margin-top: 2px; }
@@ -1239,15 +1248,31 @@ function mgmtCard(s) {
     `<div class="sm-actions">${actions}</div></div>`
 }
 
+// Marca un elemento (tarjeta o fila) como "cargando": lo bloquea y deshabilita
+// sus botones. Reversible (no toca el innerHTML).
+function setBusy(el, on) {
+  if (!el) return
+  el.classList.toggle('busy', on)
+  el.querySelectorAll('button').forEach(b => b.disabled = on)
+}
+
 // Ejecuta una acción administrativa y refresca Gestión + el soundboard normal.
-async function mgmtAction(method, path, body) {
+// `busyEl` (opcional): elemento a bloquear con spinner mientras carga.
+async function mgmtAction(method, path, body, busyEl) {
+  setBusy(busyEl, true)
+  let ok = false
   try {
     const res = await webFetch(path, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     if (!res.ok) { const e = await res.json().catch(() => ({})); alert(e.error || 'No se pudo completar la acción'); return }
+    ok = true
     lastSoundsJSON = null   // el soundboard normal también cambió
-    await loadSoundAdmin()
-    await loadSounds()
   } catch { alert('No se pudo completar la acción') }
+  finally {
+    // loadSoundAdmin reconstruye el grid (descarta el estado busy); si falló y no
+    // hubo recarga, restauramos los botones del elemento bloqueado.
+    if (ok) { await loadSoundAdmin(); await loadSounds() }
+    else setBusy(busyEl, false)
+  }
 }
 
 document.getElementById('mgmt-search').addEventListener('input', renderMgmtGrid)
@@ -1257,12 +1282,13 @@ document.getElementById('mgmt-sidebar').addEventListener('click', async (e) => {
   if (editBtn) {
     e.stopPropagation()
     const p = editBtn.dataset.folderEdit
+    const row = editBtn.closest('.sb-row')
     const leaf = p.split('/').pop()
     openEditModal({
       title: 'Renombrar carpeta',
       desc: 'El nombre de la carpeta <b>para todos</b> (arrastra su contenido).',
       label: 'Nombre de la carpeta', value: leaf,
-      save: async (value) => { if (value !== leaf) await mgmtAction('POST', '/api/sound-admin/rename-folder', { path: p, name: value }) },
+      save: async (value) => { if (value !== leaf) await mgmtAction('POST', '/api/sound-admin/rename-folder', { path: p, name: value }, row) },
     })
     return
   }
@@ -1291,15 +1317,15 @@ document.getElementById('mgmt-grid').addEventListener('click', async (e) => {
       title: 'Renombrar sonido',
       desc: 'El nombre real del sonido <b>para todos</b>.',
       label: 'Nombre del sonido', value: label,
-      save: async (value) => { if (value !== label) await mgmtAction('POST', '/api/sound-admin/rename', { soundId: id, label: value }) },
+      save: async (value) => { if (value !== label) await mgmtAction('POST', '/api/sound-admin/rename', { soundId: id, label: value }, card) },
     })
   } else if (act === 'hide') {
-    await mgmtAction('POST', '/api/sound-admin/hide', { soundId: id, hidden: true })
+    await mgmtAction('POST', '/api/sound-admin/hide', { soundId: id, hidden: true }, card)
   } else if (act === 'unhide') {
-    await mgmtAction('POST', '/api/sound-admin/hide', { soundId: id, hidden: false })
+    await mgmtAction('POST', '/api/sound-admin/hide', { soundId: id, hidden: false }, card)
   } else if (act === 'delete') {
     if (!confirm('¿Eliminar «' + label + '» para SIEMPRE? Esto no se puede deshacer.')) return
-    await mgmtAction('DELETE', '/api/sound-admin/sound', { soundId: id })
+    await mgmtAction('DELETE', '/api/sound-admin/sound', { soundId: id }, card)
   }
 })
 
@@ -1367,7 +1393,8 @@ document.getElementById('btn-manage-sounds').addEventListener('click', () => {
 })
 
 // Guarda una preferencia del usuario sobre un sonido y refresca el soundboard.
-async function setSoundPref(soundId, changes) {
+async function setSoundPref(soundId, changes, busyEl) {
+  setBusy(busyEl, true)
   try {
     const res = await webFetch('/api/sound-prefs', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1377,6 +1404,7 @@ async function setSoundPref(soundId, changes) {
     lastSoundsJSON = null // forzar re-render en el próximo loadSounds
     await loadSounds()
   } catch { alert('No se pudo guardar el cambio') }
+  finally { setBusy(busyEl, false) } // loadSounds reconstruye en éxito; restaura en error
 }
 
 // Acciones de las tarjetas de gestión: renombrar (alias propio) y ocultar/restaurar
@@ -1392,10 +1420,10 @@ document.getElementById('sound-grid').addEventListener('click', async (e) => {
       title: 'Renombrar sonido',
       desc: 'Este nombre <b>solo lo verás tú</b>. Déjalo vacío para volver al original.',
       label: 'Tu nombre para el sonido', value: s.alias || s.label, allowEmpty: true,
-      save: (value) => setSoundPref(id, { alias: value }),
+      save: (value) => setSoundPref(id, { alias: value }, card),
     })
   } else if (actBtn.dataset.act === 'hide') {
-    await setSoundPref(id, { hidden: !s.hidden })
+    await setSoundPref(id, { hidden: !s.hidden }, card)
   }
 })
 
@@ -1788,9 +1816,11 @@ document.getElementById('edit-form').addEventListener('submit', async (e) => {
   if (!value && !editAllowEmpty) { toast('El nombre no puede estar vacío'); return }
   const fn = editOnSave
   const btn = document.getElementById('edit-submit')
-  btn.disabled = true; btn.textContent = 'Guardando...'
+  const cancel = document.getElementById('edit-cancel')
+  const input = document.getElementById('edit-input')
+  btn.disabled = true; cancel.disabled = true; input.disabled = true; btn.textContent = 'Guardando...'
   try { if (fn) await fn(value) ; closeEditModal() }
-  finally { btn.disabled = false; btn.textContent = 'Guardar' }
+  finally { btn.disabled = false; cancel.disabled = false; input.disabled = false; btn.textContent = 'Guardar' }
 })
 
 function openFolderModal() {
