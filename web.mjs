@@ -15,6 +15,7 @@ const { getDb } = await import('./lib/db.mjs')
 const auth = await import('./lib/auth.mjs')
 const rbac = await import('./lib/rbac.mjs')
 const sounds = await import('./lib/sounds.mjs')
+const folders = await import('./lib/folders.mjs')
 const playlists = await import('./lib/playlists.mjs')
 const playHistory = await import('./lib/history.mjs')
 const music = await import('./lib/music-cache.mjs')
@@ -235,7 +236,22 @@ http.createServer(async (req, res) => {
     }
 
     if (req.method === 'GET' && path === '/api/sounds') {
-      return send(res, 200, sounds.tree(sounds.listForUser(user.id)))
+      return send(res, 200, sounds.tree(sounds.listForUser(user.id), folders.list()))
+    }
+
+    // Carpetas del soundboard: listar (para el selector) y crear (botón dedicado).
+    if (req.method === 'GET' && path === '/api/folders') {
+      return send(res, 200, folders.list())
+    }
+    if (req.method === 'POST' && path === '/api/folders') {
+      const body = JSON.parse((await readBody(req)).toString() || '{}')
+      const raw = body.parent ? `${body.parent}/${body.name || ''}` : (body.path || body.name || '')
+      try {
+        const path = folders.create(raw)
+        return send(res, 201, { ok: true, path })
+      } catch (e) {
+        return send(res, 400, { error: e.message || 'No se pudo crear la carpeta' })
+      }
     }
 
     // Subir sonido: cuerpo = bytes crudos; metadatos en el query

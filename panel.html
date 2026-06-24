@@ -461,6 +461,7 @@
       <div class="sb-main">
         <div class="sb-search-row">
           <input type="text" id="sound-search" class="sound-search" placeholder="🔍 Buscar sonidos...">
+          <button class="sb-action" id="btn-new-folder" title="Crear una carpeta">📁 Nueva carpeta</button>
           <button class="sb-action primary" id="btn-upload-sound" title="Subir un sonido nuevo">⬆️ Subir sonido</button>
         </div>
         <div class="sound-grid" id="sound-grid"></div>
@@ -587,7 +588,9 @@
           <input type="text" id="sound-label" placeholder="Nombre del sonido" required>
         </label>
         <label>Carpeta (opcional)
-          <input type="text" id="sound-folder" placeholder="Ej: memes/risas">
+          <select id="sound-folder">
+            <option value="">📂 (sin carpeta — raíz)</option>
+          </select>
         </label>
         <label>Visibilidad
           <select id="sound-visibility">
@@ -598,6 +601,27 @@
         <div class="modal-actions">
           <button type="button" class="cancel" id="sound-cancel">Cancelar</button>
           <button type="submit" id="sound-submit">Subir</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="folder-modal" style="display:none">
+    <div class="modal">
+      <h2>Nueva carpeta</h2>
+      <p class="modal-folder">Crea una carpeta (puede ir <b>dentro de otra</b>). Después podrás elegirla al subir un sonido.</p>
+      <form class="upload-form" id="folder-form">
+        <label>Dentro de
+          <select id="folder-parent">
+            <option value="">📂 (raíz)</option>
+          </select>
+        </label>
+        <label>Nombre de la carpeta
+          <input type="text" id="folder-name" placeholder="Ej: risas" required>
+        </label>
+        <div class="modal-actions">
+          <button type="button" class="cancel" id="folder-cancel">Cancelar</button>
+          <button type="submit" id="folder-submit">Crear</button>
         </div>
       </form>
     </div>
@@ -1362,6 +1386,36 @@ document.getElementById('song-form').addEventListener('submit', async (e) => {
   }
 })
 
+// ── Selector de carpetas (no se crean escribiendo: se eligen del árbol) ──
+// Recorre el árbol de carpetas (soundData) invocando cb(rutaCompleta, nodo).
+function eachFolderPath(node, prefix, cb) {
+  for (const f of (node.folders || [])) {
+    const p = prefix ? prefix + '/' + f.name : f.name
+    cb(p, f)
+    eachFolderPath(f, p, cb)
+  }
+}
+// Genera las <option> de un selector de carpetas, indentadas según el anidamiento.
+function folderOptionsHtml(selected, rootLabel) {
+  let html = `<option value="">${rootLabel || '📂 (sin carpeta — raíz)'}</option>`
+  if (soundData) {
+    eachFolderPath(soundData, '', (p, f) => {
+      const depth = p.split('/').length - 1
+      const indent = '   '.repeat(depth)
+      const sel = p === selected ? ' selected' : ''
+      html += `<option value="${esc(p)}"${sel}>${indent}📁 ${esc(f.name)}</option>`
+    })
+  }
+  return html
+}
+// Rellena ambos selectores de carpeta conservando la selección actual.
+function populateFolderSelects() {
+  const sf = document.getElementById('sound-folder')
+  if (sf) sf.innerHTML = folderOptionsHtml(sf.value)
+  const pf = document.getElementById('folder-parent')
+  if (pf) pf.innerHTML = folderOptionsHtml(pf.value, '📂 (raíz)')
+}
+
 // Modal: subir sonido al soundboard (privado o público)
 function openSoundModal() {
   if (!me) { toast('Inicia sesión con Discord para subir sonidos'); return }
@@ -1372,6 +1426,7 @@ function openSoundModal() {
   globalOpt.disabled = !isAdmin
   globalOpt.textContent = isAdmin ? '🌐 Público (todos)' : '🌐 Público (solo admin)'
   if (!isAdmin) sel.value = 'private'
+  document.getElementById('sound-folder').innerHTML = folderOptionsHtml('') // carpetas a elegir
   document.getElementById('sound-modal').style.display = 'flex'
   document.getElementById('sound-label').focus()
 }
@@ -1409,6 +1464,48 @@ document.getElementById('sound-form').addEventListener('submit', async (e) => {
     toast('No se pudo subir el sonido')
   } finally {
     btn.disabled = false; btn.textContent = 'Subir'
+  }
+})
+
+// Modal: crear carpeta (acción dedicada; las carpetas NO se crean al subir sonido)
+function openFolderModal() {
+  if (!me) { toast('Inicia sesión con Discord para crear carpetas'); return }
+  document.getElementById('folder-parent').innerHTML = folderOptionsHtml('', '📂 (raíz)')
+  document.getElementById('folder-name').value = ''
+  document.getElementById('folder-modal').style.display = 'flex'
+  document.getElementById('folder-name').focus()
+}
+function closeFolderModal() {
+  document.getElementById('folder-modal').style.display = 'none'
+  document.getElementById('folder-form').reset()
+}
+document.getElementById('btn-new-folder').addEventListener('click', openFolderModal)
+document.getElementById('folder-cancel').addEventListener('click', closeFolderModal)
+document.getElementById('folder-modal').addEventListener('click', (e) => {
+  if (e.target.id === 'folder-modal') closeFolderModal()
+})
+document.getElementById('folder-form').addEventListener('submit', async (e) => {
+  e.preventDefault()
+  const parent = document.getElementById('folder-parent').value
+  const name = document.getElementById('folder-name').value.trim()
+  if (!name) { toast('Falta el nombre de la carpeta'); return }
+  const btn = document.getElementById('folder-submit')
+  btn.disabled = true; btn.textContent = 'Creando...'
+  try {
+    const res = await webFetch('/api/folders', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ parent, name }),
+    })
+    const data = await res.json().catch(() => null)
+    if (!res.ok) { toast(data && data.error ? data.error : 'No se pudo crear la carpeta'); return }
+    toast('Carpeta creada ✓')
+    closeFolderModal()
+    await loadSounds()          // refresca el árbol con la carpeta nueva
+    populateFolderSelects()
+  } catch {
+    toast('No se pudo crear la carpeta')
+  } finally {
+    btn.disabled = false; btn.textContent = 'Crear'
   }
 })
 

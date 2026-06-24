@@ -29,6 +29,7 @@ import http from 'node:http'
 import ffmpegStatic from 'ffmpeg-static'
 import { getDb } from './lib/db.mjs'
 import * as soundLib from './lib/sounds.mjs'
+import * as folders from './lib/folders.mjs'
 import * as playHistory from './lib/history.mjs'
 import * as auth from './lib/auth.mjs'
 import * as rbac from './lib/rbac.mjs'
@@ -1485,7 +1486,7 @@ http.createServer(async (req, res) => {
       if (path === '/api/state') return sendJson(getState())
       if (path === '/api/sounds') {
         const pu = panelUser(req)
-        return sendJson(soundLib.tree(soundLib.listForUser(pu ? pu.id : null)))
+        return sendJson(soundLib.tree(soundLib.listForUser(pu ? pu.id : null), folders.list()))
       }
       if (path === '/api/voice-channels') {
         if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)
