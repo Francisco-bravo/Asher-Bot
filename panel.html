@@ -59,6 +59,18 @@
   }
   .status-pill .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--danger); flex-shrink: 0; }
   .status-pill .dot.on { background: var(--ok); animation: pulse 2.2s infinite; }
+  /* Usuario logueado (arriba a la derecha) */
+  .user-chip {
+    display: none; align-items: center; gap: 9px;
+    background: var(--panel); border: var(--border);
+    padding: 5px 14px 5px 6px; border-radius: 999px; box-shadow: var(--shadow);
+  }
+  .user-chip img, .user-chip .uc-ph {
+    width: 30px; height: 30px; border-radius: 50%; object-fit: cover; flex-shrink: 0;
+  }
+  .user-chip .uc-ph { display: grid; place-items: center; background: var(--panel3); font-size: .9rem; }
+  .user-chip .uc-name { font-size: .9rem; font-weight: 600; white-space: nowrap; max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
+  .user-chip .uc-admin { font-size: .68rem; color: var(--accent); font-weight: 700; }
   @keyframes pulse {
     0% { box-shadow: 0 0 0 0 rgba(35,165,90,.5); }
     70% { box-shadow: 0 0 0 8px rgba(35,165,90,0); }
@@ -491,6 +503,7 @@
       <div class="status-pill">
         <span class="dot" id="conn-dot"></span><span id="conn-text">Desconectado del canal de voz</span>
       </div>
+      <div class="user-chip" id="user-chip" title="Sesión iniciada"></div>
     </div>
   </div>
 
@@ -801,7 +814,22 @@ async function loadMe() {
     }
   } catch { me = null }
   applyAdminUI()
+  renderUserChip()
   loadMusic()
+}
+
+// Muestra el usuario logueado (avatar + nombre) arriba a la derecha.
+function renderUserChip() {
+  const chip = document.getElementById('user-chip')
+  if (!chip) return
+  if (!me) { chip.style.display = 'none'; return }
+  const name = me.displayName || me.username || 'Usuario'
+  const isAdmin = (me.roles || []).includes('admin')
+  const av = me.avatarUrl
+    ? `<img src="${esc(me.avatarUrl)}" alt="">`
+    : `<span class="uc-ph">${esc((name[0] || '?').toUpperCase())}</span>`
+  chip.innerHTML = av + `<span class="uc-name">${esc(name)}${isAdmin ? ' <span class="uc-admin">ADMIN</span>' : ''}</span>`
+  chip.style.display = 'flex'
 }
 
 // La caché es interna: la pestaña 💾 Caché (y su panel, visible en modo dividido)
