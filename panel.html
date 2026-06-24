@@ -685,6 +685,22 @@
       </form>
     </div>
   </div>
+
+  <div class="modal-overlay" id="edit-modal" style="display:none">
+    <div class="modal">
+      <h2 id="edit-title">Editar nombre</h2>
+      <p class="modal-folder" id="edit-desc"></p>
+      <form class="upload-form" id="edit-form">
+        <label id="edit-label">Nombre
+          <input type="text" id="edit-input" required>
+        </label>
+        <div class="modal-actions">
+          <button type="button" class="cancel" id="edit-cancel">Cancelar</button>
+          <button type="submit" id="edit-submit">Guardar</button>
+        </div>
+      </form>
+    </div>
+  </div>
 </div>
 
 <div id="toast"></div>
@@ -1242,9 +1258,12 @@ document.getElementById('mgmt-sidebar').addEventListener('click', async (e) => {
     e.stopPropagation()
     const p = editBtn.dataset.folderEdit
     const leaf = p.split('/').pop()
-    const next = prompt('Nuevo nombre de la carpeta (afecta a todos):', leaf)
-    if (next === null || !next.trim() || next.trim() === leaf) return
-    await mgmtAction('POST', '/api/sound-admin/rename-folder', { path: p, name: next.trim() })
+    openEditModal({
+      title: 'Renombrar carpeta',
+      desc: 'El nombre de la carpeta <b>para todos</b> (arrastra su contenido).',
+      label: 'Nombre de la carpeta', value: leaf,
+      save: async (value) => { if (value !== leaf) await mgmtAction('POST', '/api/sound-admin/rename-folder', { path: p, name: value }) },
+    })
     return
   }
   const row = e.target.closest('.sb-row')
@@ -1268,9 +1287,12 @@ document.getElementById('mgmt-grid').addEventListener('click', async (e) => {
   const label = card.dataset.label
   const act = actBtn.dataset.act
   if (act === 'rename') {
-    const next = prompt('Nuevo nombre del sonido (afecta a todos):', label)
-    if (next === null || !next.trim() || next.trim() === label) return
-    await mgmtAction('POST', '/api/sound-admin/rename', { soundId: id, label: next.trim() })
+    openEditModal({
+      title: 'Renombrar sonido',
+      desc: 'El nombre real del sonido <b>para todos</b>.',
+      label: 'Nombre del sonido', value: label,
+      save: async (value) => { if (value !== label) await mgmtAction('POST', '/api/sound-admin/rename', { soundId: id, label: value }) },
+    })
   } else if (act === 'hide') {
     await mgmtAction('POST', '/api/sound-admin/hide', { soundId: id, hidden: true })
   } else if (act === 'unhide') {
@@ -1366,10 +1388,12 @@ document.getElementById('sound-grid').addEventListener('click', async (e) => {
   const s = allSounds(soundData).find(x => x.id === id)
   if (!s) return
   if (actBtn.dataset.act === 'rename') {
-    const current = s.alias || s.label
-    const next = prompt('Nuevo nombre (solo lo verás tú). Déjalo vacío para volver al original:', current)
-    if (next === null) return
-    await setSoundPref(id, { alias: next.trim() })
+    openEditModal({
+      title: 'Renombrar sonido',
+      desc: 'Este nombre <b>solo lo verás tú</b>. Déjalo vacío para volver al original.',
+      label: 'Tu nombre para el sonido', value: s.alias || s.label, allowEmpty: true,
+      save: (value) => setSoundPref(id, { alias: value }),
+    })
   } else if (actBtn.dataset.act === 'hide') {
     await setSoundPref(id, { hidden: !s.hidden })
   }
@@ -1568,16 +1592,20 @@ function forceCacheId(id) {
 
 async function renameSong(id) {
   const s = musicSongs.find(x => x.id === id)
-  const title = (prompt('Nuevo nombre de la canción:', (s && s.title) || '') || '').trim()
-  if (!title || (s && title === s.title)) return
-  try {
-    const res = await webFetch('/api/music/' + id + '/rename', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title }),
-    })
-    if (!res.ok) { const d = await res.json().catch(() => null); toast(d && d.error ? d.error : 'Error'); return }
-    toast('Renombrada ✓')
-    loadMusic()
-  } catch { toast('Error') }
+  openEditModal({
+    title: 'Renombrar canción', label: 'Título de la canción', value: (s && s.title) || '',
+    save: async (title) => {
+      if (s && title === s.title) return
+      try {
+        const res = await webFetch('/api/music/' + id + '/rename', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title }),
+        })
+        if (!res.ok) { const d = await res.json().catch(() => null); toast(d && d.error ? d.error : 'Error'); return }
+        toast('Renombrada ✓')
+        loadMusic()
+      } catch { toast('Error') }
+    },
+  })
 }
 
 async function playSong(id) {
@@ -1730,6 +1758,41 @@ document.getElementById('sound-form').addEventListener('submit', async (e) => {
 })
 
 // Modal: crear carpeta (acción dedicada; las carpetas NO se crean al subir sonido)
+// Modal genérico para editar un nombre. Reemplaza a prompt(). Recibe el texto a
+// mostrar y un callback async que recibe el valor nuevo (ya recortado).
+let editOnSave = null, editAllowEmpty = false
+function openEditModal({ title, desc = '', label = 'Nombre', value = '', allowEmpty = false, save }) {
+  document.getElementById('edit-title').textContent = title
+  const d = document.getElementById('edit-desc')
+  d.innerHTML = desc; d.style.display = desc ? 'block' : 'none'
+  document.getElementById('edit-label').childNodes[0].nodeValue = label + ' '
+  const input = document.getElementById('edit-input')
+  input.value = value
+  input.required = !allowEmpty
+  editOnSave = save; editAllowEmpty = allowEmpty
+  document.getElementById('edit-modal').style.display = 'flex'
+  input.focus(); input.select()
+}
+function closeEditModal() {
+  document.getElementById('edit-modal').style.display = 'none'
+  editOnSave = null
+  document.getElementById('edit-form').reset()
+}
+document.getElementById('edit-cancel').addEventListener('click', closeEditModal)
+document.getElementById('edit-modal').addEventListener('click', (e) => {
+  if (e.target.id === 'edit-modal') closeEditModal()
+})
+document.getElementById('edit-form').addEventListener('submit', async (e) => {
+  e.preventDefault()
+  const value = document.getElementById('edit-input').value.trim()
+  if (!value && !editAllowEmpty) { toast('El nombre no puede estar vacío'); return }
+  const fn = editOnSave
+  const btn = document.getElementById('edit-submit')
+  btn.disabled = true; btn.textContent = 'Guardando...'
+  try { if (fn) await fn(value) ; closeEditModal() }
+  finally { btn.disabled = false; btn.textContent = 'Guardar' }
+})
+
 function openFolderModal() {
   if (!me) { toast('Inicia sesión con Discord para crear carpetas'); return }
   document.getElementById('folder-parent').innerHTML = folderOptionsHtml('', '📂 (raíz)')
