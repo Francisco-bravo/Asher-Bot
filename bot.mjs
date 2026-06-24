@@ -1458,6 +1458,16 @@ http.createServer(async (req, res) => {
   }
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return }
   const path = new URL(req.url, 'http://x').pathname
+  // Activos de marca (logo + favicon): públicos, sin requerir sesión. En Pages
+  // los sirve Cloudflare; esto cubre dev y el acceso directo al bot.
+  if (req.method === 'GET' && (path === '/Asher_logo.jpg' || path === '/Asher_icon.jpg')) {
+    const file = join(ROOT, basename(path))
+    if (existsSync(file)) {
+      res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Cache-Control': 'public, max-age=86400' })
+      res.end(readFileSync(file))
+    } else { res.writeHead(404); res.end() }
+    return
+  }
   // Autenticación: sesión compartida con la web; contraseña como respaldo.
   if (!panelUser(req) && !authorizedByPassword(req)) {
     // Si piden la página del panel sin sesión, mándalos al login de la web,

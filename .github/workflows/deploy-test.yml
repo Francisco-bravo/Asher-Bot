@@ -17,7 +17,7 @@ jobs:
           echo "$SSH_KEY" > key.pem
           chmod 600 key.pem
           scp -i key.pem -o StrictHostKeyChecking=no -r \
-            bot.mjs web.mjs panel.html package.json package-lock.json lib scripts \
+            bot.mjs web.mjs panel.html package.json package-lock.json lib scripts Asher_logo.jpg Asher_icon.jpg \
             ubuntu@144.22.62.84:~/
           ssh -i key.pem -o StrictHostKeyChecking=no ubuntu@144.22.62.84 "\
             echo 'Node en la VM:'; node -v; \
