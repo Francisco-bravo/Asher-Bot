@@ -380,6 +380,50 @@
   .modal-actions .cancel { background: var(--panel); color: var(--muted); }
   .modal-actions .cancel:hover { background: var(--bg); color: var(--text); }
   .modal-actions button:disabled { opacity: .5; cursor: not-allowed; }
+
+  /* Notificaciones en vivo "quién reproduce qué" (dura lo que suena el sonido) */
+  #sound-notifs {
+    position: fixed; top: 16px; right: 16px; z-index: 30;
+    display: flex; flex-direction: column; gap: 8px; max-width: 320px;
+    pointer-events: none;
+  }
+  .sound-notif {
+    display: flex; align-items: center; gap: 10px;
+    background: var(--panel2); border: var(--border); border-left: 3px solid var(--accent);
+    border-radius: 12px; padding: 10px 14px; box-shadow: 0 8px 28px rgba(0,0,0,.45);
+    animation: sn-in .18s ease;
+  }
+  @keyframes sn-in { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: none; } }
+  .sn-av { width: 34px; height: 34px; border-radius: 50%; object-fit: cover; flex: none; }
+  .sn-av-ph { display: grid; place-items: center; background: var(--panel3); font-size: 1rem; }
+  .sn-text { min-width: 0; }
+  .sn-label { font-weight: 600; font-size: .9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sn-who { color: var(--muted); font-size: .78rem; }
+
+  /* Apartado gráfico de estadísticas (solo admin) */
+  .stats-section { margin-bottom: 26px; }
+  .stats-section h3 { font-size: 1rem; margin-bottom: 12px; }
+  .stats-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+  .stats-head h3 { margin: 0; }
+  .stats-head select {
+    padding: 7px 12px; border: var(--border); border-radius: 8px;
+    background: var(--panel); color: var(--text); font-size: .85rem; cursor: pointer;
+  }
+  .top-chart { display: flex; flex-direction: column; gap: 8px; }
+  .bar-row { display: grid; grid-template-columns: 22px minmax(80px, 1.4fr) 3fr auto; align-items: center; gap: 10px; }
+  .bar-rank { color: var(--muted); font-weight: 700; text-align: center; }
+  .bar-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: .88rem; }
+  .bar-track { background: var(--panel); border-radius: 999px; height: 14px; overflow: hidden; }
+  .bar-fill { display: block; height: 100%; background: linear-gradient(90deg, var(--accent2), var(--accent)); border-radius: 999px; min-width: 4px; }
+  .bar-count { font-size: .82rem; font-weight: 600; white-space: nowrap; }
+  .bar-count small { color: var(--muted); font-weight: 400; }
+  .recent-list { list-style: none; display: flex; flex-direction: column; gap: 4px; }
+  .recent-list li { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 10px; background: var(--panel); }
+  .recent-list li.empty { background: none; color: var(--muted); justify-content: center; }
+  .rl-av { width: 28px; height: 28px; border-radius: 50%; object-fit: cover; flex: none; }
+  .rl-av-ph { display: grid; place-items: center; background: var(--panel3); font-size: .85rem; }
+  .rl-main { flex: 1; min-width: 0; font-size: .88rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .rl-time { color: var(--muted); font-size: .76rem; white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -401,6 +445,7 @@
     <button class="tab active" data-page="sounds">🔊 Soundboard</button>
     <button class="tab" data-page="music">🎵 Música</button>
     <button class="tab" id="tab-cache" data-page="cache">💾 Caché</button>
+    <button class="tab" id="tab-stats" data-page="stats">📊 Estadísticas</button>
   </div>
 
   <div class="pages">
@@ -487,6 +532,25 @@
     </p>
     <div id="cache-list"></div>
   </div>
+
+  <div class="page" id="page-stats">
+    <div class="page-head">📊 Estadísticas de sonidos</div>
+    <div class="stats-section">
+      <div class="stats-head">
+        <h3>🏆 Sonidos más reproducidos</h3>
+        <select id="top-n" title="Cuántos mostrar">
+          <option value="5">Top 5</option>
+          <option value="10" selected>Top 10</option>
+          <option value="20">Top 20</option>
+        </select>
+      </div>
+      <div id="top-chart" class="top-chart"><p class="empty">Cargando…</p></div>
+    </div>
+    <div class="stats-section">
+      <h3>🕑 Últimas reproducciones</h3>
+      <ul id="recent-list" class="recent-list"><li class="empty">Cargando…</li></ul>
+    </div>
+  </div>
   </div>
 
   <div class="modal-overlay" id="song-modal" style="display:none">
@@ -541,6 +605,7 @@
 </div>
 
 <div id="toast"></div>
+<div id="sound-notifs"></div>
 
 <script>
 let state = null
@@ -585,7 +650,7 @@ async function loadMe() {
 function applyAdminUI() {
   const isAdmin = me && (me.roles || []).includes('admin')
   // La pestaña Caché y el selector de canal de voz son solo para administradores.
-  for (const id of ['tab-cache', 'page-cache', 'voice-panel']) {
+  for (const id of ['tab-cache', 'page-cache', 'voice-panel', 'tab-stats', 'page-stats']) {
     const el = document.getElementById(id)
     if (!el) continue
     if (isAdmin) el.style.removeProperty('display')
@@ -615,6 +680,7 @@ document.querySelectorAll('.tab').forEach(tab => {
     tab.classList.add('active')
     document.getElementById('page-' + tab.dataset.page).classList.add('active')
     if (tab.dataset.page === 'cache') loadMusic()
+    if (tab.dataset.page === 'stats') loadStats()
   }
 })
 
@@ -710,6 +776,7 @@ function render() {
 
   updatePlayingButtons()
   updateVolumeUI()
+  renderSoundNotifs()
 
   document.getElementById('np-title').textContent = state.current ? state.current.title : 'Nada reproduciéndose'
   updateNpArt()
@@ -915,6 +982,66 @@ function updatePlayingButtons() {
   document.querySelectorAll('.sound-btn').forEach(b => {
     b.classList.toggle('playing', playing.some(p => p.file === b.dataset.file))
   })
+}
+
+// Notificación en vivo por cada sonido que suena: nombre + quién lo reproduce.
+// Aparece al dispararse y desaparece sola cuando el sonido termina (sale de
+// state.playingSounds), por lo que "dura lo que está sonando".
+function renderSoundNotifs() {
+  const wrap = document.getElementById('sound-notifs')
+  if (!wrap) return
+  const playing = (state && state.playingSounds) || []
+  wrap.innerHTML = playing.map(p => {
+    const who = p.user ? esc(p.user.name) : 'Alguien'
+    const av = p.user && p.user.avatar
+      ? `<img class="sn-av" src="${esc(p.user.avatar)}" alt="">`
+      : '<span class="sn-av sn-av-ph">🔊</span>'
+    return `<div class="sound-notif">${av}<div class="sn-text">` +
+      `<div class="sn-label">🔊 ${esc(p.label || 'Sonido')}</div>` +
+      `<div class="sn-who">${who} lo está reproduciendo</div></div></div>`
+  }).join('')
+}
+
+// ── Estadísticas de sonidos (solo admin) ──
+async function loadStats() {
+  if (!(me && (me.roles || []).includes('admin'))) return
+  const n = document.getElementById('top-n').value
+  try {
+    const res = await webFetch('/api/sound-stats?top=' + n)
+    if (!res.ok) return
+    const data = await res.json()
+    renderTopChart(data.top || [])
+    renderRecent(data.recent || [])
+  } catch {}
+}
+
+function renderTopChart(top) {
+  const el = document.getElementById('top-chart')
+  if (!top.length) { el.innerHTML = '<p class="empty">Sin reproducciones todavía</p>'; return }
+  const max = Math.max(...top.map(t => t.plays)) || 1
+  el.innerHTML = top.map((t, i) => {
+    const pct = Math.round(t.plays / max * 100)
+    const name = t.title || '(sonido eliminado)'
+    return `<div class="bar-row">` +
+      `<span class="bar-rank">${i + 1}</span>` +
+      `<span class="bar-name" title="${esc(name)}">${esc(name)}</span>` +
+      `<span class="bar-track"><span class="bar-fill" style="width:${pct}%"></span></span>` +
+      `<span class="bar-count">${t.plays}<small> · ${t.users}👤</small></span></div>`
+  }).join('')
+}
+
+function renderRecent(recent) {
+  const el = document.getElementById('recent-list')
+  if (!recent.length) { el.innerHTML = '<li class="empty">Sin reproducciones todavía</li>'; return }
+  el.innerHTML = recent.map(r => {
+    const who = r.user_name ? esc(r.user_name) : 'Alguien'
+    const icon = r.kind === 'song' ? '🎵' : '🔊'
+    const av = r.user_avatar
+      ? `<img class="rl-av" src="${esc(r.user_avatar)}" alt="">`
+      : `<span class="rl-av rl-av-ph">${icon}</span>`
+    return `<li>${av}<span class="rl-main"><b>${who}</b> reprodujo ${icon} ${esc(r.title || '(eliminado)')}</span>` +
+      `<span class="rl-time">${fmtDate(r.played_at)}</span></li>`
+  }).join('')
 }
 
 async function loadSounds() {
@@ -1285,6 +1412,8 @@ document.getElementById('sound-form').addEventListener('submit', async (e) => {
   }
 })
 
+document.getElementById('top-n').addEventListener('change', loadStats)
+
 refresh()
 loadMe()
 loadSounds()
@@ -1292,6 +1421,10 @@ loadVoiceChannels()
 setInterval(refresh, 1000)
 setInterval(loadSounds, 5000)
 setInterval(loadVoiceChannels, 5000)
+// Refresca las estadísticas solo si la pestaña está abierta (y eres admin).
+setInterval(() => {
+  if (document.getElementById('page-stats').classList.contains('active')) loadStats()
+}, 5000)
 </script>
 </body>
 </html>

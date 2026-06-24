@@ -1189,21 +1189,23 @@ function spawnSoundFfmpeg(filePath) {
   return ff
 }
 
-async function playSound(soundId) {
+async function playSound(soundId, user = null) {
   const sound = soundLib.getById(Number(soundId))
   if (!sound) throw new Error('Sonido no encontrado')
   const filePath = soundLib.localPath(sound)
   if (!existsSync(filePath)) throw new Error('Archivo del sonido no disponible')
   const key = String(sound.id) // identificador estable que usa el panel
   const id = ++soundIdSeq
-  playHistory.record({ kind: 'sound', refId: sound.id })
+  playHistory.record({ kind: 'sound', refId: sound.id, userId: user ? user.id : null })
+  // Datos para la notificación "quién reproduce qué" del panel (dura lo que suene).
+  const meta = { label: sound.label, user, startedAt: Date.now(), durationMs: sound.duration_ms || null }
 
   // Con música sonando: mezclar el sonido encima, música atenuada
   if (currentMixer && musicPlayer.state.status === AudioPlayerStatus.Playing) {
     const ff = spawnSoundFfmpeg(filePath)
     activeProcs.push(ff)
     const ov = currentMixer.addOverlay(ff.stdout)
-    activeSounds.set(id, { file: key, proc: ff, ov, mixer: currentMixer })
+    activeSounds.set(id, { file: key, proc: ff, ov, mixer: currentMixer, ...meta })
     return id
   }
 
@@ -1219,7 +1221,7 @@ async function playSound(soundId) {
   }
   const ff = spawnSoundFfmpeg(filePath)
   const ov = soundMixer.addOverlay(ff.stdout)
-  activeSounds.set(id, { file: key, proc: ff, ov, mixer: soundMixer })
+  activeSounds.set(id, { file: key, proc: ff, ov, mixer: soundMixer, ...meta })
   return id
 }
 
@@ -1236,7 +1238,7 @@ function playingSounds() {
   const out = []
   for (const [id, e] of activeSounds) {
     if (e.ov && e.mixer && (e.mixer === currentMixer || e.mixer === soundMixer) && e.mixer.overlays.has(e.ov)) {
-      out.push({ id, file: e.file })
+      out.push({ id, file: e.file, label: e.label, user: e.user || null, startedAt: e.startedAt, durationMs: e.durationMs })
     } else {
       activeSounds.delete(id)
     }
@@ -1552,12 +1554,12 @@ http.createServer(async (req, res) => {
         }
         case '/api/sound': {
           // Un sonido privado solo lo reproduce quien lo ve (su dueño o un admin).
+          const pu = panelUser(req)
           const snd = soundLib.getById(Number(body.name))
-          if (snd) {
-            const pu = panelUser(req)
-            if (!rbac.canSeeSound(pu ? pu.id : null, snd)) return sendJson({ error: 'Sonido no disponible' }, 403)
-          }
-          const id = await playSound(body.name)
+          if (snd && !rbac.canSeeSound(pu ? pu.id : null, snd)) return sendJson({ error: 'Sonido no disponible' }, 403)
+          // Quién dispara el sonido (para historial + notificación en vivo).
+          const user = pu ? { id: pu.id, name: pu.display_name || pu.username, avatar: pu.avatar_url || null } : null
+          const id = await playSound(body.name, user)
           return sendJson({ ok: true, id })
         }
         case '/api/sound/stop': return sendJson({ ok: cmdStopSound(body.id) })

@@ -258,6 +258,17 @@ http.createServer(async (req, res) => {
       return send(res, 200, playHistory.recent({ userId: user.id, limit }))
     }
 
+    // Estadísticas de sonidos para el panel de administración: últimas
+    // reproducciones de todos (con quién) + ranking ajustable. Solo admin.
+    if (req.method === 'GET' && path === '/api/sound-stats') {
+      if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un administrador' })
+      const top = Math.min(50, Math.max(1, Number(url.searchParams.get('top')) || 10))
+      return send(res, 200, {
+        recent: playHistory.recentDetailed({ limit: 20 }),
+        top: playHistory.topSounds({ limit: top }),
+      })
+    }
+
     // Playlists
     if (path === '/api/playlists' && req.method === 'GET') {
       return send(res, 200, playlists.listForUser(user.id))
