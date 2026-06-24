@@ -283,10 +283,48 @@ http.createServer(async (req, res) => {
       return send(res, 200, { ok: true })
     }
 
-    // Gestión (solo admin): sonidos privados de todos + renombres de todos.
+    // Gestión (solo admin): árbol completo de TODOS los sonidos (incl. ocultos)
+    // para administrarlos, las carpetas y los renombres por usuario (referencia).
     if (req.method === 'GET' && path === '/api/sound-admin') {
       if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un administrador' })
-      return send(res, 200, { privates: sounds.allPrivate(), renames: sounds.allAliases() })
+      return send(res, 200, {
+        tree: sounds.tree(sounds.listAllForAdmin(), folders.list()),
+        renames: sounds.allAliases(),
+      })
+    }
+    // Renombrar el nombre real de un sonido (afecta a todos). Solo admin.
+    if (req.method === 'POST' && path === '/api/sound-admin/rename') {
+      if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un administrador' })
+      const body = JSON.parse((await readBody(req)).toString() || '{}')
+      if (!body.soundId || !(body.label || '').trim()) return send(res, 400, { error: 'Falta soundId o label' })
+      try { return send(res, 200, { ok: true, sound: sounds.renameSound(Number(body.soundId), body.label) }) }
+      catch (e) { return send(res, 400, { error: e.message }) }
+    }
+    // Renombrar una carpeta (afecta a todos). Solo admin.
+    if (req.method === 'POST' && path === '/api/sound-admin/rename-folder') {
+      if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un administrador' })
+      const body = JSON.parse((await readBody(req)).toString() || '{}')
+      if (!body.path || !(body.name || '').trim()) return send(res, 400, { error: 'Falta path o name' })
+      try { return send(res, 200, { ok: true, path: folders.rename(body.path, body.name) }) }
+      catch (e) { return send(res, 400, { error: e.message }) }
+    }
+    // Ocultar/restaurar un sonido para TODOS (soft delete). Solo admin.
+    if (req.method === 'POST' && path === '/api/sound-admin/hide') {
+      if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un administrador' })
+      const body = JSON.parse((await readBody(req)).toString() || '{}')
+      if (!body.soundId) return send(res, 400, { error: 'Falta soundId' })
+      sounds.setGlobalHidden(Number(body.soundId), !!body.hidden)
+      return send(res, 200, { ok: true })
+    }
+    // Eliminar un sonido de forma permanente: solo si ya estaba oculto. Solo admin.
+    if (req.method === 'DELETE' && path === '/api/sound-admin/sound') {
+      if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un administrador' })
+      const body = JSON.parse((await readBody(req)).toString() || '{}')
+      const snd = body.soundId ? sounds.getById(Number(body.soundId)) : null
+      if (!snd) return send(res, 404, { error: 'Sonido no encontrado' })
+      if (!snd.hidden) return send(res, 400, { error: 'Primero oculta el sonido antes de eliminarlo' })
+      await sounds.deleteSound(snd.id)
+      return send(res, 200, { ok: true })
     }
 
     if (req.method === 'GET' && path === '/api/history') {

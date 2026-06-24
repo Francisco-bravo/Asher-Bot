@@ -166,6 +166,12 @@
     color: var(--muted); font-size: .7rem;
   }
   .sb-row.selected .arrow { color: #fff; }
+  /* Lápiz para renombrar carpeta (en el sidebar de Gestión) */
+  .sb-row .sb-edit { margin-left: auto; flex-shrink: 0; opacity: 0; border: none; background: none; cursor: pointer; color: inherit; font-size: .85rem; padding: 0 2px; }
+  .sb-row:hover .sb-edit, .sb-row.selected .sb-edit { opacity: .85; }
+  .sb-row .sb-edit:hover { opacity: 1; }
+  .sm-btn.danger:hover { background: var(--danger); border-color: transparent; }
+  .sm-name .sm-owner { color: var(--muted); font-weight: 400; font-size: .78rem; margin-left: 6px; }
   .sb-main { flex: 1; min-width: 0; }
   .sb-search-row { display: flex; gap: 8px; align-items: stretch; margin-bottom: 12px; }
   .sb-search-row .sound-search { margin-bottom: 0; }
@@ -522,12 +528,21 @@
     </div>
 
     <div class="subpage" id="sub-manage">
-      <div class="stats-section">
-        <h3>🔒 Sonidos privados de todos</h3>
-        <ul id="manage-privates" class="manage-list"><li class="empty">Cargando…</li></ul>
+      <p class="hint" style="margin:0 0 14px">
+        Panel administrativo: estos cambios afectan a <b>todos</b>. ✏️ renombra el sonido o la carpeta ·
+        🗑️ oculta el sonido (queda en gris) · en un sonido gris, 💀 lo elimina para siempre.
+      </p>
+      <div class="sb-layout">
+        <div class="sb-sidebar" id="mgmt-sidebar"></div>
+        <div class="sb-main">
+          <div class="sb-search-row">
+            <input type="text" id="mgmt-search" class="sound-search" placeholder="🔍 Buscar sonidos...">
+          </div>
+          <div class="sound-grid managing" id="mgmt-grid"></div>
+        </div>
       </div>
-      <div class="stats-section">
-        <h3>✏️ Nombres cambiados</h3>
+      <div class="stats-section" style="margin-top:24px">
+        <h3>✏️ Nombres cambiados por usuarios (solo para ellos)</h3>
         <ul id="manage-renames" class="manage-list"><li class="empty">Cargando…</li></ul>
       </div>
     </div>
@@ -1144,27 +1159,127 @@ function renderRecent(recent) {
   }).join('')
 }
 
-// Pestaña de gestión (solo admin): privados de todos + renombres de todos.
+// Pestaña de gestión (solo admin): vista tipo soundboard de TODOS los sonidos
+// (incl. ocultos, en gris) con acciones administrativas globales, + carpetas
+// renombrables y la referencia de renombres por usuario.
+let mgmtData = null, mgmtSelectedPath = '', mgmtOpenFolders = new Set()
+
 async function loadSoundAdmin() {
   if (!(me && (me.roles || []).includes('admin'))) return
   try {
     const res = await webFetch('/api/sound-admin')
     if (!res.ok) return
     const data = await res.json()
-    renderManagePrivates(data.privates || [])
+    mgmtData = data.tree
+    if (mgmtSelectedPath && !findNode(mgmtData, mgmtSelectedPath)) mgmtSelectedPath = ''
+    renderMgmtSidebar()
+    renderMgmtGrid()
     renderManageRenames(data.renames || [])
   } catch {}
 }
 
-function renderManagePrivates(rows) {
-  const el = document.getElementById('manage-privates')
-  if (!rows.length) { el.innerHTML = '<li class="empty">No hay sonidos privados</li>'; return }
-  el.innerHTML = rows.map(r => {
-    const where = r.folder ? ` <span class="ml-orig">📁 ${esc(r.folder)}</span>` : ''
-    return `<li><span class="ml-main">🔒 ${esc(r.label)}${where}</span>` +
-      `<span class="ml-who">de ${esc(r.owner_name || 'desconocido')}</span></li>`
-  }).join('')
+function renderMgmtSidebar() {
+  if (!mgmtData) return
+  const rows = [`<div class="sb-row${mgmtSelectedPath === '' ? ' selected' : ''}" data-path=""><span class="arrow"></span><span>🔊 Todos los sonidos</span></div>`]
+  const walk = (node, path, depth) => {
+    for (const f of node.folders) {
+      const p = path ? path + '/' + f.name : f.name
+      const hasKids = f.folders.length > 0
+      const open = mgmtOpenFolders.has(p)
+      rows.push(`<div class="sb-row${mgmtSelectedPath === p ? ' selected' : ''}" data-path="${esc(p)}" style="padding-left:${8 + depth * 16}px"><span class="arrow" data-toggle="${esc(p)}">${hasKids ? (open ? '▾' : '▸') : ''}</span><span>📁 ${esc(f.name)}</span><button class="sb-edit" data-folder-edit="${esc(p)}" title="Renombrar carpeta (para todos)">✏️</button></div>`)
+      if (open) walk(f, p, depth + 1)
+    }
+  }
+  walk(mgmtData, '', 0)
+  document.getElementById('mgmt-sidebar').innerHTML = rows.join('')
 }
+
+function renderMgmtGrid() {
+  if (!mgmtData) return
+  const q = norm(document.getElementById('mgmt-search').value)
+  let list
+  if (q) {
+    const tokens = q.split(' ')
+    list = allSounds(mgmtData).filter(s => { const hay = norm(s.label); return tokens.every(t => hay.includes(t)) })
+  } else {
+    const node = findNode(mgmtData, mgmtSelectedPath) || mgmtData
+    list = mgmtSelectedPath === '' ? allSounds(mgmtData) : node.sounds
+  }
+  document.getElementById('mgmt-grid').innerHTML = list.length
+    ? list.map(mgmtCard).join('')
+    : `<p class="empty">${q ? 'Sin resultados para la búsqueda' : 'No hay sonidos en esta carpeta'}</p>`
+}
+
+function mgmtCard(s) {
+  const priv = s.visibility === 'private'
+  const owner = s.owner ? `<span class="sm-owner">${priv ? '🔒 ' : ''}de ${esc(s.owner)}</span>` : (priv ? '<span class="sm-owner">🔒</span>' : '')
+  const actions = `<button class="sm-btn" data-act="rename" title="Renombrar (para todos)">✏️</button>` +
+    (s.hidden
+      ? `<button class="sm-btn" data-act="unhide" title="Restaurar (volver a mostrar)">↩️</button>` +
+        `<button class="sm-btn danger" data-act="delete" title="Eliminar permanentemente">💀</button>`
+      : `<button class="sm-btn" data-act="hide" title="Ocultar para todos">🗑️</button>`)
+  return `<div class="sound-manage${s.hidden ? ' hidden' : ''}" data-id="${s.id}" data-label="${esc(s.label)}">` +
+    `<div class="sm-info"><div class="sm-name">${esc(s.label)}${owner}</div></div>` +
+    `<div class="sm-actions">${actions}</div></div>`
+}
+
+// Ejecuta una acción administrativa y refresca Gestión + el soundboard normal.
+async function mgmtAction(method, path, body) {
+  try {
+    const res = await webFetch(path, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    if (!res.ok) { const e = await res.json().catch(() => ({})); alert(e.error || 'No se pudo completar la acción'); return }
+    lastSoundsJSON = null   // el soundboard normal también cambió
+    await loadSoundAdmin()
+    await loadSounds()
+  } catch { alert('No se pudo completar la acción') }
+}
+
+document.getElementById('mgmt-search').addEventListener('input', renderMgmtGrid)
+
+document.getElementById('mgmt-sidebar').addEventListener('click', async (e) => {
+  const editBtn = e.target.closest('.sb-edit')
+  if (editBtn) {
+    e.stopPropagation()
+    const p = editBtn.dataset.folderEdit
+    const leaf = p.split('/').pop()
+    const next = prompt('Nuevo nombre de la carpeta (afecta a todos):', leaf)
+    if (next === null || !next.trim() || next.trim() === leaf) return
+    await mgmtAction('POST', '/api/sound-admin/rename-folder', { path: p, name: next.trim() })
+    return
+  }
+  const row = e.target.closest('.sb-row')
+  if (!row) return
+  const arrow = e.target.closest('.arrow')
+  if (arrow && arrow.dataset.toggle) {
+    const p = arrow.dataset.toggle
+    if (mgmtOpenFolders.has(p)) mgmtOpenFolders.delete(p); else mgmtOpenFolders.add(p)
+    renderMgmtSidebar(); return
+  }
+  mgmtSelectedPath = row.dataset.path
+  if (mgmtSelectedPath) mgmtOpenFolders.add(mgmtSelectedPath)
+  renderMgmtSidebar(); renderMgmtGrid()
+})
+
+document.getElementById('mgmt-grid').addEventListener('click', async (e) => {
+  const actBtn = e.target.closest('.sm-btn')
+  if (!actBtn) return
+  const card = actBtn.closest('.sound-manage')
+  const id = Number(card.dataset.id)
+  const label = card.dataset.label
+  const act = actBtn.dataset.act
+  if (act === 'rename') {
+    const next = prompt('Nuevo nombre del sonido (afecta a todos):', label)
+    if (next === null || !next.trim() || next.trim() === label) return
+    await mgmtAction('POST', '/api/sound-admin/rename', { soundId: id, label: next.trim() })
+  } else if (act === 'hide') {
+    await mgmtAction('POST', '/api/sound-admin/hide', { soundId: id, hidden: true })
+  } else if (act === 'unhide') {
+    await mgmtAction('POST', '/api/sound-admin/hide', { soundId: id, hidden: false })
+  } else if (act === 'delete') {
+    if (!confirm('¿Eliminar «' + label + '» para SIEMPRE? Esto no se puede deshacer.')) return
+    await mgmtAction('DELETE', '/api/sound-admin/sound', { soundId: id })
+  }
+})
 
 function renderManageRenames(rows) {
   const el = document.getElementById('manage-renames')
