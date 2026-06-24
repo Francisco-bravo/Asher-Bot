@@ -35,6 +35,9 @@ const MAX_MUSIC = 50 * 1024 * 1024 // 50 MB por canción
 
 getDb() // dispara migraciones
 
+// Progreso de la normalización de volumen lanzada desde el panel (en memoria).
+let normProgress = { running: false, done: 0, total: 0 }
+
 // ── Utilidades HTTP ─────────────────────────────────────────────────────────
 function parseCookies(req) {
   const out = {}
@@ -301,9 +304,11 @@ http.createServer(async (req, res) => {
       const body = JSON.parse((await readBody(req)).toString() || '{}')
       if (!body.soundId || !(body.label || '').trim()) return send(res, 400, { error: 'Falta soundId o label' })
       try {
-        const sound = sounds.renameSound(Number(body.soundId), body.label)
-        if (body.visibility === 'global' || body.visibility === 'private') sounds.setVisibility(Number(body.soundId), body.visibility)
-        return send(res, 200, { ok: true, sound: sounds.getById(Number(body.soundId)) })
+        const sid = Number(body.soundId)
+        sounds.renameSound(sid, body.label)
+        if (body.visibility === 'global' || body.visibility === 'private') sounds.setVisibility(sid, body.visibility)
+        if (body.offsetDb !== undefined) sounds.setGainOffset(sid, Number(body.offsetDb) || 0)
+        return send(res, 200, { ok: true, sound: sounds.getById(sid) })
       } catch (e) { return send(res, 400, { error: e.message }) }
     }
     // Renombrar una carpeta (afecta a todos). Solo admin.
@@ -313,6 +318,30 @@ http.createServer(async (req, res) => {
       if (!body.path || !(body.name || '').trim()) return send(res, 400, { error: 'Falta path o name' })
       try { return send(res, 200, { ok: true, path: folders.rename(body.path, body.name) }) }
       catch (e) { return send(res, 400, { error: e.message }) }
+    }
+    // Ajuste MANUAL de volumen por sonido (se suma a la ganancia medida). Solo admin.
+    if (req.method === 'POST' && path === '/api/sound-admin/gain') {
+      if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un administrador' })
+      const body = JSON.parse((await readBody(req)).toString() || '{}')
+      if (!body.soundId) return send(res, 400, { error: 'Falta soundId' })
+      sounds.setGainOffset(Number(body.soundId), Number(body.offsetDb) || 0)
+      return send(res, 200, { ok: true })
+    }
+    // Revisar/igualar el volumen de TODOS los sonidos (en segundo plano). Solo admin.
+    // `force`: re-mide también los ya medidos. Devuelve el progreso para sondear.
+    if (req.method === 'POST' && path === '/api/sound-admin/normalize-all') {
+      if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un administrador' })
+      const body = JSON.parse((await readBody(req)).toString() || '{}')
+      if (normProgress.running) return send(res, 200, { ...normProgress })
+      normProgress = { running: true, done: 0, total: 0 }
+      sounds.normalizeAll({ force: !!body.force, onProgress: (d, t) => { normProgress.done = d; normProgress.total = t } })
+        .then(() => { normProgress.running = false })
+        .catch(() => { normProgress.running = false })
+      return send(res, 202, { started: true, ...normProgress })
+    }
+    if (req.method === 'GET' && path === '/api/sound-admin/normalize-progress') {
+      if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un administrador' })
+      return send(res, 200, normProgress)
     }
     // Ocultar/restaurar un sonido para TODOS (soft delete). Solo admin.
     if (req.method === 'POST' && path === '/api/sound-admin/hide') {

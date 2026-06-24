@@ -29,6 +29,7 @@ import http from 'node:http'
 import ffmpegStatic from 'ffmpeg-static'
 import { getDb } from './lib/db.mjs'
 import * as soundLib from './lib/sounds.mjs'
+import { effectiveGain } from './lib/loudness.mjs'
 import * as folders from './lib/folders.mjs'
 import * as playHistory from './lib/history.mjs'
 import * as auth from './lib/auth.mjs'
@@ -1178,11 +1179,12 @@ function finishDirectSound() {
 soundPlayer.on(AudioPlayerStatus.Idle, finishDirectSound)
 soundPlayer.on('error', err => { console.error('sound:', err.message); finishDirectSound() })
 
-function spawnSoundFfmpeg(filePath) {
-  // Sin filtro de volumen: el volumen se aplica al mezclar (overlays) o con
-  // inlineVolume (directo), para que el slider del panel actúe en vivo.
+function spawnSoundFfmpeg(filePath, gainDb = 0) {
+  // El volumen GLOBAL (slider) se aplica al mezclar, en vivo. Aquí solo se aplica
+  // la ganancia de NORMALIZACIÓN por sonido (loudness), que es fija por archivo.
+  const af = gainDb ? ['-af', `volume=${gainDb}dB`] : []
   const ff = spawn(FFMPEG, [
-    '-loglevel', 'error', '-i', filePath,
+    '-loglevel', 'error', '-i', filePath, ...af,
     '-ar', '48000', '-ac', '2', '-f', 's16le', 'pipe:1'
   ])
   ff.on('error', err => console.error('ffmpeg sonido:', err.message))
@@ -1196,6 +1198,7 @@ async function playSound(soundId, user = null) {
   const filePath = soundLib.localPath(sound)
   if (!existsSync(filePath)) throw new Error('Archivo del sonido no disponible')
   const key = String(sound.id) // identificador estable que usa el panel
+  const gain = effectiveGain(sound) // normalización de volumen por sonido
   const id = ++soundIdSeq
   playHistory.record({ kind: 'sound', refId: sound.id, userId: user ? user.id : null })
   // Datos para la notificación "quién reproduce qué" del panel (dura lo que suene).
@@ -1203,7 +1206,7 @@ async function playSound(soundId, user = null) {
 
   // Con música sonando: mezclar el sonido encima, música atenuada
   if (currentMixer && musicPlayer.state.status === AudioPlayerStatus.Playing) {
-    const ff = spawnSoundFfmpeg(filePath)
+    const ff = spawnSoundFfmpeg(filePath, gain)
     activeProcs.push(ff)
     const ov = currentMixer.addOverlay(ff.stdout)
     activeSounds.set(id, { file: key, proc: ff, ov, mixer: currentMixer, ...meta })
@@ -1220,7 +1223,7 @@ async function playSound(soundId, user = null) {
     connection.subscribe(soundPlayer)
     soundPlayer.play(res)
   }
-  const ff = spawnSoundFfmpeg(filePath)
+  const ff = spawnSoundFfmpeg(filePath, gain)
   const ov = soundMixer.addOverlay(ff.stdout)
   activeSounds.set(id, { file: key, proc: ff, ov, mixer: soundMixer, ...meta })
   return id
@@ -1641,5 +1644,11 @@ getDb()
 await soundLib.syncFromStore()
   .then(r => console.log(`Soundboard: ${r.total} sonidos en DB (${r.restored} restaurados del respaldo)`))
   .catch(err => console.error('sync sonidos:', err.message))
+
+// Revisa en segundo plano los sonidos sin medir e iguala su volumen (loudness).
+// No bloquea el arranque; secuencial para no saturar la VM.
+soundLib.normalizeAll({ force: false })
+  .then(r => { if (r.total) console.log(`Volumen: ${r.analyzed}/${r.total} sonidos medidos`) })
+  .catch(err => console.error('normalizar sonidos:', err.message))
 
 client.login(process.env.DISCORD_BOT_TOKEN)

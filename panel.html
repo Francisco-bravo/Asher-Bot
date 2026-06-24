@@ -547,6 +547,7 @@
         <div class="sb-main">
           <div class="sb-search-row">
             <input type="text" id="mgmt-search" class="sound-search" placeholder="🔍 Buscar sonidos...">
+            <button class="sb-action" id="btn-normalize" title="Revisar y medir el volumen de todos los sonidos para igualarlos">🎚️ Igualar volúmenes</button>
           </div>
           <div class="sound-grid managing" id="mgmt-grid"></div>
         </div>
@@ -716,6 +717,10 @@
             <option value="global">🌐 Público (todos)</option>
             <option value="private">🔒 Privado (solo el dueño)</option>
           </select>
+        </label>
+        <label id="edit-gain-row" style="display:none">Ajuste de volumen (dB)
+          <input type="number" id="edit-gain" step="0.5" min="-15" max="15" value="0">
+          <small id="edit-gain-hint" class="hint" style="margin-top:4px"></small>
         </label>
         <div class="modal-actions">
           <button type="button" class="cancel" id="edit-cancel">Cancelar</button>
@@ -1353,13 +1358,15 @@ document.getElementById('mgmt-grid').addEventListener('click', async (e) => {
   if (act === 'rename') {
     const s = allSounds(mgmtData).find(x => x.id === id)
     const vis = s ? s.visibility : 'global'
+    const off = s ? (s.gainOffset || 0) : 0
     openEditModal({
       title: 'Editar sonido',
-      desc: 'El nombre real y la visibilidad del sonido <b>para todos</b>.',
+      desc: 'El nombre, la visibilidad y el volumen del sonido <b>para todos</b>.',
       label: 'Nombre del sonido', value: label, visibility: vis,
+      gain: { offset: off, measured: s ? s.gainDb : null },
       save: async (value, extra) => {
-        if (value !== label || extra.visibility !== vis)
-          await mgmtAction('POST', '/api/sound-admin/rename', { soundId: id, label: value, visibility: extra.visibility }, card)
+        if (value !== label || extra.visibility !== vis || extra.offsetDb !== off)
+          await mgmtAction('POST', '/api/sound-admin/rename', { soundId: id, label: value, visibility: extra.visibility, offsetDb: extra.offsetDb }, card)
       },
     })
   } else if (act === 'hide') {
@@ -1370,6 +1377,32 @@ document.getElementById('mgmt-grid').addEventListener('click', async (e) => {
     if (!confirm('¿Eliminar «' + label + '» para SIEMPRE? Esto no se puede deshacer.')) return
     await mgmtAction('DELETE', '/api/sound-admin/sound', { soundId: id }, card)
   }
+})
+
+// "Igualar volúmenes": mide todos los sonidos en segundo plano y sondea el avance.
+document.getElementById('btn-normalize').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-normalize')
+  if (btn.dataset.busy) return
+  if (!confirm('¿Revisar y medir el volumen de TODOS los sonidos para igualarlos? Puede tardar un poco; corre en segundo plano.')) return
+  btn.dataset.busy = '1'; btn.disabled = true
+  const orig = btn.textContent
+  try {
+    const res = await webFetch('/api/sound-admin/normalize-all', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ force: true }),
+    })
+    if (!res.ok) { toast('No se pudo iniciar'); return }
+    // Sondea el progreso hasta terminar.
+    while (true) {
+      await new Promise(r => setTimeout(r, 1500))
+      const p = await webFetch('/api/sound-admin/normalize-progress').then(r => r.ok ? r.json() : null).catch(() => null)
+      if (!p) break
+      btn.textContent = p.total ? `🎚️ ${p.done}/${p.total}…` : '🎚️ Midiendo…'
+      if (!p.running) { toast(`Volúmenes igualados (${p.done} sonidos) ✓`); break }
+    }
+    await loadSoundAdmin()
+    lastSoundsJSON = null; await loadSounds()
+  } catch { toast('Error al igualar volúmenes') }
+  finally { btn.textContent = orig; btn.disabled = false; delete btn.dataset.busy }
 })
 
 function renderManageRenames(rows) {
@@ -1834,7 +1867,9 @@ document.getElementById('sound-form').addEventListener('submit', async (e) => {
 let editOnSave = null, editAllowEmpty = false
 // `visibility`: si se pasa ('global'|'private'), muestra el selector de visibilidad
 // y `save(value, { visibility })` recibe la elegida; si no, queda oculto.
-function openEditModal({ title, desc = '', label = 'Nombre', value = '', allowEmpty = false, visibility, save }) {
+// `gain`: si se pasa un objeto { offset, measured }, muestra el ajuste manual de
+// volumen y `save(value, { ..., offsetDb })` recibe el valor en dB.
+function openEditModal({ title, desc = '', label = 'Nombre', value = '', allowEmpty = false, visibility, gain, save }) {
   document.getElementById('edit-title').textContent = title
   const d = document.getElementById('edit-desc')
   d.innerHTML = desc; d.style.display = desc ? 'block' : 'none'
@@ -1847,6 +1882,14 @@ function openEditModal({ title, desc = '', label = 'Nombre', value = '', allowEm
     visRow.style.display = 'block'
     document.getElementById('edit-visibility').value = visibility
   } else { visRow.style.display = 'none' }
+  const gainRow = document.getElementById('edit-gain-row')
+  if (gain) {
+    gainRow.style.display = 'block'
+    document.getElementById('edit-gain').value = gain.offset || 0
+    const m = gain.measured
+    document.getElementById('edit-gain-hint').textContent =
+      (m == null ? 'Aún sin medir automáticamente.' : 'Medido automático: ' + m + ' dB.') + ' Este ajuste se suma.'
+  } else { gainRow.style.display = 'none' }
   editOnSave = save; editAllowEmpty = allowEmpty
   document.getElementById('edit-modal').style.display = 'flex'
   input.focus(); input.select()
@@ -1865,8 +1908,11 @@ document.getElementById('edit-form').addEventListener('submit', async (e) => {
   const value = document.getElementById('edit-input').value.trim()
   if (!value && !editAllowEmpty) { toast('El nombre no puede estar vacío'); return }
   const fn = editOnSave
-  const visRow = document.getElementById('edit-visibility-row')
-  const extra = visRow.style.display !== 'none' ? { visibility: document.getElementById('edit-visibility').value } : {}
+  const extra = {}
+  if (document.getElementById('edit-visibility-row').style.display !== 'none')
+    extra.visibility = document.getElementById('edit-visibility').value
+  if (document.getElementById('edit-gain-row').style.display !== 'none')
+    extra.offsetDb = Number(document.getElementById('edit-gain').value) || 0
   const btn = document.getElementById('edit-submit')
   const cancel = document.getElementById('edit-cancel')
   const input = document.getElementById('edit-input')
