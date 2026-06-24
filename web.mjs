@@ -284,21 +284,27 @@ http.createServer(async (req, res) => {
     }
 
     // Gestión (solo admin): árbol completo de TODOS los sonidos (incl. ocultos)
-    // para administrarlos, las carpetas y los renombres por usuario (referencia).
+    // para administrarlos junto a las carpetas.
     if (req.method === 'GET' && path === '/api/sound-admin') {
       if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un administrador' })
-      return send(res, 200, {
-        tree: sounds.tree(sounds.listAllForAdmin(), folders.list()),
-        renames: sounds.allAliases(),
-      })
+      return send(res, 200, { tree: sounds.tree(sounds.listAllForAdmin(), folders.list()) })
     }
-    // Renombrar el nombre real de un sonido (afecta a todos). Solo admin.
+    // Auditoría (solo admin): renombres por usuario + registro de subidas.
+    if (req.method === 'GET' && path === '/api/sound-audit') {
+      if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un administrador' })
+      return send(res, 200, { renames: sounds.allAliases(), uploads: sounds.allUploads() })
+    }
+    // Renombrar el nombre real de un sonido y/o cambiar su visibilidad
+    // (público⇄privado). Afecta a todos. Solo admin.
     if (req.method === 'POST' && path === '/api/sound-admin/rename') {
       if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un administrador' })
       const body = JSON.parse((await readBody(req)).toString() || '{}')
       if (!body.soundId || !(body.label || '').trim()) return send(res, 400, { error: 'Falta soundId o label' })
-      try { return send(res, 200, { ok: true, sound: sounds.renameSound(Number(body.soundId), body.label) }) }
-      catch (e) { return send(res, 400, { error: e.message }) }
+      try {
+        const sound = sounds.renameSound(Number(body.soundId), body.label)
+        if (body.visibility === 'global' || body.visibility === 'private') sounds.setVisibility(Number(body.soundId), body.visibility)
+        return send(res, 200, { ok: true, sound: sounds.getById(Number(body.soundId)) })
+      } catch (e) { return send(res, 400, { error: e.message }) }
     }
     // Renombrar una carpeta (afecta a todos). Solo admin.
     if (req.method === 'POST' && path === '/api/sound-admin/rename-folder') {

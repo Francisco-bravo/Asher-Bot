@@ -497,6 +497,7 @@
       <button class="subtab active" data-sub="board">🔊 Soundboard</button>
       <button class="subtab" id="subtab-stats" data-sub="stats">📊 Estadísticas</button>
       <button class="subtab" id="subtab-manage" data-sub="manage">🛠️ Gestión</button>
+      <button class="subtab" id="subtab-audit" data-sub="audit">🕵️ Auditoría</button>
     </div>
     <div class="subpage active" id="sub-board">
       <div class="vol-row">
@@ -550,7 +551,14 @@
           <div class="sound-grid managing" id="mgmt-grid"></div>
         </div>
       </div>
-      <div class="stats-section" style="margin-top:24px">
+    </div>
+
+    <div class="subpage" id="sub-audit">
+      <div class="stats-section">
+        <h3>⬆️ Sonidos subidos por usuarios</h3>
+        <ul id="audit-uploads" class="manage-list"><li class="empty">Cargando…</li></ul>
+      </div>
+      <div class="stats-section">
         <h3>✏️ Nombres cambiados por usuarios (solo para ellos)</h3>
         <ul id="manage-renames" class="manage-list"><li class="empty">Cargando…</li></ul>
       </div>
@@ -703,6 +711,12 @@
         <label id="edit-label">Nombre
           <input type="text" id="edit-input" required>
         </label>
+        <label id="edit-visibility-row" style="display:none">Visibilidad
+          <select id="edit-visibility">
+            <option value="global">🌐 Público (todos)</option>
+            <option value="private">🔒 Privado (solo el dueño)</option>
+          </select>
+        </label>
         <div class="modal-actions">
           <button type="button" class="cancel" id="edit-cancel">Cancelar</button>
           <button type="submit" id="edit-submit">Guardar</button>
@@ -758,7 +772,7 @@ async function loadMe() {
 function applyAdminUI() {
   const isAdmin = me && (me.roles || []).includes('admin')
   // La pestaña Caché y el selector de canal de voz son solo para administradores.
-  for (const id of ['tab-cache', 'page-cache', 'voice-panel', 'subtab-stats', 'subtab-manage']) {
+  for (const id of ['tab-cache', 'page-cache', 'voice-panel', 'subtab-stats', 'subtab-manage', 'subtab-audit']) {
     const el = document.getElementById(id)
     if (!el) continue
     if (isAdmin) el.style.removeProperty('display')
@@ -803,6 +817,7 @@ document.querySelectorAll('.subtab').forEach(st => {
     if (st.dataset.sub === 'library') loadMusic()
     if (st.dataset.sub === 'stats') loadStats()
     if (st.dataset.sub === 'manage') loadSoundAdmin()
+    if (st.dataset.sub === 'audit') loadSoundAudit()
   }
 })
 
@@ -1199,8 +1214,31 @@ async function loadSoundAdmin() {
     if (mgmtSelectedPath && !findNode(mgmtData, mgmtSelectedPath)) mgmtSelectedPath = ''
     renderMgmtSidebar()
     renderMgmtGrid()
+  } catch {}
+}
+
+// Pestaña Auditoría (solo admin): subidas de usuarios + renombres por usuario.
+async function loadSoundAudit() {
+  if (!(me && (me.roles || []).includes('admin'))) return
+  try {
+    const res = await webFetch('/api/sound-audit')
+    if (!res.ok) return
+    const data = await res.json()
+    renderAuditUploads(data.uploads || [])
     renderManageRenames(data.renames || [])
   } catch {}
+}
+
+function renderAuditUploads(rows) {
+  const el = document.getElementById('audit-uploads')
+  if (!rows.length) { el.innerHTML = '<li class="empty">Nadie ha subido sonidos todavía</li>'; return }
+  el.innerHTML = rows.map(r => {
+    const vis = r.visibility === 'private' ? '🔒 privado' : '🌐 público'
+    const where = r.folder ? ` <span class="ml-orig">📁 ${esc(r.folder)}</span>` : ''
+    const gone = r.hidden ? ' <span class="ml-orig">(oculto)</span>' : ''
+    return `<li><span class="ml-main">🔊 ${esc(r.label)}${where} <span class="ml-orig">· ${vis}</span>${gone}</span>` +
+      `<span class="ml-who">${esc(r.owner_name || 'desconocido')} · ${fmtDate(r.created_at)}</span></li>`
+  }).join('')
 }
 
 function renderMgmtSidebar() {
@@ -1313,11 +1351,16 @@ document.getElementById('mgmt-grid').addEventListener('click', async (e) => {
   const label = card.dataset.label
   const act = actBtn.dataset.act
   if (act === 'rename') {
+    const s = allSounds(mgmtData).find(x => x.id === id)
+    const vis = s ? s.visibility : 'global'
     openEditModal({
-      title: 'Renombrar sonido',
-      desc: 'El nombre real del sonido <b>para todos</b>.',
-      label: 'Nombre del sonido', value: label,
-      save: async (value) => { if (value !== label) await mgmtAction('POST', '/api/sound-admin/rename', { soundId: id, label: value }, card) },
+      title: 'Editar sonido',
+      desc: 'El nombre real y la visibilidad del sonido <b>para todos</b>.',
+      label: 'Nombre del sonido', value: label, visibility: vis,
+      save: async (value, extra) => {
+        if (value !== label || extra.visibility !== vis)
+          await mgmtAction('POST', '/api/sound-admin/rename', { soundId: id, label: value, visibility: extra.visibility }, card)
+      },
     })
   } else if (act === 'hide') {
     await mgmtAction('POST', '/api/sound-admin/hide', { soundId: id, hidden: true }, card)
@@ -1789,7 +1832,9 @@ document.getElementById('sound-form').addEventListener('submit', async (e) => {
 // Modal genérico para editar un nombre. Reemplaza a prompt(). Recibe el texto a
 // mostrar y un callback async que recibe el valor nuevo (ya recortado).
 let editOnSave = null, editAllowEmpty = false
-function openEditModal({ title, desc = '', label = 'Nombre', value = '', allowEmpty = false, save }) {
+// `visibility`: si se pasa ('global'|'private'), muestra el selector de visibilidad
+// y `save(value, { visibility })` recibe la elegida; si no, queda oculto.
+function openEditModal({ title, desc = '', label = 'Nombre', value = '', allowEmpty = false, visibility, save }) {
   document.getElementById('edit-title').textContent = title
   const d = document.getElementById('edit-desc')
   d.innerHTML = desc; d.style.display = desc ? 'block' : 'none'
@@ -1797,6 +1842,11 @@ function openEditModal({ title, desc = '', label = 'Nombre', value = '', allowEm
   const input = document.getElementById('edit-input')
   input.value = value
   input.required = !allowEmpty
+  const visRow = document.getElementById('edit-visibility-row')
+  if (visibility === 'global' || visibility === 'private') {
+    visRow.style.display = 'block'
+    document.getElementById('edit-visibility').value = visibility
+  } else { visRow.style.display = 'none' }
   editOnSave = save; editAllowEmpty = allowEmpty
   document.getElementById('edit-modal').style.display = 'flex'
   input.focus(); input.select()
@@ -1815,11 +1865,13 @@ document.getElementById('edit-form').addEventListener('submit', async (e) => {
   const value = document.getElementById('edit-input').value.trim()
   if (!value && !editAllowEmpty) { toast('El nombre no puede estar vacío'); return }
   const fn = editOnSave
+  const visRow = document.getElementById('edit-visibility-row')
+  const extra = visRow.style.display !== 'none' ? { visibility: document.getElementById('edit-visibility').value } : {}
   const btn = document.getElementById('edit-submit')
   const cancel = document.getElementById('edit-cancel')
   const input = document.getElementById('edit-input')
   btn.disabled = true; cancel.disabled = true; input.disabled = true; btn.textContent = 'Guardando...'
-  try { if (fn) await fn(value) ; closeEditModal() }
+  try { if (fn) await fn(value, extra) ; closeEditModal() }
   finally { btn.disabled = false; cancel.disabled = false; input.disabled = false; btn.textContent = 'Guardar' }
 })
 
