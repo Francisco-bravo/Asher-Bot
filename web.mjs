@@ -269,6 +269,26 @@ http.createServer(async (req, res) => {
       return send(res, 201, { id: s.id, label: s.label, folder: s.folder, visibility: s.visibility })
     }
 
+    // Personalización del soundboard por usuario: renombrar (alias propio) y/o
+    // ocultar un sonido solo para sí mismo. El cuerpo trae los campos a cambiar.
+    if (req.method === 'POST' && path === '/api/sound-prefs') {
+      const body = JSON.parse((await readBody(req)).toString() || '{}')
+      const soundId = Number(body.soundId)
+      if (!soundId) return send(res, 400, { error: 'Falta soundId' })
+      const snd = sounds.getById(soundId)
+      // Solo se personaliza un sonido que el usuario realmente ve.
+      if (!snd || !rbac.canSeeSound(user.id, snd)) return send(res, 404, { error: 'Sonido no disponible' })
+      if (Object.prototype.hasOwnProperty.call(body, 'alias')) sounds.setAlias(user.id, soundId, body.alias)
+      if (Object.prototype.hasOwnProperty.call(body, 'hidden')) sounds.setHidden(user.id, soundId, !!body.hidden)
+      return send(res, 200, { ok: true })
+    }
+
+    // Gestión (solo admin): sonidos privados de todos + renombres de todos.
+    if (req.method === 'GET' && path === '/api/sound-admin') {
+      if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un administrador' })
+      return send(res, 200, { privates: sounds.allPrivate(), renames: sounds.allAliases() })
+    }
+
     if (req.method === 'GET' && path === '/api/history') {
       const limit = Math.min(100, Number(url.searchParams.get('limit')) || 20)
       return send(res, 200, playHistory.recent({ userId: user.id, limit }))

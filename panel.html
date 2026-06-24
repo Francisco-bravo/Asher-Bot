@@ -183,6 +183,27 @@
   .sound-btn.playing { background: var(--danger); border-color: transparent; }
   .sound-btn.playing:hover { background: var(--danger); filter: brightness(1.15); }
   .sound-btn.playing::after { content: ' ⏹'; }
+  /* Nombre original, referencial y discreto, bajo el nombre propio */
+  .sb-orig { display: block; font-size: .7rem; font-weight: 400; color: var(--muted); opacity: .8; margin-top: 4px; }
+  .sound-btn:hover .sb-orig { color: #fff; opacity: .85; }
+  /* Modo gestión del soundboard (renombrar/ocultar, solo para ti) */
+  .sb-action.on { background: var(--accent); border-color: transparent; color: #fff; }
+  .sound-grid.managing { display: flex; flex-direction: column; gap: 8px; }
+  .sound-manage { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: var(--border); border-radius: 12px; background: var(--panel); }
+  .sound-manage.hidden { opacity: .5; }
+  .sm-info { flex: 1; min-width: 0; }
+  .sm-name { font-weight: 600; word-break: break-word; }
+  .sm-orig { font-size: .72rem; color: var(--muted); margin-top: 2px; }
+  .sm-actions { display: flex; gap: 6px; flex-shrink: 0; }
+  .sm-btn { padding: 6px 9px; border: var(--border); border-radius: 9px; background: var(--panel2); color: var(--text); cursor: pointer; font-size: .9rem; }
+  .sm-btn:hover { background: var(--accent); border-color: transparent; }
+  /* Pestaña de gestión (admin): listas de privados y renombres */
+  .manage-list { list-style: none; display: flex; flex-direction: column; gap: 4px; }
+  .manage-list li { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 10px; background: var(--panel); }
+  .manage-list li.empty { background: none; color: var(--muted); justify-content: center; }
+  .manage-list .ml-main { flex: 1; min-width: 0; }
+  .manage-list .ml-orig { color: var(--muted); font-size: .8rem; }
+  .manage-list .ml-who { color: var(--muted); font-size: .8rem; flex-shrink: 0; }
   @media (max-width: 640px) {
     .sb-layout { flex-direction: column; }
     .sb-sidebar { width: 100%; max-height: 220px; }
@@ -453,6 +474,7 @@
     <button class="tab" data-page="music">🎵 Música</button>
     <button class="tab" id="tab-cache" data-page="cache">💾 Caché</button>
     <button class="tab" id="tab-stats" data-page="stats">📊 Estadísticas</button>
+    <button class="tab" id="tab-manage" data-page="manage">🛠️ Gestión</button>
   </div>
 
   <div class="pages">
@@ -468,6 +490,7 @@
       <div class="sb-main">
         <div class="sb-search-row">
           <input type="text" id="sound-search" class="sound-search" placeholder="🔍 Buscar sonidos...">
+          <button class="sb-action" id="btn-manage-sounds" title="Renombrar u ocultar sonidos (solo para ti)">⚙️ Administrar</button>
           <button class="sb-action" id="btn-new-folder" title="Crear una carpeta">📁 Nueva carpeta</button>
           <button class="sb-action primary" id="btn-upload-sound" title="Subir un sonido nuevo">⬆️ Subir sonido</button>
         </div>
@@ -556,6 +579,18 @@
     <div class="stats-section">
       <h3>🕑 Últimas reproducciones</h3>
       <ul id="recent-list" class="recent-list"><li class="empty">Cargando…</li></ul>
+    </div>
+  </div>
+
+  <div class="page" id="page-manage">
+    <div class="page-head">🛠️ Gestión de sonidos</div>
+    <div class="stats-section">
+      <h3>🔒 Sonidos privados de todos</h3>
+      <ul id="manage-privates" class="manage-list"><li class="empty">Cargando…</li></ul>
+    </div>
+    <div class="stats-section">
+      <h3>✏️ Nombres cambiados</h3>
+      <ul id="manage-renames" class="manage-list"><li class="empty">Cargando…</li></ul>
     </div>
   </div>
   </div>
@@ -680,7 +715,7 @@ async function loadMe() {
 function applyAdminUI() {
   const isAdmin = me && (me.roles || []).includes('admin')
   // La pestaña Caché y el selector de canal de voz son solo para administradores.
-  for (const id of ['tab-cache', 'page-cache', 'voice-panel', 'tab-stats', 'page-stats']) {
+  for (const id of ['tab-cache', 'page-cache', 'voice-panel', 'tab-stats', 'page-stats', 'tab-manage', 'page-manage']) {
     const el = document.getElementById(id)
     if (!el) continue
     if (isAdmin) el.style.removeProperty('display')
@@ -711,6 +746,7 @@ document.querySelectorAll('.tab').forEach(tab => {
     document.getElementById('page-' + tab.dataset.page).classList.add('active')
     if (tab.dataset.page === 'cache') loadMusic()
     if (tab.dataset.page === 'stats') loadStats()
+    if (tab.dataset.page === 'manage') loadSoundAdmin()
   }
 })
 
@@ -957,29 +993,58 @@ function norm(s) {
     .replace(/\s+/g, ' ').trim()
 }
 
+// Modo gestión del soundboard: el usuario renombra/oculta sonidos solo para sí.
+let manageMode = false
+
 function renderSoundGrid() {
   if (!soundData) return
   const q = norm(document.getElementById('sound-search').value)
   let sounds
   if (q) {
-    // Buscar en TODOS los sonidos (incluye el nombre de sus carpetas), sin importar la carpeta seleccionada
+    // Buscar en TODOS los sonidos por nombre propio (alias) y original, sin importar la carpeta seleccionada
     const tokens = q.split(' ')
     sounds = allSounds(soundData).filter(s => {
-      const hay = norm(s.label)
+      const hay = norm((s.alias || '') + ' ' + s.label)
       return tokens.every(t => hay.includes(t))
     })
   } else {
     const node = findNode(soundData, selectedPath) || soundData
     sounds = selectedPath === '' ? allSounds(soundData) : node.sounds
   }
-  document.getElementById('sound-grid').innerHTML = sounds.length
-    ? sounds.map(s => {
-        const priv = s.visibility === 'private'
-        const tip = s.label + (s.owner ? ' — subido por ' + s.owner : '') + (priv ? ' (privado)' : '')
-        return `<button class="sound-btn${priv ? ' private' : ''}" data-file="${esc(s.file)}" title="${esc(tip)}">${esc(s.label)}${priv ? '<span class="lock">🔒</span>' : ''}</button>`
-      }).join('')
-    : `<p class="empty">${q ? 'Sin resultados para la búsqueda' : 'No hay sonidos en esta carpeta'}</p>`
-  updatePlayingButtons()
+  // En modo normal se ocultan los que el usuario marcó como ocultos; en gestión se ven todos.
+  if (!manageMode) sounds = sounds.filter(s => !s.hidden)
+  const grid = document.getElementById('sound-grid')
+  grid.classList.toggle('managing', manageMode)
+  grid.innerHTML = sounds.length
+    ? sounds.map(s => manageMode ? manageCard(s) : soundButton(s)).join('')
+    : `<p class="empty">${q ? 'Sin resultados para la búsqueda' : (manageMode ? 'No hay sonidos para administrar' : 'No hay sonidos en esta carpeta')}</p>`
+  if (!manageMode) updatePlayingButtons()
+}
+
+// Botón normal de reproducción: muestra el nombre propio; si fue renombrado,
+// el original aparece debajo en chico, solo como referencia.
+function soundButton(s) {
+  const priv = s.visibility === 'private'
+  const name = s.alias || s.label
+  const renamed = s.alias && s.alias !== s.label
+  const tip = name + (renamed ? ' — original: ' + s.label : '') + (s.owner ? ' — subido por ' + s.owner : '') + (priv ? ' (privado)' : '')
+  return `<button class="sound-btn${priv ? ' private' : ''}" data-file="${esc(s.file)}" title="${esc(tip)}">` +
+    `<span class="sb-label">${esc(name)}${priv ? '<span class="lock">🔒</span>' : ''}</span>` +
+    (renamed ? `<span class="sb-orig">${esc(s.label)}</span>` : '') + `</button>`
+}
+
+// Tarjeta de gestión: renombrar (alias propio) y ocultar/restaurar.
+function manageCard(s) {
+  const priv = s.visibility === 'private'
+  const name = s.alias || s.label
+  const renamed = s.alias && s.alias !== s.label
+  return `<div class="sound-manage${s.hidden ? ' hidden' : ''}" data-id="${s.id}">` +
+    `<div class="sm-info"><div class="sm-name">${esc(name)}${priv ? '<span class="lock">🔒</span>' : ''}</div>` +
+    (renamed ? `<div class="sm-orig">original: ${esc(s.label)}</div>` : '') + `</div>` +
+    `<div class="sm-actions">` +
+    `<button class="sm-btn" data-act="rename" title="Cambiar el nombre (solo para ti)">✏️</button>` +
+    `<button class="sm-btn" data-act="hide" title="${s.hidden ? 'Restaurar' : 'Ocultar para ti'}">${s.hidden ? '↩️' : '🚫'}</button>` +
+    `</div></div>`
 }
 
 document.getElementById('sound-search').addEventListener('input', renderSoundGrid)
@@ -1074,6 +1139,39 @@ function renderRecent(recent) {
   }).join('')
 }
 
+// Pestaña de gestión (solo admin): privados de todos + renombres de todos.
+async function loadSoundAdmin() {
+  if (!(me && (me.roles || []).includes('admin'))) return
+  try {
+    const res = await webFetch('/api/sound-admin')
+    if (!res.ok) return
+    const data = await res.json()
+    renderManagePrivates(data.privates || [])
+    renderManageRenames(data.renames || [])
+  } catch {}
+}
+
+function renderManagePrivates(rows) {
+  const el = document.getElementById('manage-privates')
+  if (!rows.length) { el.innerHTML = '<li class="empty">No hay sonidos privados</li>'; return }
+  el.innerHTML = rows.map(r => {
+    const where = r.folder ? ` <span class="ml-orig">📁 ${esc(r.folder)}</span>` : ''
+    return `<li><span class="ml-main">🔒 ${esc(r.label)}${where}</span>` +
+      `<span class="ml-who">de ${esc(r.owner_name || 'desconocido')}</span></li>`
+  }).join('')
+}
+
+function renderManageRenames(rows) {
+  const el = document.getElementById('manage-renames')
+  if (!rows.length) { el.innerHTML = '<li class="empty">Nadie ha renombrado sonidos todavía</li>'; return }
+  el.innerHTML = rows.map(r => {
+    const priv = r.visibility === 'private' ? '🔒 ' : ''
+    return `<li><span class="ml-main">✏️ <b>${esc(r.alias)}</b> ` +
+      `<span class="ml-orig">(original: ${priv}${esc(r.original)}${r.owner_name ? ' · de ' + esc(r.owner_name) : ''})</span></span>` +
+      `<span class="ml-who">por ${esc(r.renamer || 'desconocido')}</span></li>`
+  }).join('')
+}
+
 async function loadSounds() {
   try {
     const res = await botFetch('/api/sounds')
@@ -1116,6 +1214,44 @@ document.getElementById('sound-grid').addEventListener('click', async (e) => {
   } else {
     btn.classList.add('playing')
     await api('/api/sound', { name: file })
+  }
+})
+
+// Activar/desactivar el modo gestión del soundboard (renombrar/ocultar para ti)
+document.getElementById('btn-manage-sounds').addEventListener('click', () => {
+  manageMode = !manageMode
+  document.getElementById('btn-manage-sounds').classList.toggle('on', manageMode)
+  renderSoundGrid()
+})
+
+// Guarda una preferencia del usuario sobre un sonido y refresca el soundboard.
+async function setSoundPref(soundId, changes) {
+  try {
+    const res = await webFetch('/api/sound-prefs', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ soundId, ...changes }),
+    })
+    if (!res.ok) { alert('No se pudo guardar el cambio'); return }
+    lastSoundsJSON = null // forzar re-render en el próximo loadSounds
+    await loadSounds()
+  } catch { alert('No se pudo guardar el cambio') }
+}
+
+// Acciones de las tarjetas de gestión: renombrar (alias propio) y ocultar/restaurar
+document.getElementById('sound-grid').addEventListener('click', async (e) => {
+  const actBtn = e.target.closest('.sm-btn')
+  if (!actBtn) return
+  const card = actBtn.closest('.sound-manage')
+  const id = Number(card.dataset.id)
+  const s = allSounds(soundData).find(x => x.id === id)
+  if (!s) return
+  if (actBtn.dataset.act === 'rename') {
+    const current = s.alias || s.label
+    const next = prompt('Nuevo nombre (solo lo verás tú). Déjalo vacío para volver al original:', current)
+    if (next === null) return
+    await setSoundPref(id, { alias: next.trim() })
+  } else if (actBtn.dataset.act === 'hide') {
+    await setSoundPref(id, { hidden: !s.hidden })
   }
 })
 
