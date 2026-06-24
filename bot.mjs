@@ -74,9 +74,16 @@ const MAX_HISTORY = 100
 
 // Volumen de los efectos del soundboard, regulable desde el panel y persistido
 let soundVolume = 0.9
-try { soundVolume = JSON.parse(readFileSync(SETTINGS_FILE, 'utf8')).soundVolume ?? 0.9 } catch {}
+// Volumen BASE de los sonidos: multiplicador global (1 = normal, 2 = el doble),
+// se aplica encima de la igualación por loudness, a todos por igual.
+let soundBaseVolume = 1
+try {
+  const s = JSON.parse(readFileSync(SETTINGS_FILE, 'utf8'))
+  soundVolume = s.soundVolume ?? 0.9
+  soundBaseVolume = s.soundBaseVolume ?? 1
+} catch {}
 function saveSettings() {
-  try { writeFileSync(SETTINGS_FILE, JSON.stringify({ soundVolume })) } catch {}
+  try { writeFileSync(SETTINGS_FILE, JSON.stringify({ soundVolume, soundBaseVolume })) } catch {}
 }
 
 if (!existsSync(SOUNDS_DIR)) mkdirSync(SOUNDS_DIR, { recursive: true })
@@ -262,7 +269,7 @@ class MixerStream extends Readable {
       if (avail === 0) continue
       const data = this._takeFrom(ov, avail)
       for (let i = 0; i + 1 < data.length && i + 1 < out.length; i += 2) {
-        let v = out.readInt16LE(i) + ((data.readInt16LE(i) * soundVolume) | 0)
+        let v = out.readInt16LE(i) + ((data.readInt16LE(i) * soundVolume * soundBaseVolume) | 0)
         if (v > 32767) v = 32767
         else if (v < -32768) v = -32768
         out.writeInt16LE(v, i)
@@ -316,7 +323,7 @@ class SoundMixer extends Readable {
       if (avail === 0) continue
       const data = this._takeFrom(ov, avail)
       for (let i = 0; i + 1 < data.length; i += 2) {
-        let v = out.readInt16LE(i) + ((data.readInt16LE(i) * soundVolume) | 0)
+        let v = out.readInt16LE(i) + ((data.readInt16LE(i) * soundVolume * soundBaseVolume) | 0)
         if (v > 32767) v = 32767
         else if (v < -32768) v = -32768
         out.writeInt16LE(v, i)
@@ -1237,6 +1244,13 @@ function cmdSoundVolume(v) {
   return true
 }
 
+function cmdSoundBaseVolume(v) {
+  if (typeof v !== 'number' || isNaN(v)) return false
+  soundBaseVolume = Math.min(5, Math.max(0, v)) // hasta 5x para subirlo bastante
+  saveSettings()
+  return true
+}
+
 // Sonidos que siguen reproduciéndose; limpia de paso las entradas terminadas
 function playingSounds() {
   const out = []
@@ -1358,6 +1372,7 @@ function getState() {
     voiceChannel: currentChannelName,
     playingSounds: playingSounds(),
     soundVolume,
+    soundBaseVolume,
   }
 }
 
@@ -1578,6 +1593,10 @@ http.createServer(async (req, res) => {
         }
         case '/api/sound/stop': return sendJson({ ok: cmdStopSound(body.id) })
         case '/api/sound/volume': return sendJson({ ok: cmdSoundVolume(body.volume) })
+        case '/api/sound/base-volume': {
+          if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)
+          return sendJson({ ok: cmdSoundBaseVolume(body.volume), soundBaseVolume })
+        }
         case '/api/disconnect': {
           if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)
           cmdStop()

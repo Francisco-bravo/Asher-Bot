@@ -91,6 +91,16 @@
   .subtab.active { background: var(--panel3); color: var(--text); border-color: transparent; }
   .subpage { display: none; }
   .subpage.active { display: block; }
+  /* Tabs internos de Gestión (Sonidos / Variables Generales) */
+  .mtab {
+    padding: 7px 14px; border: var(--border); border-radius: 8px;
+    background: var(--panel); color: var(--muted); cursor: pointer;
+    font-size: .88rem; font-weight: 600; transition: color .12s, background .12s;
+  }
+  .mtab:hover { color: var(--text); }
+  .mtab.active { background: var(--panel3); color: var(--text); border-color: transparent; }
+  .mpage { display: none; }
+  .mpage.active { display: block; }
 
   /* Filas de la biblioteca */
   .lib-item {
@@ -538,18 +548,40 @@
     </div>
 
     <div class="subpage" id="sub-manage">
-      <p class="hint" style="margin:0 0 14px">
-        Panel administrativo: estos cambios afectan a <b>todos</b>. ✏️ renombra el sonido o la carpeta ·
-        🗑️ oculta el sonido (queda en gris) · en un sonido gris, 💀 lo elimina para siempre.
-      </p>
-      <div class="sb-layout">
-        <div class="sb-sidebar" id="mgmt-sidebar"></div>
-        <div class="sb-main">
-          <div class="sb-search-row">
-            <input type="text" id="mgmt-search" class="sound-search" placeholder="🔍 Buscar sonidos...">
-            <button class="sb-action" id="btn-normalize" title="Revisar y medir el volumen de todos los sonidos para igualarlos">🎚️ Igualar volúmenes</button>
+      <div class="subtabs mtabs">
+        <button class="mtab active" data-mtab="sounds">🔊 Sonidos</button>
+        <button class="mtab" data-mtab="vars">⚙️ Variables Generales</button>
+      </div>
+
+      <div class="mpage active" id="mpage-sounds">
+        <p class="hint" style="margin:0 0 14px">
+          Panel administrativo: estos cambios afectan a <b>todos</b>. ✏️ renombra el sonido o la carpeta ·
+          🗑️ oculta el sonido (queda en gris) · en un sonido gris, 💀 lo elimina para siempre.
+        </p>
+        <div class="sb-layout">
+          <div class="sb-sidebar" id="mgmt-sidebar"></div>
+          <div class="sb-main">
+            <div class="sb-search-row">
+              <input type="text" id="mgmt-search" class="sound-search" placeholder="🔍 Buscar sonidos...">
+              <button class="sb-action" id="btn-normalize" title="Revisar y medir el volumen de todos los sonidos para igualarlos">🎚️ Igualar volúmenes</button>
+            </div>
+            <div class="sound-grid managing" id="mgmt-grid"></div>
           </div>
-          <div class="sound-grid managing" id="mgmt-grid"></div>
+        </div>
+      </div>
+
+      <div class="mpage" id="mpage-vars">
+        <div class="stats-section">
+          <h3>🔊 Volumen base de los sonidos</h3>
+          <p class="hint" style="margin:0 0 12px">
+            Multiplicador global que se aplica a <b>todos</b> los sonidos por igual, <b>encima</b> de la
+            igualación por loudness. <b>1</b> = normal · <b>2</b> = el doble de fuerte. Útil si en general
+            se escuchan bajos. (Subirlo mucho puede saturar.)
+          </p>
+          <div class="add-row" style="max-width:340px">
+            <input type="number" id="base-volume" step="0.1" min="0" max="5" value="1">
+            <button id="btn-base-volume">Guardar</button>
+          </div>
         </div>
       </div>
     </div>
@@ -824,6 +856,34 @@ document.querySelectorAll('.subtab').forEach(st => {
     if (st.dataset.sub === 'manage') loadSoundAdmin()
     if (st.dataset.sub === 'audit') loadSoundAudit()
   }
+})
+
+// Tabs internos de Gestión (Sonidos / Variables Generales)
+document.querySelectorAll('.mtab').forEach(mt => {
+  mt.onclick = () => {
+    document.querySelectorAll('.mtab').forEach(t => t.classList.remove('active'))
+    document.querySelectorAll('.mpage').forEach(p => p.classList.remove('active'))
+    mt.classList.add('active')
+    document.getElementById('mpage-' + mt.dataset.mtab).classList.add('active')
+    if (mt.dataset.mtab === 'vars') syncBaseVolumeInput()
+  }
+})
+
+// Volumen base: lee el valor actual del estado y lo guarda en bot.mjs.
+function syncBaseVolumeInput() {
+  const inp = document.getElementById('base-volume')
+  if (inp && state && state.soundBaseVolume != null && document.activeElement !== inp) inp.value = state.soundBaseVolume
+}
+document.getElementById('btn-base-volume').addEventListener('click', async () => {
+  const inp = document.getElementById('base-volume')
+  const v = Number(inp.value)
+  if (!Number.isFinite(v) || v < 0) { toast('Valor inválido'); return }
+  const btn = document.getElementById('btn-base-volume')
+  btn.disabled = true; const orig = btn.textContent; btn.textContent = 'Guardando...'
+  try {
+    const data = await api('/api/sound/base-volume', { volume: v })
+    if (data && data.ok) toast('Volumen base guardado ✓') // api() ya avisa si falla
+  } finally { btn.disabled = false; btn.textContent = orig }
 })
 
 function toast(msg) {
