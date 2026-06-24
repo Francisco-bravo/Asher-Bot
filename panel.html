@@ -473,28 +473,62 @@
     <button class="tab active" data-page="sounds">🔊 Soundboard</button>
     <button class="tab" data-page="music">🎵 Música</button>
     <button class="tab" id="tab-cache" data-page="cache">💾 Caché</button>
-    <button class="tab" id="tab-stats" data-page="stats">📊 Estadísticas</button>
-    <button class="tab" id="tab-manage" data-page="manage">🛠️ Gestión</button>
   </div>
 
   <div class="pages">
   <div class="page active" id="page-sounds">
     <div class="page-head">🔊 Soundboard</div>
-    <div class="vol-row">
-      <span>🔉</span>
-      <input type="range" id="snd-vol" min="0" max="150" step="5" value="90" title="Volumen de los sonidos">
-      <span class="vol-label" id="snd-vol-label">90%</span>
+    <div class="subtabs">
+      <button class="subtab active" data-sub="board">🔊 Soundboard</button>
+      <button class="subtab" id="subtab-stats" data-sub="stats">📊 Estadísticas</button>
+      <button class="subtab" id="subtab-manage" data-sub="manage">🛠️ Gestión</button>
     </div>
-    <div class="sb-layout">
-      <div class="sb-sidebar" id="sb-sidebar"></div>
-      <div class="sb-main">
-        <div class="sb-search-row">
-          <input type="text" id="sound-search" class="sound-search" placeholder="🔍 Buscar sonidos...">
-          <button class="sb-action" id="btn-manage-sounds" title="Renombrar u ocultar sonidos (solo para ti)">⚙️ Administrar</button>
-          <button class="sb-action" id="btn-new-folder" title="Crear una carpeta">📁 Nueva carpeta</button>
-          <button class="sb-action primary" id="btn-upload-sound" title="Subir un sonido nuevo">⬆️ Subir sonido</button>
+    <div class="subpage active" id="sub-board">
+      <div class="vol-row">
+        <span>🔉</span>
+        <input type="range" id="snd-vol" min="0" max="150" step="5" value="90" title="Volumen de los sonidos">
+        <span class="vol-label" id="snd-vol-label">90%</span>
+      </div>
+      <div class="sb-layout">
+        <div class="sb-sidebar" id="sb-sidebar"></div>
+        <div class="sb-main">
+          <div class="sb-search-row">
+            <input type="text" id="sound-search" class="sound-search" placeholder="🔍 Buscar sonidos...">
+            <button class="sb-action" id="btn-manage-sounds" title="Renombrar u ocultar sonidos (solo para ti)">⚙️ Administrar</button>
+            <button class="sb-action" id="btn-new-folder" title="Crear una carpeta">📁 Nueva carpeta</button>
+            <button class="sb-action primary" id="btn-upload-sound" title="Subir un sonido nuevo">⬆️ Subir sonido</button>
+          </div>
+          <div class="sound-grid" id="sound-grid"></div>
         </div>
-        <div class="sound-grid" id="sound-grid"></div>
+      </div>
+    </div>
+
+    <div class="subpage" id="sub-stats">
+      <div class="stats-section">
+        <div class="stats-head">
+          <h3>🏆 Sonidos más reproducidos</h3>
+          <select id="top-n" title="Cuántos mostrar">
+            <option value="5">Top 5</option>
+            <option value="10" selected>Top 10</option>
+            <option value="20">Top 20</option>
+          </select>
+        </div>
+        <div id="top-chart" class="top-chart"><p class="empty">Cargando…</p></div>
+      </div>
+      <div class="stats-section">
+        <h3>🕑 Últimas reproducciones</h3>
+        <ul id="recent-list" class="recent-list"><li class="empty">Cargando…</li></ul>
+      </div>
+    </div>
+
+    <div class="subpage" id="sub-manage">
+      <div class="stats-section">
+        <h3>🔒 Sonidos privados de todos</h3>
+        <ul id="manage-privates" class="manage-list"><li class="empty">Cargando…</li></ul>
+      </div>
+      <div class="stats-section">
+        <h3>✏️ Nombres cambiados</h3>
+        <ul id="manage-renames" class="manage-list"><li class="empty">Cargando…</li></ul>
       </div>
     </div>
   </div>
@@ -561,37 +595,6 @@
       <b>Permanente</b> 📌: queda fijada, nunca se borra de la caché. Las subidas nacen permanentes.
     </p>
     <div id="cache-list"></div>
-  </div>
-
-  <div class="page" id="page-stats">
-    <div class="page-head">📊 Estadísticas de sonidos</div>
-    <div class="stats-section">
-      <div class="stats-head">
-        <h3>🏆 Sonidos más reproducidos</h3>
-        <select id="top-n" title="Cuántos mostrar">
-          <option value="5">Top 5</option>
-          <option value="10" selected>Top 10</option>
-          <option value="20">Top 20</option>
-        </select>
-      </div>
-      <div id="top-chart" class="top-chart"><p class="empty">Cargando…</p></div>
-    </div>
-    <div class="stats-section">
-      <h3>🕑 Últimas reproducciones</h3>
-      <ul id="recent-list" class="recent-list"><li class="empty">Cargando…</li></ul>
-    </div>
-  </div>
-
-  <div class="page" id="page-manage">
-    <div class="page-head">🛠️ Gestión de sonidos</div>
-    <div class="stats-section">
-      <h3>🔒 Sonidos privados de todos</h3>
-      <ul id="manage-privates" class="manage-list"><li class="empty">Cargando…</li></ul>
-    </div>
-    <div class="stats-section">
-      <h3>✏️ Nombres cambiados</h3>
-      <ul id="manage-renames" class="manage-list"><li class="empty">Cargando…</li></ul>
-    </div>
   </div>
   </div>
 
@@ -715,7 +718,7 @@ async function loadMe() {
 function applyAdminUI() {
   const isAdmin = me && (me.roles || []).includes('admin')
   // La pestaña Caché y el selector de canal de voz son solo para administradores.
-  for (const id of ['tab-cache', 'page-cache', 'voice-panel', 'tab-stats', 'page-stats', 'tab-manage', 'page-manage']) {
+  for (const id of ['tab-cache', 'page-cache', 'voice-panel', 'subtab-stats', 'subtab-manage']) {
     const el = document.getElementById(id)
     if (!el) continue
     if (isAdmin) el.style.removeProperty('display')
@@ -745,19 +748,21 @@ document.querySelectorAll('.tab').forEach(tab => {
     tab.classList.add('active')
     document.getElementById('page-' + tab.dataset.page).classList.add('active')
     if (tab.dataset.page === 'cache') loadMusic()
-    if (tab.dataset.page === 'stats') loadStats()
-    if (tab.dataset.page === 'manage') loadSoundAdmin()
   }
 })
 
 // Sub-pestañas dentro de Música (Reproductor / Biblioteca)
 document.querySelectorAll('.subtab').forEach(st => {
   st.onclick = () => {
-    document.querySelectorAll('.subtab').forEach(t => t.classList.remove('active'))
-    document.querySelectorAll('.subpage').forEach(p => p.classList.remove('active'))
+    // Acotar al .page contenedor para no interferir con las subpestañas de otra página
+    const page = st.closest('.page')
+    page.querySelectorAll('.subtab').forEach(t => t.classList.remove('active'))
+    page.querySelectorAll('.subpage').forEach(p => p.classList.remove('active'))
     st.classList.add('active')
     document.getElementById('sub-' + st.dataset.sub).classList.add('active')
     if (st.dataset.sub === 'library') loadMusic()
+    if (st.dataset.sub === 'stats') loadStats()
+    if (st.dataset.sub === 'manage') loadSoundAdmin()
   }
 })
 
@@ -1660,9 +1665,9 @@ loadVoiceChannels()
 setInterval(refresh, 1000)
 setInterval(loadSounds, 5000)
 setInterval(loadVoiceChannels, 5000)
-// Refresca las estadísticas solo si la pestaña está abierta (y eres admin).
+// Refresca las estadísticas solo si la subpestaña está abierta (y eres admin).
 setInterval(() => {
-  if (document.getElementById('page-stats').classList.contains('active')) loadStats()
+  if (document.getElementById('sub-stats').classList.contains('active')) loadStats()
 }, 5000)
 </script>
 </body>
