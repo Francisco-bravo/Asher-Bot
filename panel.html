@@ -345,8 +345,10 @@
     .pb-progress span { display: none; } /* en móvil, solo la barra */
     .ctrl-seek { display: none; }        /* oculta -10s/+10s en móvil */
   }
-  .pb-track { cursor: pointer; border-radius: 8px; padding: 4px 8px; margin: -4px -8px; transition: background .12s; }
-  .pb-track:hover { background: var(--panel3); }
+  /* La barra es clicable para abrir la vista expandida; los controles y la zona
+     de tiempo/progreso no la abren. Sin resaltado al pasar el cursor. */
+  .player-bar { cursor: pointer; }
+  .player-bar .controls, .player-bar .pb-progress { cursor: default; }
 
   /* Vista "reproduciendo ahora" a pantalla completa (estilo YouTube Music) */
   .np-view {
@@ -1344,7 +1346,11 @@ function toggleNpView() {
   const v = document.getElementById('np-view')
   if (v.style.display === 'flex') closeNpView(); else openNpView()
 }
-document.getElementById('pb-track').onclick = toggleNpView
+document.getElementById('player-bar').onclick = (e) => {
+  // Los botones de control y la zona de tiempo/progreso no abren la vista.
+  if (e.target.closest('.controls') || e.target.closest('.pb-progress')) return
+  toggleNpView()
+}
 document.getElementById('npv-close').onclick = closeNpView
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && document.getElementById('np-view').style.display === 'flex') closeNpView()
