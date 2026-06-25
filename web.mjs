@@ -240,7 +240,7 @@ http.createServer(async (req, res) => {
     }
 
     if (req.method === 'GET' && path === '/api/sounds') {
-      return send(res, 200, sounds.tree(sounds.listForUser(user.id), folders.list()))
+      return send(res, 200, sounds.tree(sounds.listForUser(user.id), folders.list(), folders.aliasesForUser(user.id)))
     }
 
     // Carpetas del soundboard: listar (para el selector) y crear (botón dedicado).
@@ -265,6 +265,7 @@ http.createServer(async (req, res) => {
       const folder = (url.searchParams.get('folder') || '').trim()
       const visibility = url.searchParams.get('visibility') === 'global' ? 'global' : 'private'
       if (!label) return send(res, 400, { error: 'Falta el nombre (label)' })
+      if (!folder) return send(res, 400, { error: 'Debes elegir una carpeta (no se puede subir a la raíz)' })
       if (!SOUND_EXTS.has(ext)) return send(res, 400, { error: `Extensión no permitida: ${ext}` })
       if (visibility === 'global' && !rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un admin puede subir sonidos globales' })
       const buffer = await readBody(req)
@@ -285,6 +286,33 @@ http.createServer(async (req, res) => {
       if (Object.prototype.hasOwnProperty.call(body, 'alias')) sounds.setAlias(user.id, soundId, body.alias)
       if (Object.prototype.hasOwnProperty.call(body, 'hidden')) sounds.setHidden(user.id, soundId, !!body.hidden)
       return send(res, 200, { ok: true })
+    }
+
+    // Mover un sonido a otra carpeta. Admin = global (cambia la carpeta real);
+    // usuario normal = personal (solo cambia dónde lo ve él). No se permite la raíz.
+    if (req.method === 'POST' && path === '/api/sound-move') {
+      const body = JSON.parse((await readBody(req)).toString() || '{}')
+      const soundId = Number(body.soundId)
+      const folder = folders.normalizePath(body.folder || '')
+      if (!soundId) return send(res, 400, { error: 'Falta soundId' })
+      if (!folder) return send(res, 400, { error: 'Carpeta inválida (no se puede mover a la raíz)' })
+      const snd = sounds.getById(soundId)
+      if (!snd || !rbac.canSeeSound(user.id, snd)) return send(res, 404, { error: 'Sonido no disponible' })
+      if (rbac.isAdmin(user.id)) { folders.create(folder); sounds.moveSoundGlobal(soundId, folder) }
+      else sounds.setSoundFolder(user.id, soundId, folder)
+      return send(res, 200, { ok: true })
+    }
+
+    // Renombrar una carpeta. Admin = global (afecta a todos); usuario = personal
+    // (solo cambia el nombre que él ve; la ruta real no cambia).
+    if (req.method === 'POST' && path === '/api/folder-rename') {
+      const body = JSON.parse((await readBody(req)).toString() || '{}')
+      if (!body.path || !(body.name || '').trim()) return send(res, 400, { error: 'Falta path o name' })
+      try {
+        if (rbac.isAdmin(user.id)) return send(res, 200, { ok: true, path: folders.rename(body.path, body.name) })
+        folders.setUserAlias(user.id, body.path, body.name)
+        return send(res, 200, { ok: true, path: body.path })
+      } catch (e) { return send(res, 400, { error: e.message }) }
     }
 
     // Gestión (solo admin): árbol completo de TODOS los sonidos (incl. ocultos)

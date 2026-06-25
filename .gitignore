@@ -16,3 +16,6 @@ object-store/
 *.db
 *.db-wal
 *.db-shm
+
+# Claude Code local settings (no versionar)
+.claude/

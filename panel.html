@@ -227,14 +227,19 @@
     border-radius: 12px; padding: 8px; overflow-y: auto;
     max-height: 66vh; align-self: flex-start;
   }
+  /* Carpetas grandes: blanco de drop amplio para arrastrar sonidos sin errar */
   .sb-row {
-    display: flex; align-items: center; gap: 4px;
-    padding: 8px 9px; border-radius: 8px; cursor: pointer;
-    font-size: .92rem; user-select: none;
+    display: flex; align-items: center; gap: 6px;
+    padding: 13px 12px; border-radius: 10px; cursor: pointer;
+    font-size: 1rem; user-select: none;
     white-space: nowrap; overflow: hidden; transition: background .1s;
   }
   .sb-row:hover { background: var(--panel2); }
   .sb-row.selected { background: var(--accent); color: #fff; }
+  /* Resaltado de la carpeta destino al arrastrar un sonido encima */
+  .sb-row.drop-target { background: var(--accent); color: #fff; outline: 2px dashed #fff; outline-offset: -3px; }
+  .sound-btn[draggable="true"] { cursor: grab; }
+  .sound-btn.dragging { opacity: .5; }
   .sb-row .arrow {
     width: 16px; flex-shrink: 0; text-align: center;
     color: var(--muted); font-size: .7rem;
@@ -994,7 +999,7 @@
   <div class="modal-overlay" id="sound-modal" style="display:none">
     <div class="modal">
       <h2>Subir sonido</h2>
-      <p class="modal-folder">Aparecerá en el <b>soundboard</b>. Elige si es solo para ti (privado) o para todos (público).</p>
+      <p class="modal-folder">Aparecerá en el <b>soundboard</b>, dentro de una <b>carpeta</b> (no se sube a la raíz). Elige si es solo para ti (privado) o para todos (público).</p>
       <form class="upload-form" id="sound-form">
         <label>Archivo de audio (.mp3 .wav .ogg .m4a .flac .webm)
           <input type="file" id="sound-file" accept=".mp3,.wav,.ogg,.m4a,.flac,.webm" required>
@@ -1002,9 +1007,9 @@
         <label>Nombre
           <input type="text" id="sound-label" placeholder="Nombre del sonido" required>
         </label>
-        <label>Carpeta (opcional)
-          <select id="sound-folder">
-            <option value="">📂 (sin carpeta — raíz)</option>
+        <label>Carpeta
+          <select id="sound-folder" required>
+            <option value="" disabled selected>— Elige una carpeta —</option>
           </select>
         </label>
         <label>Visibilidad
@@ -1550,7 +1555,7 @@ function renderSidebar() {
       const p = path ? path + '/' + f.name : f.name
       const hasKids = f.folders.length > 0
       const open = openFolders.has(p)
-      rows.push(`<div class="sb-row${selectedPath === p ? ' selected' : ''}" data-path="${esc(p)}" style="padding-left:${8 + depth * 16}px"><span class="arrow" data-toggle="${esc(p)}">${hasKids ? (open ? '▾' : '▸') : ''}</span><span>📁 ${esc(f.name)}</span></div>`)
+      rows.push(`<div class="sb-row${selectedPath === p ? ' selected' : ''}" data-path="${esc(p)}" style="padding-left:${8 + depth * 16}px"><span class="arrow" data-toggle="${esc(p)}">${hasKids ? (open ? '▾' : '▸') : ''}</span><span>📁 ${esc(f.display || f.name)}</span><button class="sb-edit" data-folder-edit="${esc(p)}" title="Renombrar carpeta">✏️</button></div>`)
       if (open) walk(f, p, depth + 1)
     }
   }
@@ -1601,7 +1606,7 @@ function soundButton(s) {
   const name = s.alias || s.label
   const renamed = s.alias && s.alias !== s.label
   const tip = name + (renamed ? ' — original: ' + s.label : '') + (s.owner ? ' — subido por ' + s.owner : '') + (priv ? ' (privado)' : '')
-  return `<button class="sound-btn${priv ? ' private' : ''}" data-file="${esc(s.file)}" title="${esc(tip)}">` +
+  return `<button class="sound-btn${priv ? ' private' : ''}" draggable="true" data-file="${esc(s.file)}" data-id="${s.id}" title="${esc(tip)}">` +
     `<span class="sb-label">${esc(name)}${priv ? '<span class="lock">🔒</span>' : ''}</span>` +
     (renamed ? `<span class="sb-orig">${esc(s.label)}</span>` : '') + `</button>`
 }
@@ -1997,6 +2002,30 @@ async function loadSounds() {
 }
 
 document.getElementById('sb-sidebar').addEventListener('click', (e) => {
+  // Lápiz: renombrar carpeta (personal para usuarios, global para admin)
+  const editBtn = e.target.closest('[data-folder-edit]')
+  if (editBtn) {
+    const p = editBtn.dataset.folderEdit
+    const node = findNode(soundData, p)
+    const current = node ? (node.display || node.name) : p.split('/').pop()
+    openEditModal({
+      title: 'Renombrar carpeta',
+      desc: (me && (me.roles || []).includes('admin'))
+        ? 'Como admin, el cambio es para <b>todos</b>.'
+        : 'El nuevo nombre lo verás <b>solo tú</b>.',
+      label: 'Nombre', value: current,
+      save: async (val) => {
+        const res = await webFetch('/api/folder-rename', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: p, name: val }),
+        })
+        const d = await res.json().catch(() => null)
+        if (!res.ok) { toast(d && d.error ? d.error : 'No se pudo renombrar'); return }
+        toast('Carpeta renombrada ✓'); lastSoundsJSON = null; await loadSounds()
+      },
+    })
+    return
+  }
   const row = e.target.closest('.sb-row')
   if (!row) return
   const arrow = e.target.closest('.arrow')
@@ -2011,6 +2040,54 @@ document.getElementById('sb-sidebar').addEventListener('click', (e) => {
   if (selectedPath) openFolders.add(selectedPath)
   renderSidebar()
   renderSoundGrid()
+})
+
+// ── Arrastrar sonidos para moverlos de carpeta ──
+let draggedSoundId = null
+function moveSoundToFolder(soundId, folder) {
+  return webFetch('/api/sound-move', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ soundId: Number(soundId), folder }),
+  }).then(async (res) => {
+    const d = await res.json().catch(() => null)
+    if (!res.ok) { toast(d && d.error ? d.error : 'No se pudo mover'); return }
+    toast('Sonido movido ✓'); lastSoundsJSON = null; await loadSounds()
+  }).catch(() => toast('No se pudo mover'))
+}
+const sbGrid = document.getElementById('sound-grid')
+sbGrid.addEventListener('dragstart', (e) => {
+  const btn = e.target.closest('.sound-btn')
+  if (!btn || !btn.dataset.id) return
+  draggedSoundId = btn.dataset.id
+  e.dataTransfer.effectAllowed = 'move'
+  btn.classList.add('dragging')
+})
+sbGrid.addEventListener('dragend', (e) => {
+  const btn = e.target.closest('.sound-btn'); if (btn) btn.classList.remove('dragging')
+  draggedSoundId = null
+  document.querySelectorAll('.sb-row.drop-target').forEach(r => r.classList.remove('drop-target'))
+})
+const sbSidebar = document.getElementById('sb-sidebar')
+sbSidebar.addEventListener('dragover', (e) => {
+  if (draggedSoundId == null) return
+  const row = e.target.closest('.sb-row')
+  if (!row || !row.dataset.path) return   // "Todos los sonidos" (raíz) no es destino
+  e.preventDefault(); e.dataTransfer.dropEffect = 'move'
+  document.querySelectorAll('.sb-row.drop-target').forEach(r => r.classList.remove('drop-target'))
+  row.classList.add('drop-target')
+})
+sbSidebar.addEventListener('dragleave', (e) => {
+  const row = e.target.closest('.sb-row')
+  if (row && !row.contains(e.relatedTarget)) row.classList.remove('drop-target')
+})
+sbSidebar.addEventListener('drop', async (e) => {
+  if (draggedSoundId == null) return
+  const row = e.target.closest('.sb-row')
+  if (!row || !row.dataset.path) return
+  e.preventDefault()
+  const id = draggedSoundId; draggedSoundId = null
+  row.classList.remove('drop-target')
+  await moveSoundToFolder(id, row.dataset.path)
 })
 
 // Un clic reproduce; otro clic detiene si sigue sonando
@@ -2622,14 +2699,17 @@ function eachFolderPath(node, prefix, cb) {
   }
 }
 // Genera las <option> de un selector de carpetas, indentadas según el anidamiento.
+// rootLabel === null → sin opción raíz: un placeholder deshabilitado obliga a elegir.
 function folderOptionsHtml(selected, rootLabel) {
-  let html = `<option value="">${rootLabel || '📂 (sin carpeta — raíz)'}</option>`
+  let html = rootLabel === null
+    ? `<option value="" disabled${selected ? '' : ' selected'}>— Elige una carpeta —</option>`
+    : `<option value="">${rootLabel || '📂 (sin carpeta — raíz)'}</option>`
   if (soundData) {
     eachFolderPath(soundData, '', (p, f) => {
       const depth = p.split('/').length - 1
       const indent = '   '.repeat(depth)
       const sel = p === selected ? ' selected' : ''
-      html += `<option value="${esc(p)}"${sel}>${indent}📁 ${esc(f.name)}</option>`
+      html += `<option value="${esc(p)}"${sel}>${indent}📁 ${esc(f.display || f.name)}</option>`
     })
   }
   return html
@@ -2637,7 +2717,7 @@ function folderOptionsHtml(selected, rootLabel) {
 // Rellena ambos selectores de carpeta conservando la selección actual.
 function populateFolderSelects() {
   const sf = document.getElementById('sound-folder')
-  if (sf) sf.innerHTML = folderOptionsHtml(sf.value)
+  if (sf) sf.innerHTML = folderOptionsHtml(sf.value, null)   // subir exige carpeta (sin raíz)
   const pf = document.getElementById('folder-parent')
   if (pf) pf.innerHTML = folderOptionsHtml(pf.value, '📂 (raíz)')
 }
@@ -2652,7 +2732,8 @@ function openSoundModal() {
   globalOpt.disabled = !isAdmin
   globalOpt.textContent = isAdmin ? '🌐 Público (todos)' : '🌐 Público (solo admin)'
   if (!isAdmin) sel.value = 'private'
-  document.getElementById('sound-folder').innerHTML = folderOptionsHtml('') // carpetas a elegir
+  // Obliga a elegir carpeta (sin raíz); prefija la carpeta seleccionada si la hay.
+  document.getElementById('sound-folder').innerHTML = folderOptionsHtml(selectedPath || '', null)
   document.getElementById('sound-modal').style.display = 'flex'
   document.getElementById('sound-label').focus()
 }
@@ -2672,6 +2753,7 @@ document.getElementById('sound-form').addEventListener('submit', async (e) => {
   const folder = document.getElementById('sound-folder').value.trim()
   const visibility = document.getElementById('sound-visibility').value
   if (!file || !label) { toast('Falta el archivo o el nombre'); return }
+  if (!folder) { toast('Elige una carpeta (no se puede subir a la raíz)'); return }
   const ext = (file.name.split('.').pop() || '').toLowerCase()
   const btn = document.getElementById('sound-submit')
   btn.disabled = true; btn.textContent = 'Subiendo...'
@@ -2772,7 +2854,9 @@ document.getElementById('edit-form').addEventListener('submit', async (e) => {
 
 function openFolderModal() {
   if (!me) { toast('Inicia sesión con Discord para crear carpetas'); return }
-  document.getElementById('folder-parent').innerHTML = folderOptionsHtml('', '📂 (raíz)')
+  // "Nueva carpeta" se crea DENTRO de la carpeta seleccionada; en "Todos los
+  // sonidos" (raíz) se crea en la raíz.
+  document.getElementById('folder-parent').innerHTML = folderOptionsHtml(selectedPath || '', '📂 (raíz)')
   document.getElementById('folder-name').value = ''
   document.getElementById('folder-modal').style.display = 'flex'
   document.getElementById('folder-name').focus()
