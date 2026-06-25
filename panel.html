@@ -655,15 +655,23 @@
   .pl-modal-actions button.primary:hover { background: var(--accent2); }
   .pl-modal-actions button.danger { color: var(--danger); }
   .pl-modal-actions button.danger:hover { background: var(--danger); color: #fff; border-color: transparent; }
-  .pl-items { display: flex; flex-direction: column; gap: 4px; overflow-y: auto; max-height: 30vh; margin-bottom: 6px; }
+  /* Dos columnas: izquierda las canciones de la lista, derecha la biblioteca */
+  .pl-cols { display: flex; gap: 18px; align-items: flex-start; }
+  .pl-col { flex: 1; min-width: 0; }
+  .pl-col-title { font-size: .92rem; margin-bottom: 8px; }
+  @media (max-width: 700px) { .pl-cols { flex-direction: column; } }
+  .pl-items { display: flex; flex-direction: column; gap: 4px; overflow-y: auto; max-height: 48vh; margin-bottom: 6px; }
   .pl-item { display: flex; align-items: center; gap: 8px; background: var(--panel); border-radius: 9px; padding: 7px 10px; }
   .pl-item .num { color: var(--muted); font-variant-numeric: tabular-nums; }
   .pl-item .title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .9rem; }
   .pl-item-q, .pl-item-del { border: none; background: transparent; cursor: pointer; color: var(--muted); font-size: 1rem; padding: 2px 6px; border-radius: 6px; }
   .pl-item-q:hover { color: var(--accent); }
   .pl-item-del:hover { color: var(--danger); }
-  .pl-add-area { border-top: var(--border); padding-top: 14px; margin-top: 6px; }
+  .pl-add-area { border-left: var(--border); padding-left: 18px; }
   .pl-add-area h3 { font-size: .92rem; margin-bottom: 8px; }
+  @media (max-width: 700px) {
+    .pl-add-area { border-left: none; padding-left: 0; border-top: var(--border); padding-top: 14px; }
+  }
   .pl-add-row { display: flex; gap: 8px; margin-bottom: 10px; }
   .pl-add-row input {
     flex: 1; padding: 10px 13px; border: var(--border); border-radius: 10px;
@@ -904,9 +912,13 @@
         <button id="pl-delete" class="danger" style="display:none">🗑️ Eliminar lista</button>
       </div>
 
-      <div id="pl-items" class="pl-items"><p class="empty">Cargando…</p></div>
+      <div class="pl-cols">
+      <div class="pl-col">
+        <h3 class="pl-col-title">🎵 En la lista</h3>
+        <div id="pl-items" class="pl-items"><p class="empty">Cargando…</p></div>
+      </div>
 
-      <div id="pl-add-area" class="pl-add-area" style="display:none">
+      <div id="pl-add-area" class="pl-col pl-add-area" style="display:none">
         <h3>➕ Agregar canciones</h3>
         <div class="pl-add-row">
           <input type="text" id="pl-add-link" placeholder="Pega un link o escribe para buscar (igual que la cola)..." onkeydown="if(event.key==='Enter')addLinkToPlaylist()">
@@ -916,6 +928,7 @@
         <p class="hint" style="margin:-2px 0 10px">Pega un link de <b>canción</b> o búsqueda y usa <b>Agregar</b>; pega un link de <b>playlist</b> y usa <b>Importar playlist</b>.</p>
         <input type="text" id="pl-lib-search" class="sound-search" placeholder="🔍 …o elige de la biblioteca">
         <div id="pl-lib-list" class="pl-lib-list"></div>
+      </div>
       </div>
 
       <div class="modal-actions">
