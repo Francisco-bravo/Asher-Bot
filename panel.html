@@ -255,6 +255,8 @@
   /* Zonas recortadas (fuera de la selección) se oscurecen */
   .trim-mask { position: absolute; top: 0; bottom: 0; background: rgba(0,0,0,.55); pointer-events: none; }
   .trim-region { position: absolute; top: 0; bottom: 0; border-left: 2px solid var(--accent); border-right: 2px solid var(--accent); background: rgba(88,101,242,.10); pointer-events: none; }
+  /* Cabezal que recorre la onda mientras se reproduce la selección */
+  .trim-playhead { position: absolute; top: 0; bottom: 0; width: 2px; background: #fff; box-shadow: 0 0 6px rgba(255,255,255,.85); pointer-events: none; display: none; }
   .trim-handle { position: absolute; top: 0; bottom: 0; width: 14px; margin-left: -7px; cursor: ew-resize; display: grid; place-items: center; }
   .trim-handle::after { content: ''; width: 4px; height: 46px; border-radius: 3px; background: var(--accent); box-shadow: 0 0 0 2px rgba(0,0,0,.3); }
   .trim-handle:hover::after { background: var(--accent2); }
@@ -2808,6 +2810,7 @@ function mountTrimmer(container) {
       '<canvas class="trim-canvas"></canvas>' +
       '<div class="trim-mask trim-mask-l"></div><div class="trim-mask trim-mask-r"></div>' +
       '<div class="trim-region"></div>' +
+      '<div class="trim-playhead"></div>' +
       '<div class="trim-handle trim-handle-l"></div><div class="trim-handle trim-handle-r"></div>' +
     '</div><div class="trim-controls">' +
       '<button type="button" class="trim-play">▶ Probar selección</button>' +
@@ -2819,8 +2822,9 @@ function mountTrimmer(container) {
   const region = container.querySelector('.trim-region')
   const hL = container.querySelector('.trim-handle-l'), hR = container.querySelector('.trim-handle-r')
   const playBtn = container.querySelector('.trim-play'), resetBtn = container.querySelector('.trim-reset')
+  const playhead = container.querySelector('.trim-playhead')
   const t0 = container.querySelector('.trim-t0'), t1 = container.querySelector('.trim-t1'), tDur = container.querySelector('.trim-dur')
-  let buffer = null, dur = 0, a = 0, b = 0, src = null
+  let buffer = null, dur = 0, a = 0, b = 0, src = null, rafId = null
   function paint() {
     const fa = dur ? a / dur : 0, fb = dur ? b / dur : 1
     hL.style.left = (fa * 100) + '%'; hR.style.left = (fb * 100) + '%'
@@ -2854,13 +2858,29 @@ function mountTrimmer(container) {
     document.addEventListener('pointermove', move); document.addEventListener('pointerup', up)
   }
   hL.addEventListener('pointerdown', dragHandle('l')); hR.addEventListener('pointerdown', dragHandle('r'))
-  function stop() { if (src) { try { src.stop() } catch {} src = null } playBtn.textContent = '▶ Probar selección' }
+  function stop() {
+    if (src) { try { src.stop() } catch {} src = null }
+    if (rafId) { cancelAnimationFrame(rafId); rafId = null }
+    playhead.style.display = 'none'
+    playBtn.textContent = '▶ Probar selección'
+  }
   playBtn.addEventListener('click', () => {
     if (src) { stop(); return }
     if (!buffer) return
     const ctx = audioCtx(); if (ctx.state === 'suspended') ctx.resume()
     src = ctx.createBufferSource(); src.buffer = buffer; src.connect(ctx.destination)
-    src.onended = () => stop(); src.start(0, a, Math.max(0.02, b - a)); playBtn.textContent = '⏹ Detener'
+    src.onended = () => stop()
+    const from = a, startT = ctx.currentTime
+    src.start(0, a, Math.max(0.02, b - a)); playBtn.textContent = '⏹ Detener'
+    // Cabezal: posición = inicio de la selección + tiempo transcurrido.
+    playhead.style.display = 'block'
+    const tick = () => {
+      if (!src) return
+      const pos = Math.min(b, from + (audioCtx().currentTime - startT))
+      playhead.style.left = (dur ? pos / dur * 100 : 0) + '%'
+      if (pos < b) rafId = requestAnimationFrame(tick)
+    }
+    rafId = requestAnimationFrame(tick)
   })
   resetBtn.addEventListener('click', () => { stop(); a = 0; b = dur; paint() })
   return {
