@@ -237,9 +237,21 @@
   .sb-row:hover { background: var(--panel2); }
   .sb-row.selected { background: var(--accent); color: #fff; }
   /* Resaltado de la carpeta destino al arrastrar un sonido encima */
-  .sb-row.drop-target { background: var(--accent); color: #fff; outline: 2px dashed #fff; outline-offset: -3px; }
+  .sb-row.drop-target { background: var(--accent); color: #fff; outline: 2px dashed #fff; outline-offset: -3px; transform: scale(1.02); }
   .sound-btn[draggable="true"] { cursor: grab; }
   .sound-btn.dragging { opacity: .5; }
+  /* Mientras se arrastra un sonido: resaltar las carpetas (destinos) y atenuar
+     el resto, para que se entienda que hay que soltarlo en una carpeta. */
+  body.dragging-sound .sb-main { opacity: .35; transition: opacity .15s; }
+  body.dragging-sound #sb-sidebar { box-shadow: 0 0 0 2px var(--accent); border-radius: 12px; }
+  body.dragging-sound #sb-sidebar .sb-row[data-path=""] { opacity: .35; } /* "Todos" no es destino */
+  body.dragging-sound #sb-sidebar .sb-row:not([data-path=""]) {
+    background: var(--panel2); outline: 2px dashed var(--accent); outline-offset: -3px;
+  }
+  /* La carpeta bajo el cursor se marca fuerte (gana al resaltado base) */
+  body.dragging-sound #sb-sidebar .sb-row.drop-target {
+    background: var(--accent); color: #fff; outline: 2px solid #fff; outline-offset: -3px; transform: scale(1.03);
+  }
   .sb-row .arrow {
     width: 16px; flex-shrink: 0; text-align: center;
     color: var(--muted); font-size: .7rem;
@@ -2062,10 +2074,12 @@ sbGrid.addEventListener('dragstart', (e) => {
   draggedSoundId = btn.dataset.id
   e.dataTransfer.effectAllowed = 'move'
   btn.classList.add('dragging')
+  document.body.classList.add('dragging-sound')   // resalta carpetas, atenúa el resto
 })
 sbGrid.addEventListener('dragend', (e) => {
   const btn = e.target.closest('.sound-btn'); if (btn) btn.classList.remove('dragging')
   draggedSoundId = null
+  document.body.classList.remove('dragging-sound')
   document.querySelectorAll('.sb-row.drop-target').forEach(r => r.classList.remove('drop-target'))
 })
 const sbSidebar = document.getElementById('sb-sidebar')
