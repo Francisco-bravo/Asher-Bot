@@ -243,6 +243,29 @@
   .sb-row.drop-target { background: var(--accent); color: #fff; outline: 2px dashed #fff; outline-offset: -3px; transform: scale(1.02); }
   .sound-btn[draggable="true"] { cursor: grab; }
   .sound-btn.dragging { opacity: .5; }
+
+  /* Recortador de sonidos (client-side) */
+  .trim-slot { margin: 4px 0 2px; }
+  .trimmer { display: flex; flex-direction: column; gap: 10px; }
+  .trim-wave {
+    position: relative; height: 96px; background: var(--panel); border: var(--border);
+    border-radius: 10px; overflow: hidden; touch-action: none; user-select: none;
+  }
+  .trim-canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  /* Zonas recortadas (fuera de la selección) se oscurecen */
+  .trim-mask { position: absolute; top: 0; bottom: 0; background: rgba(0,0,0,.55); pointer-events: none; }
+  .trim-region { position: absolute; top: 0; bottom: 0; border-left: 2px solid var(--accent); border-right: 2px solid var(--accent); background: rgba(88,101,242,.10); pointer-events: none; }
+  .trim-handle { position: absolute; top: 0; bottom: 0; width: 14px; margin-left: -7px; cursor: ew-resize; display: grid; place-items: center; }
+  .trim-handle::after { content: ''; width: 4px; height: 46px; border-radius: 3px; background: var(--accent); box-shadow: 0 0 0 2px rgba(0,0,0,.3); }
+  .trim-handle:hover::after { background: var(--accent2); }
+  .trim-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .trim-controls button {
+    padding: 7px 12px; border: var(--border); border-radius: 8px; cursor: pointer;
+    background: var(--panel); color: var(--text); font-size: .85rem; font-weight: 600;
+  }
+  .trim-controls button:hover { background: var(--panel3); }
+  .trim-times { color: var(--muted); font-size: .82rem; font-variant-numeric: tabular-nums; }
+  .trim-times .trim-dur { opacity: .8; }
   /* Mientras se arrastra un sonido: resaltar las carpetas (destinos) y atenuar
      el resto, para que se entienda que hay que soltarlo en una carpeta. */
   body.dragging-sound .sb-main { opacity: .35; transition: opacity .15s; }
@@ -1019,6 +1042,8 @@
         <label>Archivo de audio (.mp3 .wav .ogg .m4a .flac .webm)
           <input type="file" id="sound-file" accept=".mp3,.wav,.ogg,.m4a,.flac,.webm" required>
         </label>
+        <div id="upload-trim" class="trim-slot" style="display:none"></div>
+        <small id="upload-trim-hint" class="hint" style="display:none">Arrastra los bordes para recortar; se subirá solo la selección (.wav).</small>
         <label>Nombre
           <input type="text" id="sound-label" placeholder="Nombre del sonido" required>
         </label>
@@ -1039,6 +1064,18 @@
           <button type="submit" id="sound-submit">Subir</button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="trim-modal" style="display:none">
+    <div class="modal" style="max-width:640px">
+      <h2>✂️ Recortar sonido</h2>
+      <p class="modal-folder" id="trim-modal-name"></p>
+      <div id="edit-trim" class="trim-slot"></div>
+      <div class="modal-actions">
+        <button type="button" class="cancel" id="trim-cancel">Cancelar</button>
+        <button type="button" id="trim-save">Guardar recorte</button>
+      </div>
     </div>
   </div>
 
@@ -1882,6 +1919,7 @@ function mgmtCard(s) {
   const priv = s.visibility === 'private'
   const owner = s.owner ? `<span class="sm-owner">${priv ? '🔒 ' : ''}de ${esc(s.owner)}</span>` : (priv ? '<span class="sm-owner">🔒</span>' : '')
   const actions = `<button class="sm-btn" data-act="rename" title="Renombrar (para todos)">✏️</button>` +
+    `<button class="sm-btn" data-act="trim" title="Recortar el sonido">✂️</button>` +
     (s.hidden
       ? `<button class="sm-btn" data-act="unhide" title="Restaurar (volver a mostrar)">↩️</button>` +
         `<button class="sm-btn danger" data-act="delete" title="Eliminar permanentemente">💀</button>`
@@ -1969,6 +2007,8 @@ document.getElementById('mgmt-grid').addEventListener('click', async (e) => {
           await mgmtAction('POST', '/api/sound-admin/rename', { soundId: id, label: value, visibility: extra.visibility, offsetDb: extra.offsetDb }, card)
       },
     })
+  } else if (act === 'trim') {
+    openTrimModal(id, label)
   } else if (act === 'hide') {
     await mgmtAction('POST', '/api/sound-admin/hide', { soundId: id, hidden: true }, card)
   } else if (act === 'unhide') {
@@ -2735,7 +2775,109 @@ function populateFolderSelects() {
   if (pf) pf.innerHTML = folderOptionsHtml(pf.value, '📂 (raíz)')
 }
 
+// ── Recortador de sonidos (todo en el navegador; exporta WAV) ──
+let _audioCtx = null
+function audioCtx() { return _audioCtx || (_audioCtx = new (window.AudioContext || window.webkitAudioContext)()) }
+function fmtTrim(s) {
+  s = Math.max(0, s); const m = Math.floor(s / 60), ss = Math.floor(s % 60), cs = Math.floor((s * 100) % 100)
+  return m + ':' + String(ss).padStart(2, '0') + '.' + String(cs).padStart(2, '0')
+}
+// Codifica la región [a,b] de un AudioBuffer a WAV PCM 16-bit (Blob).
+function encodeWav(audioBuffer, startSec, endSec) {
+  const sr = audioBuffer.sampleRate, nch = audioBuffer.numberOfChannels
+  const start = Math.max(0, Math.floor(startSec * sr)), end = Math.min(audioBuffer.length, Math.floor(endSec * sr))
+  const len = Math.max(0, end - start), blockAlign = nch * 2, dataSize = len * blockAlign
+  const buf = new ArrayBuffer(44 + dataSize), view = new DataView(buf)
+  const ws = (o, s) => { for (let i = 0; i < s.length; i++) view.setUint8(o + i, s.charCodeAt(i)) }
+  ws(0, 'RIFF'); view.setUint32(4, 36 + dataSize, true); ws(8, 'WAVE'); ws(12, 'fmt ')
+  view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, nch, true)
+  view.setUint32(24, sr, true); view.setUint32(28, sr * blockAlign, true); view.setUint16(32, blockAlign, true)
+  view.setUint16(34, 16, true); ws(36, 'data'); view.setUint32(40, dataSize, true)
+  const chans = []; for (let c = 0; c < nch; c++) chans.push(audioBuffer.getChannelData(c))
+  let off = 44
+  for (let i = start; i < end; i++) for (let c = 0; c < nch; c++) {
+    let v = Math.max(-1, Math.min(1, chans[c][i])); view.setInt16(off, v < 0 ? v * 0x8000 : v * 0x7FFF, true); off += 2
+  }
+  return new Blob([buf], { type: 'audio/wav' })
+}
+// Monta un recortador dentro de `container`. API: load(arrayBuffer), isTrimmed(),
+// hasAudio(), getWavBlob(), stop().
+function mountTrimmer(container) {
+  container.innerHTML =
+    '<div class="trimmer"><div class="trim-wave">' +
+      '<canvas class="trim-canvas"></canvas>' +
+      '<div class="trim-mask trim-mask-l"></div><div class="trim-mask trim-mask-r"></div>' +
+      '<div class="trim-region"></div>' +
+      '<div class="trim-handle trim-handle-l"></div><div class="trim-handle trim-handle-r"></div>' +
+    '</div><div class="trim-controls">' +
+      '<button type="button" class="trim-play">▶ Probar selección</button>' +
+      '<span class="trim-times"><span class="trim-t0">0:00</span> – <span class="trim-t1">0:00</span> <span class="trim-dur"></span></span>' +
+      '<button type="button" class="trim-reset">↺ Todo</button>' +
+    '</div></div>'
+  const wave = container.querySelector('.trim-wave'), canvas = container.querySelector('.trim-canvas')
+  const maskL = container.querySelector('.trim-mask-l'), maskR = container.querySelector('.trim-mask-r')
+  const region = container.querySelector('.trim-region')
+  const hL = container.querySelector('.trim-handle-l'), hR = container.querySelector('.trim-handle-r')
+  const playBtn = container.querySelector('.trim-play'), resetBtn = container.querySelector('.trim-reset')
+  const t0 = container.querySelector('.trim-t0'), t1 = container.querySelector('.trim-t1'), tDur = container.querySelector('.trim-dur')
+  let buffer = null, dur = 0, a = 0, b = 0, src = null
+  function paint() {
+    const fa = dur ? a / dur : 0, fb = dur ? b / dur : 1
+    hL.style.left = (fa * 100) + '%'; hR.style.left = (fb * 100) + '%'
+    region.style.left = (fa * 100) + '%'; region.style.width = ((fb - fa) * 100) + '%'
+    maskL.style.left = '0'; maskL.style.width = (fa * 100) + '%'
+    maskR.style.left = (fb * 100) + '%'; maskR.style.width = ((1 - fb) * 100) + '%'
+    t0.textContent = fmtTrim(a); t1.textContent = fmtTrim(b); tDur.textContent = '(' + fmtTrim(b - a) + ')'
+  }
+  function drawWave() {
+    const w = wave.clientWidth || 600, h = wave.clientHeight || 96, dpr = window.devicePixelRatio || 1
+    canvas.width = w * dpr; canvas.height = h * dpr
+    const ctx = canvas.getContext('2d'); ctx.scale(dpr, dpr); ctx.clearRect(0, 0, w, h)
+    if (!buffer) return
+    const data = buffer.getChannelData(0), step = Math.max(1, Math.floor(data.length / w)), mid = h / 2
+    ctx.fillStyle = (getComputedStyle(document.body).getPropertyValue('--muted') || '#949ba4').trim()
+    for (let x = 0; x < w; x++) {
+      let mn = 1, mx = -1
+      for (let j = 0; j < step; j++) { const v = data[x * step + j] || 0; if (v < mn) mn = v; if (v > mx) mx = v }
+      ctx.fillRect(x, mid + mn * mid, 1, Math.max(1, (mx - mn) * mid))
+    }
+  }
+  const fracFromEvent = (e) => { const r = wave.getBoundingClientRect(); return Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) }
+  const dragHandle = (which) => (e) => {
+    e.preventDefault()
+    const move = (ev) => {
+      const f = fracFromEvent(ev) * dur
+      if (which === 'l') a = Math.min(Math.max(0, f), b - 0.05); else b = Math.max(Math.min(dur, f), a + 0.05)
+      paint()
+    }
+    const up = () => { document.removeEventListener('pointermove', move); document.removeEventListener('pointerup', up) }
+    document.addEventListener('pointermove', move); document.addEventListener('pointerup', up)
+  }
+  hL.addEventListener('pointerdown', dragHandle('l')); hR.addEventListener('pointerdown', dragHandle('r'))
+  function stop() { if (src) { try { src.stop() } catch {} src = null } playBtn.textContent = '▶ Probar selección' }
+  playBtn.addEventListener('click', () => {
+    if (src) { stop(); return }
+    if (!buffer) return
+    const ctx = audioCtx(); if (ctx.state === 'suspended') ctx.resume()
+    src = ctx.createBufferSource(); src.buffer = buffer; src.connect(ctx.destination)
+    src.onended = () => stop(); src.start(0, a, Math.max(0.02, b - a)); playBtn.textContent = '⏹ Detener'
+  })
+  resetBtn.addEventListener('click', () => { stop(); a = 0; b = dur; paint() })
+  return {
+    hasAudio: () => !!buffer,
+    isTrimmed: () => !!buffer && (a > 0.02 || b < dur - 0.02),
+    stop,
+    getWavBlob: () => encodeWav(buffer, a, b),
+    async load(arrayBuffer) {
+      stop()
+      buffer = await audioCtx().decodeAudioData(arrayBuffer.slice(0))
+      dur = buffer.duration; a = 0; b = dur; drawWave(); paint()
+    },
+  }
+}
+
 // Modal: subir sonido al soundboard (privado o público)
+let uploadTrimmer = null
 function openSoundModal() {
   if (!me) { toast('Inicia sesión con Discord para subir sonidos'); return }
   const sel = document.getElementById('sound-visibility')
@@ -2778,10 +2920,31 @@ function applySoundFolderVisibility() {
 document.getElementById('sound-folder').addEventListener('change', applySoundFolderVisibility)
 function closeSoundModal() {
   document.getElementById('sound-modal').style.display = 'none'
+  if (uploadTrimmer) uploadTrimmer.stop()
+  uploadTrimmer = null
+  document.getElementById('upload-trim').innerHTML = ''
+  document.getElementById('upload-trim').style.display = 'none'
+  document.getElementById('upload-trim-hint').style.display = 'none'
   document.getElementById('sound-form').reset()
 }
 document.getElementById('btn-upload-sound').addEventListener('click', openSoundModal)
 document.getElementById('sound-cancel').addEventListener('click', closeSoundModal)
+// Al elegir un archivo, prepara el recortador (y autocompleta el nombre).
+document.getElementById('sound-file').addEventListener('change', async (e) => {
+  const file = e.target.files[0]
+  const slot = document.getElementById('upload-trim'), hint = document.getElementById('upload-trim-hint')
+  if (!file) { slot.style.display = 'none'; hint.style.display = 'none'; uploadTrimmer = null; return }
+  const labelInp = document.getElementById('sound-label')
+  if (!labelInp.value.trim()) labelInp.value = file.name.replace(/\.[^.]+$/, '')
+  try {
+    slot.style.display = ''; hint.style.display = ''
+    uploadTrimmer = mountTrimmer(slot)
+    await uploadTrimmer.load(await file.arrayBuffer())
+  } catch {
+    slot.style.display = 'none'; hint.style.display = 'none'; uploadTrimmer = null
+    toast('No se pudo cargar para recortar; se subirá completo')
+  }
+})
 document.getElementById('sound-modal').addEventListener('click', (e) => {
   if (e.target.id === 'sound-modal') closeSoundModal()
 })
@@ -2793,11 +2956,16 @@ document.getElementById('sound-form').addEventListener('submit', async (e) => {
   const visibility = document.getElementById('sound-visibility').value
   if (!file || !label) { toast('Falta el archivo o el nombre'); return }
   if (!folder) { toast('Elige una carpeta (no se puede subir a la raíz)'); return }
-  const ext = (file.name.split('.').pop() || '').toLowerCase()
   const btn = document.getElementById('sound-submit')
   btn.disabled = true; btn.textContent = 'Subiendo...'
   try {
-    const buf = await file.arrayBuffer()
+    // Si se recortó en el navegador, se sube solo la selección (WAV); si no, el archivo tal cual.
+    let buf, ext
+    if (uploadTrimmer && uploadTrimmer.hasAudio() && uploadTrimmer.isTrimmed()) {
+      buf = await uploadTrimmer.getWavBlob().arrayBuffer(); ext = 'wav'
+    } else {
+      buf = await file.arrayBuffer(); ext = (file.name.split('.').pop() || '').toLowerCase()
+    }
     const qs = new URLSearchParams({ label, folder, ext, visibility })
     const res = await webFetch('/api/sounds/upload?' + qs, {
       method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: buf,
@@ -2812,6 +2980,51 @@ document.getElementById('sound-form').addEventListener('submit', async (e) => {
   } finally {
     btn.disabled = false; btn.textContent = 'Subir'
   }
+})
+
+// Modal: recortar un sonido existente (Gestión). Carga el audio del servidor,
+// se recorta en el navegador y se sube ya cortado (reemplaza el audio).
+let editTrimmer = null, trimSoundId = null
+async function openTrimModal(id, label) {
+  trimSoundId = id
+  document.getElementById('trim-modal-name').textContent = label || ('Sonido #' + id)
+  const slot = document.getElementById('edit-trim')
+  slot.innerHTML = '<p class="hint">Cargando audio…</p>'
+  document.getElementById('trim-modal').style.display = 'flex'
+  try {
+    const res = await webFetch('/api/sound-audio/' + id)
+    if (!res.ok) throw new Error()
+    const ab = await res.arrayBuffer()
+    editTrimmer = mountTrimmer(slot)
+    await editTrimmer.load(ab)
+  } catch { slot.innerHTML = '<p class="empty">No se pudo cargar el audio para recortar.</p>'; editTrimmer = null }
+}
+function closeTrimModal() {
+  if (editTrimmer) editTrimmer.stop()
+  editTrimmer = null; trimSoundId = null
+  document.getElementById('trim-modal').style.display = 'none'
+  document.getElementById('edit-trim').innerHTML = ''
+}
+document.getElementById('trim-cancel').addEventListener('click', closeTrimModal)
+document.getElementById('trim-modal').addEventListener('click', (e) => { if (e.target.id === 'trim-modal') closeTrimModal() })
+document.getElementById('trim-save').addEventListener('click', async () => {
+  if (!editTrimmer || !editTrimmer.hasAudio()) { toast('No hay audio cargado'); return }
+  if (!editTrimmer.isTrimmed()) { toast('Arrastra los bordes para recortar'); return }
+  const btn = document.getElementById('trim-save')
+  btn.disabled = true; btn.textContent = 'Guardando…'
+  try {
+    const buf = await editTrimmer.getWavBlob().arrayBuffer()
+    const res = await webFetch('/api/sound-admin/replace-audio?id=' + trimSoundId + '&ext=wav', {
+      method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: buf,
+    })
+    const d = await res.json().catch(() => null)
+    if (!res.ok) { toast(d && d.error ? d.error : 'No se pudo guardar'); return }
+    toast('Sonido recortado ✓')
+    closeTrimModal()
+    lastSoundsJSON = null
+    await loadSoundAdmin(); await loadSounds()
+  } catch { toast('No se pudo guardar el recorte') }
+  finally { btn.disabled = false; btn.textContent = 'Guardar recorte' }
 })
 
 // Modal: crear carpeta (acción dedicada; las carpetas NO se crean al subir sonido)

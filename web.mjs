@@ -23,6 +23,7 @@ const { getStore } = await import('./lib/storage/index.mjs')
 
 const PORT = Number(process.env.WEB_PORT || 8770)
 const ART_MIME = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif' }
+const SOUND_MIME = { mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4', flac: 'audio/flac', webm: 'audio/webm' }
 const CLIENT_ID = process.env.DISCORD_CLIENT_ID
 const CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET
 const REDIRECT_URI = process.env.DISCORD_REDIRECT_URI || `http://localhost:${PORT}/auth/callback`
@@ -246,6 +247,20 @@ http.createServer(async (req, res) => {
         folders.aliasesForUser(user.id), folders.meta(), user.id))
     }
 
+    // Audio crudo de un sonido (para el recortador en el navegador). Requiere
+    // poder ver el sonido (admin o canSeeSound).
+    const mSndAudio = path.match(/^\/api\/sound-audio\/(\d+)$/)
+    if (mSndAudio && req.method === 'GET') {
+      const s = sounds.getById(Number(mSndAudio[1]))
+      if (!s) return send(res, 404, { error: 'Sonido no encontrado' })
+      if (!rbac.isAdmin(user.id) && !rbac.canSeeSound(user.id, s)) return send(res, 403, { error: 'No disponible' })
+      const store = getStore()
+      if (!(await store.exists(s.object_key))) return send(res, 404, { error: 'Sin audio' })
+      res.writeHead(200, { 'Content-Type': SOUND_MIME[s.ext] || 'application/octet-stream' })
+      ;(await store.getStream(s.object_key)).pipe(res)
+      return
+    }
+
     // Carpetas del soundboard: listar (para el selector) y crear (botón dedicado).
     if (req.method === 'GET' && path === '/api/folders') {
       return send(res, 200, folders.list())
@@ -362,6 +377,18 @@ http.createServer(async (req, res) => {
         if (body.offsetDb !== undefined) sounds.setGainOffset(sid, Number(body.offsetDb) || 0)
         return send(res, 200, { ok: true, sound: sounds.getById(sid) })
       } catch (e) { return send(res, 400, { error: e.message }) }
+    }
+    // Reemplazar el audio de un sonido (recortado en el navegador). Solo admin.
+    if (req.method === 'POST' && path === '/api/sound-admin/replace-audio') {
+      if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un administrador' })
+      const id = Number(url.searchParams.get('id'))
+      const ext = (url.searchParams.get('ext') || '').toLowerCase().trim()
+      if (!id) return send(res, 400, { error: 'Falta id' })
+      if (!SOUND_EXTS.has(ext)) return send(res, 400, { error: `Extensión no permitida: ${ext}` })
+      const buffer = await readBody(req)
+      if (!buffer.length) return send(res, 400, { error: 'Cuerpo vacío' })
+      const s = await sounds.replaceAudio(id, ext, buffer)
+      return send(res, 200, { ok: true, id: s.id })
     }
     // Renombrar una carpeta (afecta a todos). Solo admin.
     if (req.method === 'POST' && path === '/api/sound-admin/rename-folder') {
