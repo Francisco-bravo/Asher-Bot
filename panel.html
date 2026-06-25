@@ -368,16 +368,18 @@
   .npv-close:hover { background: var(--panel3); }
   .npv-head-label { color: var(--muted); font-size: .8rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
   .npv-body { flex: 1; min-height: 0; display: flex; gap: 32px; }
-  .npv-art-side { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px; }
+  /* La carátula ocupa una columna contenida; la cola es la protagonista y se
+     queda con el resto del ancho. */
+  .npv-art-side { flex: 0 1 340px; min-width: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px; }
   .npv-art {
-    width: min(48vh, 100%); max-width: 440px; aspect-ratio: 1 / 1;
+    width: min(38vh, 100%); max-width: 300px; aspect-ratio: 1 / 1;
     border-radius: 16px; overflow: hidden; background: var(--panel3);
     display: grid; place-items: center; box-shadow: 0 16px 56px rgba(0,0,0,.55);
   }
   .npv-art::after { content: '🎵'; font-size: 3rem; opacity: .4; }
   .npv-art img { width: 100%; height: 100%; object-fit: cover; }
-  .npv-title { font-size: 1.5rem; font-weight: 700; text-align: center; max-width: 90%; }
-  .npv-queue-side { flex: 0 0 440px; max-width: 480px; display: flex; flex-direction: column; min-height: 0; }
+  .npv-title { font-size: 1.4rem; font-weight: 700; text-align: center; max-width: 90%; }
+  .npv-queue-side { flex: 1 1 auto; min-width: 0; max-width: none; display: flex; flex-direction: column; min-height: 0; }
   .npv-queue-side .add-row { margin-bottom: 12px; flex-shrink: 0; }
   .npv-queue-side .queue-list { overflow-y: auto; flex: 1; min-height: 0; padding-right: 4px; }
   @media (max-width: 820px) {
