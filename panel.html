@@ -641,8 +641,8 @@
   .pl-av { width: 18px; height: 18px; border-radius: 50%; object-fit: cover; flex: none; }
   .pl-ph { display: grid; place-items: center; background: var(--panel3); font-size: .6rem; font-weight: 700; }
 
-  /* Modal de playlist */
-  .pl-modal { max-width: 920px; max-height: 90vh; display: flex; flex-direction: column; }
+  /* Modal de playlist (ancho para que el picker de canciones quepa cómodo) */
+  .pl-modal { max-width: 1100px; max-height: 90vh; display: flex; flex-direction: column; }
   .pl-modal-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
   .pl-modal-head h2 { display: inline-flex; align-items: center; gap: 8px; }
   /* Lápiz para renombrar la playlist (junto al título, solo dueño/admin) */
@@ -685,8 +685,15 @@
   .pl-add-row button:hover { background: var(--accent2); }
   .pl-add-row button:disabled { opacity: .6; cursor: default; }
   @media (max-width: 560px) { .pl-add-row { flex-wrap: wrap; } }
-  /* Biblioteca dentro del modal: misma grilla de tarjetas que la Biblioteca */
-  .pl-lib-list { max-height: 40vh; overflow-y: auto; margin-top: 8px; padding: 2px; }
+  /* Biblioteca dentro del modal: misma grilla de tarjetas que la Biblioteca.
+     Tarjetas algo más chicas para que entren más por fila; en PC se garantizan
+     al menos 4 por fila (ver media query). */
+  .pl-lib-list { max-height: 52vh; overflow-y: auto; margin-top: 8px; padding: 2px; }
+  .pl-lib-list.song-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 12px; }
+  /* PC: al menos 4 canciones por fila en el picker (forzado, pase lo que pase) */
+  @media (min-width: 1024px) {
+    .pl-lib-list.song-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  }
 </style>
 </head>
 <body>
