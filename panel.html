@@ -1555,7 +1555,8 @@ function renderSidebar() {
       const p = path ? path + '/' + f.name : f.name
       const hasKids = f.folders.length > 0
       const open = openFolders.has(p)
-      rows.push(`<div class="sb-row${selectedPath === p ? ' selected' : ''}" data-path="${esc(p)}" style="padding-left:${8 + depth * 16}px"><span class="arrow" data-toggle="${esc(p)}">${hasKids ? (open ? '▾' : '▸') : ''}</span><span>📁 ${esc(f.display || f.name)}</span><button class="sb-edit" data-folder-edit="${esc(p)}" title="Renombrar carpeta">✏️</button></div>`)
+      const edit = manageMode ? `<button class="sb-edit" data-folder-edit="${esc(p)}" title="Renombrar carpeta">✏️</button>` : ''
+      rows.push(`<div class="sb-row${selectedPath === p ? ' selected' : ''}" data-path="${esc(p)}" style="padding-left:${8 + depth * 16}px"><span class="arrow" data-toggle="${esc(p)}">${hasKids ? (open ? '▾' : '▸') : ''}</span><span>📁 ${esc(f.display || f.name)}</span>${edit}</div>`)
       if (open) walk(f, p, depth + 1)
     }
   }
@@ -2109,6 +2110,7 @@ document.getElementById('sound-grid').addEventListener('click', async (e) => {
 document.getElementById('btn-manage-sounds').addEventListener('click', () => {
   manageMode = !manageMode
   document.getElementById('btn-manage-sounds').classList.toggle('on', manageMode)
+  renderSidebar()   // el ✏️ de renombrar carpeta solo aparece en modo Administrar
   renderSoundGrid()
 })
 
