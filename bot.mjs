@@ -139,6 +139,7 @@ let streamDownloading = false  // hay un yt-dlp de reproducción descargando (in
 let currentPlaying = false     // la canción actual YA está sonando (pasó la extracción
                                // inicial) → se permite enriquecer en paralelo al stream
 const metaBackfillTried = new Set() // ids de canciones ya intentadas en el backfill de metadata
+const artBackfillTried = new Set()  // ids ya intentadas en el backfill de carátula
 let bgProc = null              // proceso yt-dlp de fondo en curso (para poder matarlo)
 let bgSongId = null            // id de la canción que el fondo está pre-cacheando
 let bgPromise = null           // promesa del pre-cacheo en curso (para esperarlo si toca)
@@ -692,13 +693,25 @@ async function backgroundWork() {
       if (streamDownloading) break
       if (await cacheToDisk(item)) { didWork = true; break }
     }
-    // 3) Backfill (lo más bajo): arregla metadata de UNA canción ya guardada con
-    //    título pobre (Biblioteca/Caché viejas). Una por ciclo, sin reintentos.
+    // 3) Backfill (lo más bajo): completa metadata y/o carátula de UNA canción de
+    //    la Biblioteca por ciclo. Cubre títulos pobres (Biblioteca/Caché viejas) y
+    //    canciones SIN carátula (p. ej. las importadas de una playlist, que nacen
+    //    con título plano y sin arte). Una tarea por ciclo y sin reintentos.
     if (!didWork) {
-      const broken = musicCache.listAll().find(s => isPoorTitle(s.title, s.source_url) && !metaBackfillTried.has(s.id))
-      if (broken) {
-        metaBackfillTried.add(broken.id)
-        if (await enrich({ url: broken.source_url, songId: broken.id })) didWork = true
+      const pending = musicCache.listAll().find(s =>
+        (isPoorTitle(s.title, s.source_url) && !metaBackfillTried.has(s.id)) ||
+        (!s.art_key && !artBackfillTried.has(s.id)))
+      if (pending) {
+        // Marca solo la tarea que enrich() hará en esta llamada (metadata primero;
+        // si el título ya es bueno, será la carátula). Así un caso con ambos
+        // pendientes se completa en dos ciclos sin reintentar para siempre.
+        const needsMeta = isPoorTitle(pending.title, pending.source_url) && !metaBackfillTried.has(pending.id)
+        if (needsMeta) metaBackfillTried.add(pending.id)
+        else artBackfillTried.add(pending.id)
+        // Sembramos la duración conocida para que enrich() no gaste un yt-dlp de
+        // metadata cuando lo único que falta es la carátula.
+        const item = { url: pending.source_url, songId: pending.id, duration: pending.duration_ms ? pending.duration_ms / 1000 : null }
+        if (await enrich(item)) didWork = true
       }
     }
   } catch { /* reintenta en el próximo tick */ } finally {
