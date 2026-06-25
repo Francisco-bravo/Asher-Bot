@@ -195,7 +195,7 @@ http.createServer(async (req, res) => {
     res.setHeader('Access-Control-Allow-Credentials', 'true')
     res.setHeader('Vary', 'Origin')
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS')
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS')
   }
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return }
 
@@ -447,10 +447,16 @@ http.createServer(async (req, res) => {
       return send(res, 200, { ok: true })
     }
     const plId = path.match(/^\/api\/playlists\/(\d+)$/)
-    if (plId && req.method === 'DELETE') {
+    if (plId && (req.method === 'PATCH' || req.method === 'DELETE')) {
       const pl = playlists.get(Number(plId[1]))
       if (!pl) return send(res, 404, { error: 'Lista no encontrada' })
       if (pl.owner_user_id !== user.id && !rbac.isAdmin(user.id)) return send(res, 403, { error: 'No es tu lista' })
+      if (req.method === 'PATCH') {
+        const body = JSON.parse((await readBody(req)).toString() || '{}')
+        const name = (body.name || '').trim()
+        if (!name) return send(res, 400, { error: 'Falta el nombre de la lista' })
+        return send(res, 200, playlists.rename(pl.id, name))
+      }
       playlists.remove(pl.id)
       return send(res, 200, { ok: true })
     }

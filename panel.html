@@ -135,6 +135,53 @@
   }
   .lib-item button:hover { background: var(--accent); border-color: transparent; }
 
+  /* Tarjetas de canción estilo Spotify / YouTube Music (biblioteca y modal).
+     Carátula grande y cuadrada arriba; título y artista debajo. La grilla fluye
+     hacia la derecha y continúa hacia abajo, adaptándose al ancho disponible. */
+  .song-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 16px;
+  }
+  .song-grid .empty { grid-column: 1 / -1; }
+  .song-card {
+    position: relative; cursor: pointer;
+    background: var(--panel); border: var(--border); border-radius: 12px;
+    padding: 10px; transition: background .12s;
+  }
+  .song-card:hover { background: var(--panel3); }
+  .song-art {
+    position: relative; width: 100%; aspect-ratio: 1 / 1;
+    border-radius: 8px; overflow: hidden; background: var(--panel2);
+    display: grid; place-items: center; margin-bottom: 10px;
+  }
+  .song-art::after { content: '🎵'; font-size: 2rem; opacity: .4; }
+  .song-art img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  .song-card .s-title {
+    font-weight: 600; font-size: .9rem; line-height: 1.25;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .song-card .s-artist {
+    color: var(--muted); font-size: .8rem; margin-top: 3px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  /* Botón flotante de acción sobre la carátula (aparece al pasar el mouse) */
+  .song-add {
+    position: absolute; right: 8px; bottom: 8px;
+    width: 42px; height: 42px; border-radius: 50%; border: none;
+    background: var(--accent); color: #fff; font-size: 1.1rem; cursor: pointer;
+    display: grid; place-items: center; box-shadow: 0 4px 12px rgba(0,0,0,.4);
+    opacity: 0; transform: translateY(6px);
+    transition: opacity .14s, transform .14s, background .12s;
+  }
+  .song-card:hover .song-add { opacity: 1; transform: translateY(0); }
+  .song-add:hover { background: var(--accent2); }
+  .song-add:disabled { opacity: 1; transform: none; background: var(--ok); cursor: default; }
+  /* En pantallas táctiles (sin hover) el botón siempre está visible */
+  @media (hover: none) {
+    .song-add { opacity: 1; transform: none; }
+  }
+
   /* Botón para alternar vista (solo visible en PC) */
   .view-toggle {
     display: none; align-items: center; gap: 7px;
@@ -571,8 +618,15 @@
   .pl-open { color: var(--muted); font-size: 1.3rem; flex: none; }
 
   /* Modal de playlist */
-  .pl-modal { max-width: 560px; max-height: 86vh; display: flex; flex-direction: column; }
+  .pl-modal { max-width: 920px; max-height: 90vh; display: flex; flex-direction: column; }
   .pl-modal-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .pl-modal-head h2 { display: inline-flex; align-items: center; gap: 8px; }
+  /* Lápiz para renombrar la playlist (junto al título, solo dueño/admin) */
+  .pl-rename-btn {
+    border: none; background: none; cursor: pointer; color: var(--muted);
+    font-size: 1rem; padding: 2px 4px; border-radius: 6px; line-height: 1;
+  }
+  .pl-rename-btn:hover { color: var(--text); background: var(--panel); }
   .pl-modal-author { color: var(--muted); font-size: .82rem; }
   .pl-modal-actions { display: flex; gap: 8px; margin: 12px 0 14px; }
   .pl-modal-actions button { padding: 9px 14px; border: var(--border); border-radius: 9px; cursor: pointer; background: var(--panel); color: var(--text); font-weight: 600; font-size: .85rem; }
@@ -580,7 +634,7 @@
   .pl-modal-actions button.primary:hover { background: var(--accent2); }
   .pl-modal-actions button.danger { color: var(--danger); }
   .pl-modal-actions button.danger:hover { background: var(--danger); color: #fff; border-color: transparent; }
-  .pl-items { display: flex; flex-direction: column; gap: 4px; overflow-y: auto; max-height: 32vh; margin-bottom: 6px; }
+  .pl-items { display: flex; flex-direction: column; gap: 4px; overflow-y: auto; max-height: 30vh; margin-bottom: 6px; }
   .pl-item { display: flex; align-items: center; gap: 8px; background: var(--panel); border-radius: 9px; padding: 7px 10px; }
   .pl-item .num { color: var(--muted); font-variant-numeric: tabular-nums; }
   .pl-item .title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .9rem; }
@@ -601,13 +655,8 @@
   .pl-add-row button.pl-import { background: var(--panel2); color: var(--text); border: var(--border); }
   .pl-add-row button.pl-import:hover { background: var(--panel3); }
   @media (max-width: 560px) { .pl-add-row { flex-wrap: wrap; } }
-  .pl-lib-list { display: flex; flex-direction: column; gap: 3px; max-height: 26vh; overflow-y: auto; margin-top: 8px; }
-  .pl-lib-item { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 8px; background: var(--panel); }
-  .pl-lib-item .title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .86rem; }
-  .pl-lib-item .num { color: var(--muted); }
-  .pl-lib-item button { border: var(--border); background: var(--panel2); color: var(--text); cursor: pointer; border-radius: 7px; padding: 4px 10px; font-weight: 600; }
-  .pl-lib-item button:hover { background: var(--accent); border-color: transparent; }
-  .pl-lib-item button:disabled { opacity: .6; cursor: default; }
+  /* Biblioteca dentro del modal: misma grilla de tarjetas que la Biblioteca */
+  .pl-lib-list { max-height: 40vh; overflow-y: auto; margin-top: 8px; padding: 2px; }
 </style>
 </head>
 <body>
@@ -824,7 +873,7 @@
   <div class="modal-overlay" id="playlist-modal" style="display:none">
     <div class="modal pl-modal">
       <div class="pl-modal-head">
-        <h2 id="pl-modal-title">Playlist</h2>
+        <h2><span id="pl-modal-title">Playlist</span><button id="pl-rename" class="pl-rename-btn" title="Cambiar el nombre de la lista" style="display:none">✏️</button></h2>
         <span id="pl-modal-author" class="pl-modal-author"></span>
       </div>
       <div class="pl-modal-actions">
@@ -1908,35 +1957,46 @@ async function loadMusic() {
   } catch { cacheBox.innerHTML = '<p class="empty">No se pudo cargar.</p>' }
 }
 
+// Tarjeta de canción estilo Spotify/YouTube Music: carátula grande y cuadrada,
+// título y artista debajo. `cardAction`/`btnAction` son expresiones JS (la carta
+// entera y el botón flotante pueden disparar acciones distintas).
+function songCardHTML(s, cardAction, btnAction, icon = '➕', title = 'Agregar') {
+  const art = s.art_key
+    ? `<span class="song-art"><img src="${esc(webUrl('/art/' + s.id))}" alt="" onerror="this.remove()"></span>`
+    : `<span class="song-art"></span>`
+  const artist = [s.artist ? esc(s.artist) : null, s.duration_ms ? fmt(s.duration_ms / 1000) : null].filter(Boolean).join(' · ')
+  return `<div class="song-card" onclick="${cardAction}">
+    ${art}
+    <button class="song-add" title="${esc(title)}" onclick="event.stopPropagation();${btnAction}">${icon}</button>
+    <div class="s-title" title="${esc(s.title || s.source_url)}">${esc(s.title || '(sin título)')}</div>
+    ${artist ? `<div class="s-artist">${artist}</div>` : ''}
+  </div>`
+}
+
+function filterSongs(list, q) {
+  if (!q) return list
+  const tokens = q.split(' ')
+  return list.filter(s => {
+    const hay = norm((s.title || '') + ' ' + (s.artist || '') + ' ' + (s.source_url || ''))
+    return tokens.every(t => hay.includes(t))
+  })
+}
+
 // Biblioteca unificada: lista única de canciones para agregar a la cola.
 // No distingue caché/historial (la caché es interna, solo del admin).
 function renderLibrary() {
   const box = document.getElementById('library-list')
   if (!box) return
   const q = norm(document.getElementById('library-search').value)
-  let list = musicSongs
-  if (q) {
-    const tokens = q.split(' ')
-    list = list.filter(s => {
-      const hay = norm((s.title || '') + ' ' + (s.artist || '') + ' ' + (s.source_url || ''))
-      return tokens.every(t => hay.includes(t))
-    })
-  }
+  const list = filterSongs(musicSongs, q)
+  box.className = 'song-grid'
   if (!list.length) {
     box.innerHTML = `<p class="empty">${q ? 'Sin resultados' : 'No hay canciones todavía. Reproduce alguna y aparecerá aquí.'}</p>`
     return
   }
-  box.innerHTML = list.map(s => {
-    const sub = [s.artist ? esc(s.artist) : null, s.duration_ms ? fmt(s.duration_ms / 1000) : null].filter(Boolean).join(' · ')
-    const thumb = s.art_key
-      ? `<span class="lib-thumb"><img src="${esc(webUrl('/art/' + s.id))}" alt="" onerror="this.remove()"></span>`
-      : `<span class="lib-thumb"></span>`
-    return `<div class="lib-item">
-      ${thumb}
-      <span class="title" title="${esc(s.title || s.source_url)}">${esc(s.title || '(sin título)')}${sub ? ` <span class="num">— ${sub}</span>` : ''}</span>
-      <button onclick="queueSong(${s.id})" title="Agregar a la cola">➕ Agregar a la cola</button>
-    </div>`
-  }).join('')
+  box.innerHTML = list.map(s =>
+    songCardHTML(s, `queueSong(${s.id})`, `queueSong(${s.id})`, '➕', 'Agregar a la cola')
+  ).join('')
 }
 
 async function queueSong(id) {
@@ -2008,6 +2068,7 @@ function showPlaylist(id) {
   const canEdit = openPlaylist.owner_user_id === playlistsMeId || (me && (me.roles || []).includes('admin'))
   document.getElementById('pl-modal-title').textContent = openPlaylist.name
   document.getElementById('pl-modal-author').textContent = 'por ' + (openPlaylist.owner_name || openPlaylist.owner_username || 'alguien')
+  document.getElementById('pl-rename').style.display = canEdit ? '' : 'none'
   document.getElementById('pl-delete').style.display = canEdit ? '' : 'none'
   document.getElementById('pl-add-area').style.display = canEdit ? '' : 'none'
   document.getElementById('pl-add-link').value = ''
@@ -2049,20 +2110,13 @@ function renderPlaylistLibrary() {
   const box = document.getElementById('pl-lib-list')
   if (!box || !openPlaylist) return
   const q = norm(document.getElementById('pl-lib-search').value)
-  let list = musicSongs
-  if (q) {
-    const tokens = q.split(' ')
-    list = list.filter(s => tokens.every(t => norm((s.title || '') + ' ' + (s.artist || '') + ' ' + (s.source_url || '')).includes(t)))
-  }
-  list = list.slice(0, 60)   // no saturar el modal
+  let list = filterSongs(musicSongs, q)
+  list = list.slice(0, 90)   // no saturar el modal
+  box.className = 'pl-lib-list song-grid'
   if (!list.length) { box.innerHTML = `<p class="empty">${q ? 'Sin resultados' : 'Biblioteca vacía'}</p>`; return }
-  box.innerHTML = list.map(s => {
-    const sub = s.artist ? ` <span class="num">— ${esc(s.artist)}</span>` : ''
-    return `<div class="pl-lib-item">
-      <span class="title" title="${esc(s.title || s.source_url)}">${esc(s.title || '(sin título)')}${sub}</span>
-      <button onclick="addSongToPlaylist(${s.id}, this)" title="Agregar a la playlist">➕</button>
-    </div>`
-  }).join('')
+  box.innerHTML = list.map(s =>
+    songCardHTML(s, `addSongToPlaylist(${s.id})`, `addSongToPlaylist(${s.id}, this)`, '➕', 'Agregar a la playlist')
+  ).join('')
 }
 
 async function addSongToPlaylist(songId, btn) {
@@ -2134,6 +2188,25 @@ async function removePlaylistItem(itemId) {
   } catch { toast('No se pudo quitar') }
 }
 
+async function renameOpenPlaylist() {
+  if (!openPlaylist) return
+  const name = prompt('Nuevo nombre de la playlist:', openPlaylist.name)
+  if (name == null) return
+  const trimmed = name.trim()
+  if (!trimmed || trimmed === openPlaylist.name) return
+  try {
+    const res = await webFetch('/api/playlists/' + openPlaylist.id, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: trimmed }),
+    })
+    const data = await res.json().catch(() => null)
+    if (!res.ok) { toast(data && data.error ? data.error : 'No se pudo renombrar'); return }
+    openPlaylist.name = trimmed
+    document.getElementById('pl-modal-title').textContent = trimmed
+    toast('Lista renombrada ✓')
+    loadPlaylists()
+  } catch { toast('No se pudo renombrar') }
+}
+
 async function deleteOpenPlaylist() {
   if (!openPlaylist) return
   if (!confirm(`¿Eliminar la playlist "${openPlaylist.name}"?`)) return
@@ -2164,6 +2237,7 @@ async function playOpenPlaylist() {
 
 document.getElementById('pl-lib-search').addEventListener('input', renderPlaylistLibrary)
 document.getElementById('pl-modal-close').onclick = closePlaylistModal
+document.getElementById('pl-rename').onclick = renameOpenPlaylist
 document.getElementById('pl-delete').onclick = deleteOpenPlaylist
 document.getElementById('pl-play-all').onclick = playOpenPlaylist
 document.getElementById('playlist-modal').addEventListener('click', (e) => {
