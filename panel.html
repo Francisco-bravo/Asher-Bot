@@ -281,10 +281,11 @@
     background: var(--accent); color: #fff; outline: 2px solid #fff; outline-offset: -3px; transform: scale(1.03);
   }
   .sb-row .arrow {
-    width: 16px; flex-shrink: 0; text-align: center;
-    color: var(--muted); font-size: .7rem;
+    width: 20px; flex-shrink: 0; text-align: center;
+    color: var(--text); font-size: 1rem; opacity: .85;
   }
-  .sb-row.selected .arrow { color: #fff; }
+  .sb-row .arrow:hover { opacity: 1; }
+  .sb-row.selected .arrow { color: #fff; opacity: 1; }
   /* Lápiz para renombrar carpeta (en el sidebar de Gestión) */
   .sb-row .sb-edit { margin-left: auto; flex-shrink: 0; opacity: 0; border: none; background: none; cursor: pointer; color: inherit; font-size: .85rem; padding: 0 2px; }
   .sb-row:hover .sb-edit, .sb-row.selected .sb-edit { opacity: .85; }
