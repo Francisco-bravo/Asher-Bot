@@ -236,6 +236,9 @@
   }
   .sb-row:hover { background: var(--panel2); }
   .sb-row.selected { background: var(--accent); color: #fff; }
+  /* Punto de color de la carpeta + candado si es privada */
+  .sb-row .fdot { width: 11px; height: 11px; border-radius: 3px; flex-shrink: 0; box-shadow: 0 0 0 1px rgba(0,0,0,.25) inset; }
+  .sb-row .flock { flex-shrink: 0; font-size: .82em; opacity: .85; }
   /* Resaltado de la carpeta destino al arrastrar un sonido encima */
   .sb-row.drop-target { background: var(--accent); color: #fff; outline: 2px dashed #fff; outline-offset: -3px; transform: scale(1.02); }
   .sound-btn[draggable="true"] { cursor: grab; }
@@ -1029,6 +1032,7 @@
             <option value="private">🔒 Privado (solo yo)</option>
             <option value="global">🌐 Público (todos)</option>
           </select>
+          <small id="sound-vis-note" class="hint" style="display:none;margin-top:4px">La carpeta es privada: el sonido quedará privado.</small>
         </label>
         <div class="modal-actions">
           <button type="button" class="cancel" id="sound-cancel">Cancelar</button>
@@ -1040,16 +1044,25 @@
 
   <div class="modal-overlay" id="folder-modal" style="display:none">
     <div class="modal">
-      <h2>Nueva carpeta</h2>
-      <p class="modal-folder">Crea una carpeta (puede ir <b>dentro de otra</b>). Después podrás elegirla al subir un sonido.</p>
+      <h2 id="folder-modal-title">Nueva carpeta</h2>
+      <p class="modal-folder" id="folder-modal-desc">Crea una carpeta (puede ir <b>dentro de otra</b>). Después podrás elegirla al subir un sonido.</p>
       <form class="upload-form" id="folder-form">
-        <label>Dentro de
+        <label id="folder-parent-row">Dentro de
           <select id="folder-parent">
             <option value="">📂 (raíz)</option>
           </select>
         </label>
         <label>Nombre de la carpeta
           <input type="text" id="folder-name" placeholder="Ej: risas" required>
+        </label>
+        <label id="folder-color-row">Color
+          <input type="color" id="folder-color" value="#5865f2">
+        </label>
+        <label id="folder-visibility-row">Visibilidad
+          <select id="folder-visibility">
+            <option value="public">🌐 Pública (todos)</option>
+            <option value="private">🔒 Privada (solo tú; sus sonidos quedan privados)</option>
+          </select>
         </label>
         <div class="modal-actions">
           <button type="button" class="cancel" id="folder-cancel">Cancelar</button>
@@ -1567,8 +1580,10 @@ function renderSidebar() {
       const p = path ? path + '/' + f.name : f.name
       const hasKids = f.folders.length > 0
       const open = openFolders.has(p)
-      const edit = manageMode ? `<button class="sb-edit" data-folder-edit="${esc(p)}" title="Renombrar carpeta">✏️</button>` : ''
-      rows.push(`<div class="sb-row${selectedPath === p ? ' selected' : ''}" data-path="${esc(p)}" style="padding-left:${8 + depth * 16}px"><span class="arrow" data-toggle="${esc(p)}">${hasKids ? (open ? '▾' : '▸') : ''}</span><span>📁 ${esc(f.display || f.name)}</span>${edit}</div>`)
+      const edit = manageMode ? `<button class="sb-edit" data-folder-edit="${esc(p)}" title="Editar carpeta (nombre, color, visibilidad)">✏️</button>` : ''
+      const dot = f.color ? `<span class="fdot" style="background:${esc(f.color)}"></span>` : ''
+      const lock = f.visibility === 'private' ? '<span class="flock" title="Carpeta privada">🔒</span>' : ''
+      rows.push(`<div class="sb-row${selectedPath === p ? ' selected' : ''}" data-path="${esc(p)}" style="padding-left:${8 + depth * 16}px"><span class="arrow" data-toggle="${esc(p)}">${hasKids ? (open ? '▾' : '▸') : ''}</span>${dot}<span>📁 ${esc(f.display || f.name)}</span>${lock}${edit}</div>`)
       if (open) walk(f, p, depth + 1)
     }
   }
@@ -2015,28 +2030,10 @@ async function loadSounds() {
 }
 
 document.getElementById('sb-sidebar').addEventListener('click', (e) => {
-  // Lápiz: renombrar carpeta (personal para usuarios, global para admin)
+  // Lápiz: editar carpeta (nombre + color + visibilidad)
   const editBtn = e.target.closest('[data-folder-edit]')
   if (editBtn) {
-    const p = editBtn.dataset.folderEdit
-    const node = findNode(soundData, p)
-    const current = node ? (node.display || node.name) : p.split('/').pop()
-    openEditModal({
-      title: 'Renombrar carpeta',
-      desc: (me && (me.roles || []).includes('admin'))
-        ? 'Como admin, el cambio es para <b>todos</b>.'
-        : 'El nuevo nombre lo verás <b>solo tú</b>.',
-      label: 'Nombre', value: current,
-      save: async (val) => {
-        const res = await webFetch('/api/folder-rename', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ path: p, name: val }),
-        })
-        const d = await res.json().catch(() => null)
-        if (!res.ok) { toast(d && d.error ? d.error : 'No se pudo renombrar'); return }
-        toast('Carpeta renombrada ✓'); lastSoundsJSON = null; await loadSounds()
-      },
-    })
+    openFolderModal(editBtn.dataset.folderEdit)
     return
   }
   const row = e.target.closest('.sb-row')
@@ -2741,18 +2738,44 @@ function populateFolderSelects() {
 // Modal: subir sonido al soundboard (privado o público)
 function openSoundModal() {
   if (!me) { toast('Inicia sesión con Discord para subir sonidos'); return }
-  const isAdmin = (me.roles || []).includes('admin')
   const sel = document.getElementById('sound-visibility')
   const globalOpt = sel.querySelector('option[value="global"]')
-  // Solo un admin puede subir sonidos públicos (el backend también lo exige).
-  globalOpt.disabled = !isAdmin
-  globalOpt.textContent = isAdmin ? '🌐 Público (todos)' : '🌐 Público (solo admin)'
-  if (!isAdmin) sel.value = 'private'
+  // Cualquiera puede subir público o privado.
+  globalOpt.disabled = false
+  globalOpt.textContent = '🌐 Público (todos)'
   // Obliga a elegir carpeta (sin raíz); prefija la carpeta seleccionada si la hay.
   document.getElementById('sound-folder').innerHTML = folderOptionsHtml(selectedPath || '', null)
   document.getElementById('sound-modal').style.display = 'flex'
+  applySoundFolderVisibility()   // si la carpeta es privada, fuerza privado
   document.getElementById('sound-label').focus()
 }
+
+// ¿La carpeta (o algún ancestro) es privada? → su subárbol es privado.
+function folderSubtreePrivate(path) {
+  if (!path) return false
+  let acc = ''
+  for (const part of path.split('/')) {
+    acc = acc ? acc + '/' + part : part
+    const n = findNode(soundData, acc)
+    if (n && n.visibility === 'private') return true
+  }
+  return false
+}
+// En una carpeta privada el sonido queda privado (selector bloqueado); en pública
+// se puede elegir público o privado.
+function applySoundFolderVisibility() {
+  const folder = document.getElementById('sound-folder').value
+  const sel = document.getElementById('sound-visibility')
+  const note = document.getElementById('sound-vis-note')
+  if (folderSubtreePrivate(folder)) {
+    sel.value = 'private'; sel.disabled = true
+    if (note) note.style.display = ''
+  } else {
+    sel.disabled = false
+    if (note) note.style.display = 'none'
+  }
+}
+document.getElementById('sound-folder').addEventListener('change', applySoundFolderVisibility)
 function closeSoundModal() {
   document.getElementById('sound-modal').style.display = 'none'
   document.getElementById('sound-form').reset()
@@ -2868,46 +2891,106 @@ document.getElementById('edit-form').addEventListener('submit', async (e) => {
   finally { btn.disabled = false; cancel.disabled = false; input.disabled = false; btn.textContent = 'Guardar' }
 })
 
-function openFolderModal() {
+let folderEditPath = null   // null = modo crear; ruta = modo editar
+function openFolderModal(editPath = null) {
   if (!me) { toast('Inicia sesión con Discord para crear carpetas'); return }
-  // "Nueva carpeta" se crea DENTRO de la carpeta seleccionada; en "Todos los
-  // sonidos" (raíz) se crea en la raíz.
-  document.getElementById('folder-parent').innerHTML = folderOptionsHtml(selectedPath || '', '📂 (raíz)')
-  document.getElementById('folder-name').value = ''
+  folderEditPath = editPath
+  const isAdmin = (me.roles || []).includes('admin')
+  const title = document.getElementById('folder-modal-title')
+  const desc = document.getElementById('folder-modal-desc')
+  const nameInp = document.getElementById('folder-name')
+  const colorInp = document.getElementById('folder-color')
+  const visSel = document.getElementById('folder-visibility')
+  const submit = document.getElementById('folder-submit')
+  if (editPath) {
+    const node = findNode(soundData, editPath)
+    const canProps = isAdmin || (node && node.mine)   // color/visibilidad: dueño o admin
+    title.textContent = 'Editar carpeta'
+    desc.innerHTML = isAdmin
+      ? 'El nombre cambia para <b>todos</b>. El color y la visibilidad son de la carpeta.'
+      : (canProps
+          ? 'El nombre lo verás <b>solo tú</b>. El color y la visibilidad son de la carpeta (tuya).'
+          : 'El nombre lo verás <b>solo tú</b>. El color y la visibilidad solo los cambia su dueño.')
+    document.getElementById('folder-parent-row').style.display = 'none'
+    nameInp.value = node ? (node.display || node.name) : editPath.split('/').pop()
+    colorInp.value = (node && node.color) || '#5865f2'
+    visSel.value = (node && node.visibility) || 'public'
+    document.getElementById('folder-color-row').style.display = canProps ? '' : 'none'
+    document.getElementById('folder-visibility-row').style.display = canProps ? '' : 'none'
+    submit.textContent = 'Guardar'
+  } else {
+    title.textContent = 'Nueva carpeta'
+    desc.innerHTML = 'Se crea <b>dentro de la carpeta seleccionada</b> (raíz si estás en "Todos los sonidos"). Elige color y si es pública o privada.'
+    document.getElementById('folder-parent-row').style.display = ''
+    document.getElementById('folder-parent').innerHTML = folderOptionsHtml(selectedPath || '', '📂 (raíz)')
+    nameInp.value = ''
+    colorInp.value = '#5865f2'
+    visSel.value = 'public'
+    document.getElementById('folder-color-row').style.display = ''
+    document.getElementById('folder-visibility-row').style.display = ''
+    submit.textContent = 'Crear'
+  }
   document.getElementById('folder-modal').style.display = 'flex'
-  document.getElementById('folder-name').focus()
+  nameInp.focus()
 }
 function closeFolderModal() {
   document.getElementById('folder-modal').style.display = 'none'
+  folderEditPath = null
   document.getElementById('folder-form').reset()
 }
-document.getElementById('btn-new-folder').addEventListener('click', openFolderModal)
+document.getElementById('btn-new-folder').addEventListener('click', () => openFolderModal())
 document.getElementById('folder-cancel').addEventListener('click', closeFolderModal)
 document.getElementById('folder-modal').addEventListener('click', (e) => {
   if (e.target.id === 'folder-modal') closeFolderModal()
 })
 document.getElementById('folder-form').addEventListener('submit', async (e) => {
   e.preventDefault()
-  const parent = document.getElementById('folder-parent').value
   const name = document.getElementById('folder-name').value.trim()
   if (!name) { toast('Falta el nombre de la carpeta'); return }
+  const color = document.getElementById('folder-color').value
+  const visibility = document.getElementById('folder-visibility').value
   const btn = document.getElementById('folder-submit')
-  btn.disabled = true; btn.textContent = 'Creando...'
+  const orig = btn.textContent
+  btn.disabled = true; btn.textContent = folderEditPath ? 'Guardando...' : 'Creando...'
   try {
-    const res = await webFetch('/api/folders', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ parent, name }),
-    })
-    const data = await res.json().catch(() => null)
-    if (!res.ok) { toast(data && data.error ? data.error : 'No se pudo crear la carpeta'); return }
-    toast('Carpeta creada ✓')
+    if (folderEditPath) {
+      const node = findNode(soundData, folderEditPath)
+      const isAdmin = (me.roles || []).includes('admin')
+      const canProps = isAdmin || (node && node.mine)
+      const curName = node ? (node.display || node.name) : folderEditPath.split('/').pop()
+      if (name !== curName) {
+        const r = await webFetch('/api/folder-rename', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: folderEditPath, name }),
+        })
+        if (!r.ok) { const d = await r.json().catch(() => ({})); toast(d.error || 'No se pudo renombrar'); return }
+      }
+      if (canProps) {
+        const r = await webFetch('/api/folder-props', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: folderEditPath, color, visibility }),
+        })
+        if (!r.ok) { const d = await r.json().catch(() => ({})); toast(d.error || 'No se pudo guardar'); return }
+      }
+      toast('Carpeta actualizada ✓')
+    } else {
+      const parent = document.getElementById('folder-parent').value
+      const res = await webFetch('/api/folders', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parent, name, color, visibility }),
+      })
+      const data = await res.json().catch(() => null)
+      if (!res.ok) { toast(data && data.error ? data.error : 'No se pudo crear la carpeta'); return }
+      toast('Carpeta creada ✓')
+    }
     closeFolderModal()
-    await loadSounds()          // refresca el árbol con la carpeta nueva
+    lastSoundsJSON = null
+    await loadSounds()
     populateFolderSelects()
   } catch {
-    toast('No se pudo crear la carpeta')
+    toast(folderEditPath ? 'No se pudo actualizar la carpeta' : 'No se pudo crear la carpeta')
   } finally {
-    btn.disabled = false; btn.textContent = 'Crear'
+    btn.disabled = false; btn.textContent = orig
   }
 })
 

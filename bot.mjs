@@ -1675,7 +1675,10 @@ http.createServer(async (req, res) => {
       if (path === '/api/sounds') {
         const pu = panelUser(req)
         const uid = pu ? pu.id : null
-        return sendJson(soundLib.tree(soundLib.listForUser(uid), folders.list(), folders.aliasesForUser(uid)))
+        const admin = rbac.isAdmin(uid)
+        return sendJson(soundLib.tree(
+          soundLib.listForUser(uid), folders.listFor(uid, admin),
+          folders.aliasesForUser(uid), folders.meta(), uid))
       }
       if (path === '/api/voice-channels') {
         if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)

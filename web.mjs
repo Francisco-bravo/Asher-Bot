@@ -240,7 +240,10 @@ http.createServer(async (req, res) => {
     }
 
     if (req.method === 'GET' && path === '/api/sounds') {
-      return send(res, 200, sounds.tree(sounds.listForUser(user.id), folders.list(), folders.aliasesForUser(user.id)))
+      const admin = rbac.isAdmin(user.id)
+      return send(res, 200, sounds.tree(
+        sounds.listForUser(user.id), folders.listFor(user.id, admin),
+        folders.aliasesForUser(user.id), folders.meta(), user.id))
     }
 
     // Carpetas del soundboard: listar (para el selector) y crear (botón dedicado).
@@ -251,11 +254,25 @@ http.createServer(async (req, res) => {
       const body = JSON.parse((await readBody(req)).toString() || '{}')
       const raw = body.parent ? `${body.parent}/${body.name || ''}` : (body.path || body.name || '')
       try {
-        const path = folders.create(raw)
+        // Quien la crea es su dueño; elige color y público/privado.
+        const path = folders.create(raw, {
+          ownerUserId: user.id, color: body.color || null,
+          visibility: body.visibility === 'private' ? 'private' : 'public',
+        })
         return send(res, 201, { ok: true, path })
       } catch (e) {
         return send(res, 400, { error: e.message || 'No se pudo crear la carpeta' })
       }
+    }
+
+    // Cambiar color/visibilidad de una carpeta (dueño o admin).
+    if (req.method === 'POST' && path === '/api/folder-props') {
+      const body = JSON.parse((await readBody(req)).toString() || '{}')
+      if (!body.path) return send(res, 400, { error: 'Falta path' })
+      try {
+        folders.setProps(body.path, { color: body.color, visibility: body.visibility }, user.id, rbac.isAdmin(user.id))
+        return send(res, 200, { ok: true })
+      } catch (e) { return send(res, 400, { error: e.message }) }
     }
 
     // Subir sonido: cuerpo = bytes crudos; metadatos en el query
@@ -263,11 +280,13 @@ http.createServer(async (req, res) => {
       const label = (url.searchParams.get('label') || '').trim()
       const ext = (url.searchParams.get('ext') || '').toLowerCase().trim()
       const folder = (url.searchParams.get('folder') || '').trim()
-      const visibility = url.searchParams.get('visibility') === 'global' ? 'global' : 'private'
+      let visibility = url.searchParams.get('visibility') === 'global' ? 'global' : 'private'
       if (!label) return send(res, 400, { error: 'Falta el nombre (label)' })
       if (!folder) return send(res, 400, { error: 'Debes elegir una carpeta (no se puede subir a la raíz)' })
       if (!SOUND_EXTS.has(ext)) return send(res, 400, { error: `Extensión no permitida: ${ext}` })
-      if (visibility === 'global' && !rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un admin puede subir sonidos globales' })
+      // Cualquiera puede subir público o privado. Pero si la carpeta es privada,
+      // el sonido queda privado (la carpeta gobierna su subárbol).
+      if (folders.isPrivatePath(folder, folders.meta())) visibility = 'private'
       const buffer = await readBody(req)
       if (!buffer.length) return send(res, 400, { error: 'Cuerpo vacío' })
       const s = await sounds.upload({ ownerUserId: user.id, label, folder, ext, buffer, visibility })
@@ -299,7 +318,11 @@ http.createServer(async (req, res) => {
       const snd = sounds.getById(soundId)
       if (!snd || !rbac.canSeeSound(user.id, snd)) return send(res, 404, { error: 'Sonido no disponible' })
       if (rbac.isAdmin(user.id)) { folders.create(folder); sounds.moveSoundGlobal(soundId, folder) }
-      else sounds.setSoundFolder(user.id, soundId, folder)
+      else {
+        // El usuario solo puede mover a una carpeta que él pueda ver (no privada ajena).
+        if (!folders.accessibleTo(folder, user.id, false, folders.meta())) return send(res, 403, { error: 'Carpeta no disponible' })
+        sounds.setSoundFolder(user.id, soundId, folder)
+      }
       return send(res, 200, { ok: true })
     }
 
