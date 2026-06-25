@@ -642,7 +642,7 @@
   .pl-ph { display: grid; place-items: center; background: var(--panel3); font-size: .6rem; font-weight: 700; }
 
   /* Modal de playlist (ancho para que el picker de canciones quepa cómodo) */
-  .pl-modal { max-width: 1100px; max-height: 90vh; display: flex; flex-direction: column; }
+  .pl-modal { max-width: 1280px; max-height: 92vh; display: flex; flex-direction: column; }
   .pl-modal-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
   .pl-modal-head h2 { display: inline-flex; align-items: center; gap: 8px; }
   /* Lápiz para renombrar la playlist (junto al título, solo dueño/admin) */
@@ -659,11 +659,14 @@
   .pl-modal-actions button.danger { color: var(--danger); }
   .pl-modal-actions button.danger:hover { background: var(--danger); color: #fff; border-color: transparent; }
   /* Dos columnas: izquierda las canciones de la lista, derecha la biblioteca */
+  /* La lista ("En la lista") ocupa 1/3 y el picker de agregar 2/3: los títulos
+     no son largos y así se ven más canciones para agregar. */
   .pl-cols { display: flex; gap: 18px; align-items: flex-start; }
   .pl-col { flex: 1; min-width: 0; }
+  .pl-add-area.pl-col { flex: 2; }
   .pl-col-title { font-size: .92rem; margin-bottom: 8px; }
   @media (max-width: 700px) { .pl-cols { flex-direction: column; } }
-  .pl-items { display: flex; flex-direction: column; gap: 4px; overflow-y: auto; max-height: 48vh; margin-bottom: 6px; }
+  .pl-items { display: flex; flex-direction: column; gap: 4px; overflow-y: auto; max-height: 58vh; margin-bottom: 6px; }
   .pl-item { display: flex; align-items: center; gap: 8px; background: var(--panel); border-radius: 9px; padding: 7px 10px; }
   .pl-item .num { color: var(--muted); font-variant-numeric: tabular-nums; }
   .pl-item .title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .9rem; }
@@ -686,14 +689,10 @@
   .pl-add-row button:disabled { opacity: .6; cursor: default; }
   @media (max-width: 560px) { .pl-add-row { flex-wrap: wrap; } }
   /* Biblioteca dentro del modal: misma grilla de tarjetas que la Biblioteca.
-     Tarjetas algo más chicas para que entren más por fila; en PC se garantizan
-     al menos 4 por fila (ver media query). */
-  .pl-lib-list { max-height: 52vh; overflow-y: auto; margin-top: 8px; padding: 2px; }
-  .pl-lib-list.song-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 12px; }
-  /* PC: al menos 4 canciones por fila en el picker (forzado, pase lo que pase) */
-  @media (min-width: 1024px) {
-    .pl-lib-list.song-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-  }
+     auto-fill: muestra tantas canciones por fila como quepan (6+ en PC ancho);
+     como el picker ocupa 2/3 del modal, en PC siempre entran al menos 4. */
+  .pl-lib-list { max-height: 58vh; overflow-y: auto; margin-top: 8px; padding: 2px; }
+  .pl-lib-list.song-grid { grid-template-columns: repeat(auto-fill, minmax(116px, 1fr)); gap: 12px; }
 </style>
 </head>
 <body>
