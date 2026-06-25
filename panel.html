@@ -399,6 +399,7 @@
   /* En PC dividido, la caché ocupa toda la fila debajo de los dos paneles */
   @media (min-width: 1100px) {
     body:not(.tabs-on-pc) #page-cache { grid-column: 1 / -1; }
+    body:not(.tabs-on-pc) #page-users { grid-column: 1 / -1; }
   }
   .cache-toolbar { display: flex; gap: 10px; align-items: stretch; flex-wrap: wrap; }
   .cache-toolbar .add-row { margin: 0; flex: 1; min-width: 240px; }
@@ -510,6 +511,103 @@
   .rl-av-ph { display: grid; place-items: center; background: var(--panel3); font-size: .85rem; }
   .rl-main { flex: 1; min-width: 0; font-size: .88rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .rl-time { color: var(--muted); font-size: .76rem; white-space: nowrap; }
+
+  /* === Gestión de usuarios (solo admin) === */
+  .users-list { display: flex; flex-direction: column; gap: 8px; }
+  .ul-row {
+    display: flex; align-items: center; gap: 12px;
+    background: var(--panel); border: var(--border); border-radius: 12px; padding: 10px 14px;
+  }
+  .ul-av { width: 40px; height: 40px; border-radius: 50%; object-fit: cover; flex: none; }
+  .ul-ph { display: grid; place-items: center; background: var(--panel3); font-weight: 700; }
+  .ul-info { flex: 1; min-width: 0; }
+  .ul-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ul-you { color: var(--muted); font-weight: 400; font-size: .82rem; }
+  .ul-roles { display: flex; gap: 5px; flex-wrap: wrap; margin: 3px 0; }
+  .ul-role {
+    font-size: .72rem; padding: 1px 8px; border-radius: 999px;
+    background: var(--panel3); color: var(--muted);
+  }
+  .ul-role.is-admin { background: var(--accent); color: #fff; }
+  .ul-role.ul-none { font-style: italic; }
+  .ul-meta { color: var(--muted); font-size: .76rem; }
+  .ul-toggle {
+    flex: none; padding: 9px 14px; border: var(--border); border-radius: 9px; cursor: pointer;
+    background: var(--panel2); color: var(--text); font-size: .84rem; font-weight: 600;
+    transition: background .1s, border-color .1s;
+  }
+  .ul-toggle:hover { background: var(--panel3); }
+  .ul-toggle.on { border-color: var(--danger); color: var(--danger); }
+  .ul-toggle.on:hover { background: color-mix(in srgb, var(--danger) 14%, var(--panel)); }
+
+  /* === Playlists (Música › Biblioteca) === */
+  .pl-section { margin-bottom: 22px; }
+  .pl-head h3 { font-size: 1rem; margin-bottom: 10px; }
+  .pl-songs-title { font-size: 1rem; margin: 4px 0 10px; }
+  .pl-create { display: flex; gap: 8px; margin-bottom: 12px; }
+  .pl-create input {
+    flex: 1; padding: 10px 13px; border: var(--border); border-radius: 10px;
+    background: var(--panel); color: var(--text); font-size: .92rem;
+  }
+  .pl-create input:focus { outline: 2px solid var(--accent); border-color: transparent; }
+  .pl-create button {
+    padding: 10px 16px; border: none; border-radius: 10px; cursor: pointer;
+    background: var(--accent); color: #fff; font-weight: 600;
+  }
+  .pl-create button:hover { background: var(--accent2); }
+  .playlists-list { display: flex; flex-direction: column; gap: 6px; }
+  .pl-row {
+    display: flex; align-items: center; gap: 12px; cursor: pointer;
+    background: var(--panel); border: var(--border); border-radius: 12px; padding: 10px 14px;
+    transition: background .1s;
+  }
+  .pl-row:hover { background: var(--panel3); }
+  .pl-ico { font-size: 1.2rem; flex: none; }
+  .pl-info { flex: 1; min-width: 0; }
+  .pl-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pl-meta { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: .78rem; margin-top: 2px; }
+  .pl-av { width: 18px; height: 18px; border-radius: 50%; object-fit: cover; flex: none; }
+  .pl-ph { display: grid; place-items: center; background: var(--panel3); font-size: .6rem; font-weight: 700; }
+  .pl-open { color: var(--muted); font-size: 1.3rem; flex: none; }
+
+  /* Modal de playlist */
+  .pl-modal { max-width: 560px; max-height: 86vh; display: flex; flex-direction: column; }
+  .pl-modal-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .pl-modal-author { color: var(--muted); font-size: .82rem; }
+  .pl-modal-actions { display: flex; gap: 8px; margin: 12px 0 14px; }
+  .pl-modal-actions button { padding: 9px 14px; border: var(--border); border-radius: 9px; cursor: pointer; background: var(--panel); color: var(--text); font-weight: 600; font-size: .85rem; }
+  .pl-modal-actions button.primary { background: var(--accent); color: #fff; border-color: transparent; }
+  .pl-modal-actions button.primary:hover { background: var(--accent2); }
+  .pl-modal-actions button.danger { color: var(--danger); }
+  .pl-modal-actions button.danger:hover { background: var(--danger); color: #fff; border-color: transparent; }
+  .pl-items { display: flex; flex-direction: column; gap: 4px; overflow-y: auto; max-height: 32vh; margin-bottom: 6px; }
+  .pl-item { display: flex; align-items: center; gap: 8px; background: var(--panel); border-radius: 9px; padding: 7px 10px; }
+  .pl-item .num { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .pl-item .title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .9rem; }
+  .pl-item-q, .pl-item-del { border: none; background: transparent; cursor: pointer; color: var(--muted); font-size: 1rem; padding: 2px 6px; border-radius: 6px; }
+  .pl-item-q:hover { color: var(--accent); }
+  .pl-item-del:hover { color: var(--danger); }
+  .pl-add-area { border-top: var(--border); padding-top: 14px; margin-top: 6px; }
+  .pl-add-area h3 { font-size: .92rem; margin-bottom: 8px; }
+  .pl-add-row { display: flex; gap: 8px; margin-bottom: 10px; }
+  .pl-add-row input {
+    flex: 1; padding: 10px 13px; border: var(--border); border-radius: 10px;
+    background: var(--panel); color: var(--text); font-size: .9rem;
+  }
+  .pl-add-row input:focus { outline: 2px solid var(--accent); border-color: transparent; }
+  .pl-add-row button { padding: 10px 16px; border: none; border-radius: 10px; cursor: pointer; background: var(--accent); color: #fff; font-weight: 600; }
+  .pl-add-row button:hover { background: var(--accent2); }
+  .pl-add-row button:disabled { opacity: .6; cursor: default; }
+  .pl-add-row button.pl-import { background: var(--panel2); color: var(--text); border: var(--border); }
+  .pl-add-row button.pl-import:hover { background: var(--panel3); }
+  @media (max-width: 560px) { .pl-add-row { flex-wrap: wrap; } }
+  .pl-lib-list { display: flex; flex-direction: column; gap: 3px; max-height: 26vh; overflow-y: auto; margin-top: 8px; }
+  .pl-lib-item { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 8px; background: var(--panel); }
+  .pl-lib-item .title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .86rem; }
+  .pl-lib-item .num { color: var(--muted); }
+  .pl-lib-item button { border: var(--border); background: var(--panel2); color: var(--text); cursor: pointer; border-radius: 7px; padding: 4px 10px; font-weight: 600; }
+  .pl-lib-item button:hover { background: var(--accent); border-color: transparent; }
+  .pl-lib-item button:disabled { opacity: .6; cursor: default; }
 </style>
 </head>
 <body>
@@ -537,6 +635,7 @@
     <button class="tab active" data-page="sounds">🔊 Soundboard</button>
     <button class="tab" data-page="music">🎵 Música</button>
     <button class="tab" id="tab-cache" data-page="cache">💾 Caché</button>
+    <button class="tab" id="tab-users" data-page="users">👥 Usuarios</button>
   </div>
 
   <div class="pages">
@@ -680,6 +779,17 @@
     </div>
 
     <div class="subpage" id="sub-library">
+      <div class="pl-section">
+        <div class="pl-head">
+          <h3>🎶 Playlists</h3>
+        </div>
+        <div class="pl-create">
+          <input type="text" id="pl-new-name" placeholder="Nombre de la nueva playlist..." maxlength="80" onkeydown="if(event.key==='Enter')createPlaylist()">
+          <button onclick="createPlaylist()">➕ Crear</button>
+        </div>
+        <div id="playlists-list" class="playlists-list"></div>
+      </div>
+      <h3 class="pl-songs-title">🎵 Canciones</h3>
       <input type="text" id="library-search" class="sound-search" placeholder="🔍 Buscar canción en la biblioteca...">
       <div id="library-list"></div>
     </div>
@@ -700,6 +810,46 @@
     </p>
     <div id="cache-list"></div>
   </div>
+
+  <div class="page" id="page-users">
+    <div class="page-head">👥 Usuarios</div>
+    <p class="hint" style="margin:0 0 14px">
+      Otorga o retira el rol <b>administrador</b>. Un admin puede gestionar sonidos,
+      caché, usuarios y controlar la música sin estar en el canal de voz.
+    </p>
+    <div id="users-list" class="users-list"><p class="empty">Cargando…</p></div>
+  </div>
+  </div>
+
+  <div class="modal-overlay" id="playlist-modal" style="display:none">
+    <div class="modal pl-modal">
+      <div class="pl-modal-head">
+        <h2 id="pl-modal-title">Playlist</h2>
+        <span id="pl-modal-author" class="pl-modal-author"></span>
+      </div>
+      <div class="pl-modal-actions">
+        <button id="pl-play-all" class="primary">▶ Reproducir todo</button>
+        <button id="pl-delete" class="danger" style="display:none">🗑️ Eliminar lista</button>
+      </div>
+
+      <div id="pl-items" class="pl-items"><p class="empty">Cargando…</p></div>
+
+      <div id="pl-add-area" class="pl-add-area" style="display:none">
+        <h3>➕ Agregar canciones</h3>
+        <div class="pl-add-row">
+          <input type="text" id="pl-add-link" placeholder="Pega un link o escribe para buscar (igual que la cola)..." onkeydown="if(event.key==='Enter')addLinkToPlaylist()">
+          <button id="pl-add-link-btn" onclick="addLinkToPlaylist()">Agregar</button>
+          <button id="pl-add-pl-btn" class="pl-import" onclick="importPlaylistToPlaylist()" title="Importar todas las canciones de un link de playlist (YouTube, etc.)">📋 Importar playlist</button>
+        </div>
+        <p class="hint" style="margin:-2px 0 10px">Pega un link de <b>canción</b> o búsqueda y usa <b>Agregar</b>; pega un link de <b>playlist</b> y usa <b>Importar playlist</b>.</p>
+        <input type="text" id="pl-lib-search" class="sound-search" placeholder="🔍 …o elige de la biblioteca">
+        <div id="pl-lib-list" class="pl-lib-list"></div>
+      </div>
+
+      <div class="modal-actions">
+        <button type="button" class="cancel" id="pl-modal-close">Cerrar</button>
+      </div>
+    </div>
   </div>
 
   <div class="modal-overlay" id="song-modal" style="display:none">
@@ -842,6 +992,7 @@ async function loadMe() {
   applyAdminUI()
   renderUserChip()
   loadMusic()
+  loadUsers()   // se autolimita a admins; necesario para la vista dividida en PC
 }
 
 // Muestra el usuario logueado (avatar + nombre) arriba a la derecha.
@@ -863,7 +1014,7 @@ function renderUserChip() {
 function applyAdminUI() {
   const isAdmin = me && (me.roles || []).includes('admin')
   // La pestaña Caché y el selector de canal de voz son solo para administradores.
-  for (const id of ['tab-cache', 'page-cache', 'voice-panel', 'subtab-stats', 'subtab-manage', 'subtab-audit']) {
+  for (const id of ['tab-cache', 'page-cache', 'tab-users', 'page-users', 'voice-panel', 'subtab-stats', 'subtab-manage', 'subtab-audit']) {
     const el = document.getElementById(id)
     if (!el) continue
     if (isAdmin) el.style.removeProperty('display')
@@ -893,6 +1044,7 @@ document.querySelectorAll('.tab').forEach(tab => {
     tab.classList.add('active')
     document.getElementById('page-' + tab.dataset.page).classList.add('active')
     if (tab.dataset.page === 'cache') loadMusic()
+    if (tab.dataset.page === 'users') loadUsers()
   }
 })
 
@@ -1416,6 +1568,61 @@ function renderAuditUploads(rows) {
   }).join('')
 }
 
+// ── Gestión de usuarios (solo admin) ──
+let usersMeId = null
+async function loadUsers() {
+  if (!(me && (me.roles || []).includes('admin'))) return
+  try {
+    const res = await webFetch('/api/users')
+    if (!res.ok) return
+    const data = await res.json()
+    usersMeId = data.me
+    renderUsers(data.users || [])
+  } catch {}
+}
+
+function renderUsers(users) {
+  const el = document.getElementById('users-list')
+  if (!el) return
+  if (!users.length) { el.innerHTML = '<p class="empty">No hay usuarios todavía</p>'; return }
+  el.innerHTML = users.map(u => {
+    const name = esc(u.display_name || u.username || 'Usuario')
+    const isAdmin = (u.roles || []).includes('admin')
+    const isMe = u.id === usersMeId
+    const av = u.avatar_url
+      ? `<img class="ul-av" src="${esc(u.avatar_url)}" alt="">`
+      : `<span class="ul-av ul-ph">${esc((name[0] || '?').toUpperCase())}</span>`
+    const roles = (u.roles || []).length
+      ? (u.roles).map(r => `<span class="ul-role${r === 'admin' ? ' is-admin' : ''}">${esc(r)}</span>`).join('')
+      : '<span class="ul-role ul-none">sin rol</span>'
+    const meta = u.last_login_at ? 'Último acceso: ' + fmtDate(u.last_login_at) : 'Nunca ha entrado'
+    return `<div class="ul-row">
+      ${av}
+      <div class="ul-info">
+        <div class="ul-name">${name}${isMe ? ' <span class="ul-you">(tú)</span>' : ''}</div>
+        <div class="ul-roles">${roles}</div>
+        <div class="ul-meta">${meta}</div>
+      </div>
+      <button class="ul-toggle${isAdmin ? ' on' : ''}" onclick="setUserAdmin(${u.id}, ${!isAdmin})">${isAdmin ? '➖ Quitar admin' : '➕ Hacer admin'}</button>
+    </div>`
+  }).join('')
+}
+
+async function setUserAdmin(userId, grant) {
+  if (!grant && userId === usersMeId && !confirm('¿Quitarte a ti mismo el rol de administrador?')) return
+  try {
+    const res = await webFetch('/api/users/role', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId, role: 'admin', grant }),
+    })
+    const data = await res.json().catch(() => null)
+    if (!res.ok) { toast(data && data.error ? data.error : 'Error'); return }
+    toast(grant ? 'Ahora es administrador' : 'Permiso de admin retirado')
+    loadUsers()
+    if (userId === usersMeId) loadMe()   // si me cambié a mí mismo, refrescar la UI admin
+  } catch { toast('No se pudo contactar al servidor') }
+}
+
 function renderMgmtSidebar() {
   if (!mgmtData) return
   const rows = [`<div class="sb-row${mgmtSelectedPath === '' ? ' selected' : ''}" data-path=""><span class="arrow"></span><span>🔊 Todos los sonidos</span></div>`]
@@ -1697,6 +1904,7 @@ async function loadMusic() {
     musicSongs = await res.json()
     renderMusicList(musicSongs)   // pestaña 💾 Caché (solo admin)
     renderLibrary()               // Música › Biblioteca (todos)
+    loadPlaylists()               // Música › Biblioteca › Playlists
   } catch { cacheBox.innerHTML = '<p class="empty">No se pudo cargar.</p>' }
 }
 
@@ -1737,6 +1945,230 @@ async function queueSong(id) {
 }
 
 document.getElementById('library-search').addEventListener('input', renderLibrary)
+
+// ── Playlists (Música › Biblioteca) ──
+let playlists = [], playlistsMeId = null, openPlaylist = null
+
+async function loadPlaylists() {
+  try {
+    const res = await webFetch('/api/playlists')
+    if (!res.ok) return
+    const data = await res.json()
+    playlists = data.playlists || []
+    playlistsMeId = data.me
+    renderPlaylists()
+    if (openPlaylist) {   // si hay un modal abierto, refrescar su cabecera (conteo)
+      const fresh = playlists.find(p => p.id === openPlaylist.id)
+      if (fresh) openPlaylist = fresh
+    }
+  } catch {}
+}
+
+function renderPlaylists() {
+  const box = document.getElementById('playlists-list')
+  if (!box) return
+  if (!playlists.length) { box.innerHTML = '<p class="empty">No hay playlists todavía. Crea una arriba.</p>'; return }
+  box.innerHTML = playlists.map(p => {
+    const author = esc(p.owner_name || p.owner_username || 'alguien')
+    const mine = p.owner_user_id === playlistsMeId
+    const av = p.owner_avatar
+      ? `<img class="pl-av" src="${esc(p.owner_avatar)}" alt="">`
+      : `<span class="pl-av pl-ph">${esc((author[0] || '?').toUpperCase())}</span>`
+    return `<div class="pl-row" onclick="showPlaylist(${p.id})">
+      <span class="pl-ico">🎶</span>
+      <div class="pl-info">
+        <div class="pl-name">${esc(p.name)}</div>
+        <div class="pl-meta">${av}<span>por ${author}${mine ? ' (tú)' : ''} · ${p.item_count} ${p.item_count === 1 ? 'canción' : 'canciones'}</span></div>
+      </div>
+      <span class="pl-open">›</span>
+    </div>`
+  }).join('')
+}
+
+async function createPlaylist() {
+  const inp = document.getElementById('pl-new-name')
+  const name = inp.value.trim()
+  if (!name) return
+  try {
+    const res = await webFetch('/api/playlists', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }),
+    })
+    const data = await res.json().catch(() => null)
+    if (!res.ok) { toast(data && data.error ? data.error : 'No se pudo crear'); return }
+    inp.value = ''
+    await loadPlaylists()
+    if (data && data.id) showPlaylist(data.id)   // abrir la recién creada para agregarle canciones
+  } catch { toast('No se pudo crear la playlist') }
+}
+
+// ── Modal de gestión de una playlist ──
+function showPlaylist(id) {
+  openPlaylist = playlists.find(p => p.id === id)
+  if (!openPlaylist) return
+  const canEdit = openPlaylist.owner_user_id === playlistsMeId || (me && (me.roles || []).includes('admin'))
+  document.getElementById('pl-modal-title').textContent = openPlaylist.name
+  document.getElementById('pl-modal-author').textContent = 'por ' + (openPlaylist.owner_name || openPlaylist.owner_username || 'alguien')
+  document.getElementById('pl-delete').style.display = canEdit ? '' : 'none'
+  document.getElementById('pl-add-area').style.display = canEdit ? '' : 'none'
+  document.getElementById('pl-add-link').value = ''
+  document.getElementById('pl-lib-search').value = ''
+  document.getElementById('playlist-modal').style.display = 'flex'
+  renderPlaylistLibrary()
+  loadPlaylistItems()
+}
+
+function closePlaylistModal() {
+  document.getElementById('playlist-modal').style.display = 'none'
+  openPlaylist = null
+}
+
+async function loadPlaylistItems() {
+  if (!openPlaylist) return
+  const box = document.getElementById('pl-items')
+  const canEdit = openPlaylist.owner_user_id === playlistsMeId || (me && (me.roles || []).includes('admin'))
+  try {
+    const res = await webFetch('/api/playlists/' + openPlaylist.id + '/items')
+    if (!res.ok) { box.innerHTML = '<p class="empty">No se pudo cargar.</p>'; return }
+    const items = await res.json()
+    if (!items.length) { box.innerHTML = '<p class="empty">Lista vacía. Agrega canciones abajo.</p>'; return }
+    box.innerHTML = items.map((it, i) => {
+      const sub = [it.artist ? esc(it.artist) : null, it.duration_ms ? fmt(it.duration_ms / 1000) : null].filter(Boolean).join(' · ')
+      const del = canEdit ? `<button class="pl-item-del" onclick="removePlaylistItem(${it.id})" title="Quitar de la lista">✕</button>` : ''
+      return `<div class="pl-item">
+        <span class="num">${i + 1}.</span>
+        <span class="title" title="${esc(it.title || it.source_url)}">${esc(it.title || '(sin título)')}${sub ? ` <span class="num">— ${sub}</span>` : ''}</span>
+        <button class="pl-item-q" onclick="queueSong(${it.song_id})" title="Agregar a la cola">➕</button>
+        ${del}
+      </div>`
+    }).join('')
+  } catch { box.innerHTML = '<p class="empty">No se pudo cargar.</p>' }
+}
+
+// Lista interna de la biblioteca para elegir canciones a agregar a la playlist.
+function renderPlaylistLibrary() {
+  const box = document.getElementById('pl-lib-list')
+  if (!box || !openPlaylist) return
+  const q = norm(document.getElementById('pl-lib-search').value)
+  let list = musicSongs
+  if (q) {
+    const tokens = q.split(' ')
+    list = list.filter(s => tokens.every(t => norm((s.title || '') + ' ' + (s.artist || '') + ' ' + (s.source_url || '')).includes(t)))
+  }
+  list = list.slice(0, 60)   // no saturar el modal
+  if (!list.length) { box.innerHTML = `<p class="empty">${q ? 'Sin resultados' : 'Biblioteca vacía'}</p>`; return }
+  box.innerHTML = list.map(s => {
+    const sub = s.artist ? ` <span class="num">— ${esc(s.artist)}</span>` : ''
+    return `<div class="pl-lib-item">
+      <span class="title" title="${esc(s.title || s.source_url)}">${esc(s.title || '(sin título)')}${sub}</span>
+      <button onclick="addSongToPlaylist(${s.id}, this)" title="Agregar a la playlist">➕</button>
+    </div>`
+  }).join('')
+}
+
+async function addSongToPlaylist(songId, btn) {
+  if (!openPlaylist) return
+  if (btn) { btn.disabled = true; btn.textContent = '✓' }
+  const ok = await postPlaylistItem({ songId })
+  if (!ok && btn) { btn.disabled = false; btn.textContent = '➕' }
+}
+
+async function addLinkToPlaylist() {
+  if (!openPlaylist) return
+  const inp = document.getElementById('pl-add-link')
+  const url = inp.value.trim()
+  if (!url) return
+  const btn = document.getElementById('pl-add-link-btn')
+  const orig = btn.textContent
+  btn.disabled = true; btn.textContent = 'Buscando…'
+  try {
+    // Resolver igual que la cola (link o búsqueda) → songId, vía bot.mjs.
+    const r = await api('/api/resolve', { url })
+    if (!r || !r.songId) return
+    inp.value = ''
+    await postPlaylistItem({ songId: r.songId })
+    loadMusic()   // la canción nueva puede no estar aún en la biblioteca local
+  } finally { btn.disabled = false; btn.textContent = orig }
+}
+
+async function postPlaylistItem(body, successMsg = 'Agregada a la playlist ✓') {
+  if (!openPlaylist) return false
+  try {
+    const res = await webFetch('/api/playlists/' + openPlaylist.id + '/items', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    })
+    const data = await res.json().catch(() => null)
+    if (!res.ok) { toast(data && data.error ? data.error : 'No se pudo agregar'); return false }
+    toast(successMsg)
+    loadPlaylistItems()
+    loadPlaylists()   // actualizar el conteo
+    return true
+  } catch { toast('No se pudo agregar'); return false }
+}
+
+// Importar una playlist completa por link: el bot la resuelve (lista sus entradas)
+// y se agregan todas las canciones de golpe.
+async function importPlaylistToPlaylist() {
+  if (!openPlaylist) return
+  const inp = document.getElementById('pl-add-link')
+  const url = inp.value.trim()
+  if (!url) return
+  const btn = document.getElementById('pl-add-pl-btn')
+  const orig = btn.textContent
+  btn.disabled = true; btn.textContent = 'Resolviendo…'
+  try {
+    const r = await api('/api/resolve-playlist', { url })   // api() ya hace toast si falla
+    if (!r || !r.songIds || !r.songIds.length) return
+    inp.value = ''
+    await postPlaylistItem({ songIds: r.songIds }, `${r.count} ${r.count === 1 ? 'canción importada' : 'canciones importadas'} ✓`)
+    loadMusic()   // las canciones nuevas pueden no estar aún en la biblioteca local
+  } finally { btn.disabled = false; btn.textContent = orig }
+}
+
+async function removePlaylistItem(itemId) {
+  if (!openPlaylist) return
+  try {
+    const res = await webFetch('/api/playlists/' + openPlaylist.id + '/items/' + itemId, { method: 'DELETE' })
+    if (!res.ok) { toast('No se pudo quitar'); return }
+    loadPlaylistItems()
+    loadPlaylists()
+  } catch { toast('No se pudo quitar') }
+}
+
+async function deleteOpenPlaylist() {
+  if (!openPlaylist) return
+  if (!confirm(`¿Eliminar la playlist "${openPlaylist.name}"?`)) return
+  try {
+    const res = await webFetch('/api/playlists/' + openPlaylist.id, { method: 'DELETE' })
+    if (!res.ok) { const e = await res.json().catch(() => ({})); toast(e.error || 'No se pudo eliminar'); return }
+    closePlaylistModal()
+    loadPlaylists()
+  } catch { toast('No se pudo eliminar') }
+}
+
+async function playOpenPlaylist() {
+  if (!openPlaylist) return
+  try {
+    const res = await webFetch('/api/playlists/' + openPlaylist.id + '/items')
+    if (!res.ok) return
+    const items = await res.json()
+    if (!items.length) { toast('La lista está vacía'); return }
+    let added = 0
+    for (const it of items) {
+      const data = await api('/api/music/play', { id: it.song_id })
+      if (data && data.ok) added++
+      else break   // p. ej. bloqueado por no estar en el canal de voz
+    }
+    if (added) toast(`${added} ${added === 1 ? 'canción agregada' : 'canciones agregadas'} a la cola ✓`)
+  } catch { toast('No se pudo reproducir la lista') }
+}
+
+document.getElementById('pl-lib-search').addEventListener('input', renderPlaylistLibrary)
+document.getElementById('pl-modal-close').onclick = closePlaylistModal
+document.getElementById('pl-delete').onclick = deleteOpenPlaylist
+document.getElementById('pl-play-all').onclick = playOpenPlaylist
+document.getElementById('playlist-modal').addEventListener('click', (e) => {
+  if (e.target.id === 'playlist-modal') closePlaylistModal()
+})
 
 // ── Canales de voz ──
 async function loadVoiceChannels() {

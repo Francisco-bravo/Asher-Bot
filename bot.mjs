@@ -111,6 +111,16 @@ function ytdlpArgs(extra) {
   return args.concat(extra)
 }
 
+// Como ytdlpArgs pero SIN --no-playlist y con --flat-playlist: para listar las
+// entradas de una playlist (rápido, sin resolver cada video) al importarla.
+function ytdlpPlaylistArgs(extra) {
+  const args = ['--flat-playlist', '--quiet',
+    '--js-runtimes', 'bun:/usr/local/bin/bun',
+    '--js-runtimes', 'node:/usr/bin/node']
+  if (existsSync(COOKIES)) args.push('--cookies', COOKIES)
+  return args.concat(extra)
+}
+
 // ── Estado ────────────────────────────────────────────────────────────────
 // item: { url, title, duration, voiceChannelId, guildId, textChannelId }
 const queue = []
@@ -480,6 +490,45 @@ function ytdlpPrint(url, field) {
     proc.stdout.on('data', d => out += d)
     proc.on('error', () => { if (bgProc === proc) bgProc = null; resolve(null) })
     proc.on('close', () => { if (bgProc === proc) bgProc = null; resolve(out.trim() || null) })
+  })
+}
+
+// Resuelve fuente real + título + duración en UNA sola llamada (resuelve también
+// términos de búsqueda ytsearch1:). Para crear canciones de playlist con metadata.
+function ytdlpResolveMeta(url) {
+  return new Promise(resolve => {
+    const proc = spawn(YTDLP, ytdlpArgs(['--skip-download', '--print', '%(webpage_url)s\t%(title)s\t%(duration)s', url]))
+    bgProc = proc
+    let out = ''
+    proc.stdout.on('data', d => out += d)
+    proc.on('error', () => { if (bgProc === proc) bgProc = null; resolve(null) })
+    proc.on('close', () => {
+      if (bgProc === proc) bgProc = null
+      const [sourceUrl, title, dur] = (out.trim().split('\n')[0] || '').split('\t')
+      resolve(sourceUrl ? { sourceUrl, title: title || null, duration: parseFloat(dur) } : null)
+    })
+  })
+}
+
+// Lista las entradas (url + título) de una playlist sin resolver cada video.
+// Devuelve [] si el link no es una playlist o no tiene entradas.
+function ytdlpFlatPlaylist(url) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(YTDLP, ytdlpPlaylistArgs(['--print', '%(url)s\t%(title)s\t%(duration)s', url]))
+    bgProc = proc
+    let out = '', err = ''
+    proc.stdout.on('data', d => out += d)
+    proc.stderr.on('data', d => err += d)
+    proc.on('error', e => { if (bgProc === proc) bgProc = null; reject(e) })
+    proc.on('close', code => {
+      if (bgProc === proc) bgProc = null
+      if (code !== 0 && !out.trim()) return reject(new Error(err.trim().split('\n').pop() || 'No se pudo leer la playlist'))
+      const entries = out.trim().split('\n').filter(Boolean).map(line => {
+        const [u, title, dur] = line.split('\t')
+        return { url: u, title: (title && title !== 'NA') ? title : u, duration: parseFloat(dur) }
+      }).filter(e => e.url && /^https?:\/\//i.test(e.url))
+      resolve(entries)
+    })
   })
 }
 
@@ -860,6 +909,27 @@ async function resolveInput(url) {
     return { url: `ytsearch1:${t.artistName} ${t.trackName}`, title: `${t.artistName} - ${t.trackName} (vía YouTube)` }
   }
   return { url }
+}
+
+// Resuelve cualquier entrada (link o búsqueda, igual que la cola) a una canción
+// de la Biblioteca con título/duración/carátula, para agregarla a una playlist.
+async function resolveToSong(input) {
+  const resolved = await resolveInput(input)   // { url, title }
+  // URL directa ya conocida → reutilizar la canción sin gastar otro yt-dlp.
+  if (/^https?:\/\//i.test(resolved.url)) {
+    const existing = musicCache.findByUrl(resolved.url)
+    if (existing) return existing
+  }
+  const meta = await ytdlpResolveMeta(resolved.url)
+  const sourceUrl = meta?.sourceUrl || resolved.url
+  const song = musicCache.findByUrl(sourceUrl)
+    || musicCache.upsertSong({ sourceUrl, title: meta?.title || resolved.title })
+  if (meta?.title) {
+    const durationMs = !isNaN(meta.duration) ? meta.duration * 1000 : null
+    musicCache.setMeta(song.id, { title: meta.title, durationMs })
+  }
+  ensureSongArt(song, sourceUrl).catch(() => {})   // carátula en segundo plano
+  return musicCache.getById(song.id)
 }
 
 // ── Comandos del motor ────────────────────────────────────────────────────
@@ -1445,21 +1515,24 @@ function isInBotVoiceChannel(userId) {
 
 // ¿El usuario del panel puede controlar la música/sonidos? Solo si es admin
 // (exento) o si está en el canal de voz del bot. El acceso por contraseña legada
-// se trata como admin.
+// se trata como admin. Ojo: rbac usa el id interno (u.id) pero la membresía de
+// voz se consulta por el id de Discord (u.discord_id).
 function canControlMusic(req) {
   if (authorizedByPassword(req)) return true
   const u = panelUser(req)
   if (!u) return false
   if (rbac.isAdmin(u.id)) return true
-  return isInBotVoiceChannel(u.id)
+  return isInBotVoiceChannel(u.discord_id)
 }
 
 // Variante para comandos/botones de Discord: admin siempre; si el bot ya está en
 // un canal, el miembro debe estar en ESE canal; si no hay conexión, se permite
-// (el primero en pedir trae el bot a su canal).
+// (el primero en pedir trae el bot a su canal). member.id es el id de Discord; el
+// rol admin se consulta mapeando a la fila interna del usuario.
 function memberCanControl(member) {
   if (!member) return false
-  if (rbac.isAdmin(member.id)) return true
+  const u = auth.getUserByDiscordId(member.id)
+  if (u && rbac.isAdmin(u.id)) return true
   if (!connection || !currentChannelId) return true
   return member.voice?.channelId === currentChannelId
 }
@@ -1622,6 +1695,33 @@ http.createServer(async (req, res) => {
           const resolved = await resolveInput(body.url)
           const song = await forceCacheAudio({ url: resolved.url, title: resolved.title })
           return sendJson({ ok: true, id: song.id, title: song.title })
+        }
+        // Resuelve un link/búsqueda a una canción de la Biblioteca (sin reproducir
+        // ni cachear), para agregarla a una playlist. No requiere canal de voz.
+        case '/api/resolve': {
+          if (!body.url) return sendJson({ error: 'Falta la URL' }, 400)
+          try {
+            const song = await resolveToSong(body.url)
+            return sendJson({ ok: true, songId: song.id, title: song.title })
+          } catch (e) {
+            return sendJson({ error: e.message || 'No se pudo resolver' }, 400)
+          }
+        }
+        // Importa una playlist completa (YouTube, etc.): lista sus entradas y crea
+        // una canción de la Biblioteca por cada una. Devuelve los songIds.
+        case '/api/resolve-playlist': {
+          if (!body.url) return sendJson({ error: 'Falta la URL' }, 400)
+          try {
+            const entries = (await ytdlpFlatPlaylist(body.url)).slice(0, 200) // tope de seguridad
+            if (!entries.length) return sendJson({ error: 'No se encontraron canciones (¿es un link de playlist?)' }, 400)
+            const songIds = entries.map(e => {
+              const song = musicCache.findByUrl(e.url) || musicCache.upsertSong({ sourceUrl: e.url, title: e.title })
+              return song.id
+            })
+            return sendJson({ ok: true, songIds, count: songIds.length })
+          } catch (e) {
+            return sendJson({ error: e.message || 'No se pudo resolver la playlist' }, 400)
+          }
         }
         case '/api/music/play': {
           const song = musicCache.getById(body.id)

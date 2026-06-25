@@ -28,6 +28,7 @@ const CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET
 const REDIRECT_URI = process.env.DISCORD_REDIRECT_URI || `http://localhost:${PORT}/auth/callback`
 // Orígenes del panel autorizados (CORS + retorno OAuth). Lista por coma en Pages.
 const PANEL_ORIGINS = new Set((process.env.PANEL_ORIGIN || '').split(',').map(s => s.trim().replace(/\/$/, '')).filter(Boolean))
+const VALID_ROLES = new Set(['admin', 'dj', 'user', 'guest'])
 const SOUND_EXTS = new Set(['mp3', 'wav', 'ogg', 'm4a', 'flac', 'webm'])
 const MAX_UPLOAD = 10 * 1024 * 1024 // 10 MB por sonido
 const MUSIC_EXTS = new Set(['mp3', 'wav', 'ogg', 'm4a', 'flac', 'webm', 'opus'])
@@ -378,31 +379,78 @@ http.createServer(async (req, res) => {
       })
     }
 
-    // Playlists
+    // Gestión de usuarios (solo admin): listar usuarios con sus roles y
+    // asignar/quitar el rol admin.
+    if (req.method === 'GET' && path === '/api/users') {
+      if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un administrador' })
+      return send(res, 200, { users: auth.listUsers(), me: user.id })
+    }
+    if (req.method === 'POST' && path === '/api/users/role') {
+      if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un administrador' })
+      const body = JSON.parse((await readBody(req)).toString() || '{}')
+      const targetId = Number(body.userId)
+      const role = String(body.role || '')
+      const grant = !!body.grant
+      if (!targetId || !VALID_ROLES.has(role)) return send(res, 400, { error: 'Datos inválidos' })
+      // No permitir quedarse sin ningún administrador.
+      if (role === 'admin' && !grant && auth.countAdmins() <= 1) {
+        return send(res, 400, { error: 'No puedes quitar el último administrador' })
+      }
+      try {
+        if (grant) auth.assignRole(targetId, role)
+        else auth.removeRole(targetId, role)
+      } catch (e) {
+        return send(res, 400, { error: e.message || 'No se pudo actualizar el rol' })
+      }
+      return send(res, 200, { ok: true })
+    }
+
+    // Playlists. Las listas son visibles para todos (con su autor); solo el dueño
+    // (o un admin) puede modificarlas.
     if (path === '/api/playlists' && req.method === 'GET') {
-      return send(res, 200, playlists.listForUser(user.id))
+      return send(res, 200, { playlists: playlists.listAllWithOwner(), me: user.id })
     }
     if (path === '/api/playlists' && req.method === 'POST') {
       const body = JSON.parse((await readBody(req)).toString() || '{}')
-      if (!body.name) return send(res, 400, { error: 'Falta el nombre de la lista' })
-      return send(res, 201, playlists.create(user.id, body.name, body.visibility))
+      const name = (body.name || '').trim()
+      if (!name) return send(res, 400, { error: 'Falta el nombre de la lista' })
+      return send(res, 201, playlists.create(user.id, name, body.visibility))
     }
     const plItems = path.match(/^\/api\/playlists\/(\d+)\/items$/)
     if (plItems && (req.method === 'GET' || req.method === 'POST')) {
       const pl = playlists.get(Number(plItems[1]))
-      if (!pl || pl.owner_user_id !== user.id) return send(res, 404, { error: 'Lista no encontrada' })
+      if (!pl) return send(res, 404, { error: 'Lista no encontrada' })
       if (req.method === 'GET') return send(res, 200, playlists.items(pl.id))
+      // Modificar = solo dueño o admin.
+      if (pl.owner_user_id !== user.id && !rbac.isAdmin(user.id)) return send(res, 403, { error: 'No es tu lista' })
       const body = JSON.parse((await readBody(req)).toString() || '{}')
+      // Agregar varias de golpe (importar playlist).
+      if (Array.isArray(body.songIds)) {
+        const ids = body.songIds.map(Number).filter(Boolean)
+        if (!ids.length) return send(res, 400, { error: 'Sin canciones que agregar' })
+        for (const sid of ids) playlists.addItem(pl.id, sid)
+        return send(res, 201, { ok: true, added: ids.length })
+      }
       let songId = body.songId
       if (!songId && body.sourceUrl) songId = music.upsertSong({ sourceUrl: body.sourceUrl, title: body.title }).id
       if (!songId) return send(res, 400, { error: 'Falta songId o sourceUrl' })
-      playlists.addItem(pl.id, songId)
+      playlists.addItem(pl.id, Number(songId))
       return send(res, 201, { ok: true })
+    }
+    // Quitar una canción de la lista (solo dueño o admin).
+    const plItemDel = path.match(/^\/api\/playlists\/(\d+)\/items\/(\d+)$/)
+    if (plItemDel && req.method === 'DELETE') {
+      const pl = playlists.get(Number(plItemDel[1]))
+      if (!pl) return send(res, 404, { error: 'Lista no encontrada' })
+      if (pl.owner_user_id !== user.id && !rbac.isAdmin(user.id)) return send(res, 403, { error: 'No es tu lista' })
+      playlists.removeItem(Number(plItemDel[2]))
+      return send(res, 200, { ok: true })
     }
     const plId = path.match(/^\/api\/playlists\/(\d+)$/)
     if (plId && req.method === 'DELETE') {
       const pl = playlists.get(Number(plId[1]))
-      if (!pl || pl.owner_user_id !== user.id) return send(res, 404, { error: 'Lista no encontrada' })
+      if (!pl) return send(res, 404, { error: 'Lista no encontrada' })
+      if (pl.owner_user_id !== user.id && !rbac.isAdmin(user.id)) return send(res, 403, { error: 'No es tu lista' })
       playlists.remove(pl.id)
       return send(res, 200, { ok: true })
     }
