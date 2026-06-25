@@ -612,6 +612,9 @@
     background: var(--accent); color: #fff; font-weight: 600;
   }
   .pl-create button:hover { background: var(--accent2); }
+  .pl-create button.pl-import { background: var(--panel2); color: var(--text); border: var(--border); white-space: nowrap; }
+  .pl-create button.pl-import:hover { background: var(--panel3); }
+  .pl-create button:disabled { opacity: .6; cursor: default; }
   /* Playlists como tarjetas, con carátula mosaico de las 4 primeras canciones */
   .playlists-list {
     display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 16px;
@@ -870,6 +873,11 @@
           <input type="text" id="pl-new-name" placeholder="Nombre de la nueva playlist..." maxlength="80" onkeydown="if(event.key==='Enter')createPlaylist()">
           <button onclick="createPlaylist()">➕ Crear</button>
         </div>
+        <div class="pl-create">
+          <input type="text" id="pl-import-url" placeholder="…o pega un link de playlist (YouTube, etc.) para importarla" onkeydown="if(event.key==='Enter')importNewPlaylist()">
+          <button class="pl-import" id="pl-import-btn" onclick="importNewPlaylist()">📋 Importar playlist</button>
+        </div>
+        <p class="hint" style="margin:-4px 0 14px">Importar trae la playlist completa con su <b>nombre</b> y sus canciones.</p>
         <div id="playlists-list" class="playlists-list"></div>
       </div>
     </div>
@@ -921,11 +929,9 @@
       <div id="pl-add-area" class="pl-col pl-add-area" style="display:none">
         <h3>➕ Agregar canciones</h3>
         <div class="pl-add-row">
-          <input type="text" id="pl-add-link" placeholder="Pega un link o escribe para buscar (igual que la cola)..." onkeydown="if(event.key==='Enter')addLinkToPlaylist()">
+          <input type="text" id="pl-add-link" placeholder="Pega un link de canción o escribe para buscar..." onkeydown="if(event.key==='Enter')addLinkToPlaylist()">
           <button id="pl-add-link-btn" onclick="addLinkToPlaylist()">Agregar</button>
-          <button id="pl-add-pl-btn" class="pl-import" onclick="importPlaylistToPlaylist()" title="Importar todas las canciones de un link de playlist (YouTube, etc.)">📋 Importar playlist</button>
         </div>
-        <p class="hint" style="margin:-2px 0 10px">Pega un link de <b>canción</b> o búsqueda y usa <b>Agregar</b>; pega un link de <b>playlist</b> y usa <b>Importar playlist</b>.</p>
         <input type="text" id="pl-lib-search" class="sound-search" placeholder="🔍 …o elige de la biblioteca">
         <div id="pl-lib-list" class="pl-lib-list"></div>
       </div>
@@ -2119,6 +2125,37 @@ async function createPlaylist() {
   } catch { toast('No se pudo crear la playlist') }
 }
 
+// Importar una playlist completa por link: solo al crear. El bot la resuelve
+// (nombre + canciones), se crea una lista nueva con ese nombre y se le agregan
+// todas las canciones de golpe.
+async function importNewPlaylist() {
+  const inp = document.getElementById('pl-import-url')
+  const url = inp.value.trim()
+  if (!url) return
+  const btn = document.getElementById('pl-import-btn')
+  const orig = btn.textContent
+  btn.disabled = true; btn.textContent = 'Resolviendo…'
+  try {
+    const r = await api('/api/resolve-playlist', { url })   // api() ya hace toast si falla
+    if (!r || !r.songIds || !r.songIds.length) return
+    const name = (r.name && r.name.trim()) || 'Playlist importada'
+    const res = await webFetch('/api/playlists', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }),
+    })
+    const data = await res.json().catch(() => null)
+    if (!res.ok || !data || !data.id) { toast(data && data.error ? data.error : 'No se pudo crear la lista'); return }
+    const add = await webFetch('/api/playlists/' + data.id + '/items', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ songIds: r.songIds }),
+    })
+    if (!add.ok) { toast('Lista creada, pero no se pudieron agregar las canciones'); }
+    inp.value = ''
+    await loadPlaylists()
+    loadMusic()   // las canciones nuevas pueden no estar aún en la biblioteca local
+    toast(`Playlist "${name}" importada con ${r.count} ${r.count === 1 ? 'canción' : 'canciones'} ✓`)
+    showPlaylist(data.id)
+  } finally { btn.disabled = false; btn.textContent = orig }
+}
+
 // ── Modal de gestión de una playlist ──
 function showPlaylist(id) {
   openPlaylist = playlists.find(p => p.id === id)
@@ -2215,25 +2252,6 @@ async function postPlaylistItem(body, successMsg = 'Agregada a la playlist ✓')
     loadPlaylists()   // actualizar el conteo
     return true
   } catch { toast('No se pudo agregar'); return false }
-}
-
-// Importar una playlist completa por link: el bot la resuelve (lista sus entradas)
-// y se agregan todas las canciones de golpe.
-async function importPlaylistToPlaylist() {
-  if (!openPlaylist) return
-  const inp = document.getElementById('pl-add-link')
-  const url = inp.value.trim()
-  if (!url) return
-  const btn = document.getElementById('pl-add-pl-btn')
-  const orig = btn.textContent
-  btn.disabled = true; btn.textContent = 'Resolviendo…'
-  try {
-    const r = await api('/api/resolve-playlist', { url })   // api() ya hace toast si falla
-    if (!r || !r.songIds || !r.songIds.length) return
-    inp.value = ''
-    await postPlaylistItem({ songIds: r.songIds }, `${r.count} ${r.count === 1 ? 'canción importada' : 'canciones importadas'} ✓`)
-    loadMusic()   // las canciones nuevas pueden no estar aún en la biblioteca local
-  } finally { btn.disabled = false; btn.textContent = orig }
 }
 
 async function removePlaylistItem(itemId) {

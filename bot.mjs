@@ -514,7 +514,7 @@ function ytdlpResolveMeta(url) {
 // Devuelve [] si el link no es una playlist o no tiene entradas.
 function ytdlpFlatPlaylist(url) {
   return new Promise((resolve, reject) => {
-    const proc = spawn(YTDLP, ytdlpPlaylistArgs(['--print', '%(url)s\t%(title)s\t%(duration)s', url]))
+    const proc = spawn(YTDLP, ytdlpPlaylistArgs(['--print', '%(url)s\t%(title)s\t%(duration)s\t%(playlist_title)s', url]))
     bgProc = proc
     let out = '', err = ''
     proc.stdout.on('data', d => out += d)
@@ -524,8 +524,13 @@ function ytdlpFlatPlaylist(url) {
       if (bgProc === proc) bgProc = null
       if (code !== 0 && !out.trim()) return reject(new Error(err.trim().split('\n').pop() || 'No se pudo leer la playlist'))
       const entries = out.trim().split('\n').filter(Boolean).map(line => {
-        const [u, title, dur] = line.split('\t')
-        return { url: u, title: (title && title !== 'NA') ? title : u, duration: parseFloat(dur) }
+        const [u, title, dur, plTitle] = line.split('\t')
+        return {
+          url: u,
+          title: (title && title !== 'NA') ? title : u,
+          duration: parseFloat(dur),
+          playlistTitle: (plTitle && plTitle !== 'NA') ? plTitle : null,
+        }
       }).filter(e => e.url && /^https?:\/\//i.test(e.url))
       resolve(entries)
     })
@@ -1718,7 +1723,8 @@ http.createServer(async (req, res) => {
               const song = musicCache.findByUrl(e.url) || musicCache.upsertSong({ sourceUrl: e.url, title: e.title })
               return song.id
             })
-            return sendJson({ ok: true, songIds, count: songIds.length })
+            const name = entries.find(e => e.playlistTitle)?.playlistTitle || null
+            return sendJson({ ok: true, songIds, count: songIds.length, name })
           } catch (e) {
             return sendJson({ error: e.message || 'No se pudo resolver la playlist' }, 400)
           }
