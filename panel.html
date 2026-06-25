@@ -1039,6 +1039,16 @@
       </form>
     </div>
   </div>
+
+  <div class="modal-overlay" id="alert-modal" style="display:none">
+    <div class="modal">
+      <h2 id="alert-title">Aviso</h2>
+      <p class="modal-folder" id="alert-message"></p>
+      <div class="modal-actions">
+        <button type="button" id="alert-ok">Entendido</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <div id="toast"></div>
@@ -1782,10 +1792,10 @@ async function mgmtAction(method, path, body, busyEl) {
   let ok = false
   try {
     const res = await webFetch(path, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-    if (!res.ok) { const e = await res.json().catch(() => ({})); alert(e.error || 'No se pudo completar la acción'); return }
+    if (!res.ok) { const e = await res.json().catch(() => ({})); showAlert(e.error || 'No se pudo completar la acción'); return }
     ok = true
     lastSoundsJSON = null   // el soundboard normal también cambió
-  } catch { alert('No se pudo completar la acción') }
+  } catch { showAlert('No se pudo completar la acción') }
   finally {
     // loadSoundAdmin reconstruye el grid (descarta el estado busy); si falló y no
     // hubo recarga, restauramos los botones del elemento bloqueado.
@@ -1952,10 +1962,10 @@ async function setSoundPref(soundId, changes, busyEl) {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ soundId, ...changes }),
     })
-    if (!res.ok) { alert('No se pudo guardar el cambio'); return }
+    if (!res.ok) { showAlert('No se pudo guardar el cambio'); return }
     lastSoundsJSON = null // forzar re-render en el próximo loadSounds
     await loadSounds()
-  } catch { alert('No se pudo guardar el cambio') }
+  } catch { showAlert('No se pudo guardar el cambio') }
   finally { setBusy(busyEl, false) } // loadSounds reconstruye en éxito; restaura en error
 }
 
@@ -2612,6 +2622,23 @@ document.getElementById('sound-form').addEventListener('submit', async (e) => {
 })
 
 // Modal: crear carpeta (acción dedicada; las carpetas NO se crean al subir sonido)
+// Modal de aviso genérico. Reemplaza a alert(): muestra un mensaje con un solo
+// botón. Se cierra con el botón, con clic fuera o con Escape.
+function showAlert(message, title = 'Aviso') {
+  document.getElementById('alert-title').textContent = title
+  document.getElementById('alert-message').textContent = message
+  document.getElementById('alert-modal').style.display = 'flex'
+  document.getElementById('alert-ok').focus()
+}
+function closeAlertModal() { document.getElementById('alert-modal').style.display = 'none' }
+document.getElementById('alert-ok').addEventListener('click', closeAlertModal)
+document.getElementById('alert-modal').addEventListener('click', (e) => {
+  if (e.target.id === 'alert-modal') closeAlertModal()
+})
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && document.getElementById('alert-modal').style.display === 'flex') closeAlertModal()
+})
+
 // Modal genérico para editar un nombre. Reemplaza a prompt(). Recibe el texto a
 // mostrar y un callback async que recibe el valor nuevo (ya recortado).
 let editOnSave = null, editAllowEmpty = false
