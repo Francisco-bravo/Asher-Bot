@@ -113,6 +113,16 @@
   .mtab.active { background: var(--panel3); color: var(--text); border-color: transparent; }
   .mpage { display: none; }
   .mpage.active { display: block; }
+  /* Tabs internos de Biblioteca (Canciones / Playlists) */
+  .ltab {
+    padding: 7px 14px; border: var(--border); border-radius: 8px;
+    background: var(--panel); color: var(--muted); cursor: pointer;
+    font-size: .88rem; font-weight: 600; transition: color .12s, background .12s;
+  }
+  .ltab:hover { color: var(--text); }
+  .ltab.active { background: var(--panel3); color: var(--text); border-color: transparent; }
+  .lpage { display: none; }
+  .lpage.active { display: block; }
 
   /* Filas de la biblioteca */
   .lib-item {
@@ -602,20 +612,31 @@
     background: var(--accent); color: #fff; font-weight: 600;
   }
   .pl-create button:hover { background: var(--accent2); }
-  .playlists-list { display: flex; flex-direction: column; gap: 6px; }
-  .pl-row {
-    display: flex; align-items: center; gap: 12px; cursor: pointer;
-    background: var(--panel); border: var(--border); border-radius: 12px; padding: 10px 14px;
-    transition: background .1s;
+  /* Playlists como tarjetas, con carátula mosaico de las 4 primeras canciones */
+  .playlists-list {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 16px;
   }
-  .pl-row:hover { background: var(--panel3); }
-  .pl-ico { font-size: 1.2rem; flex: none; }
-  .pl-info { flex: 1; min-width: 0; }
-  .pl-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .pl-meta { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: .78rem; margin-top: 2px; }
+  .playlists-list .empty { grid-column: 1 / -1; }
+  .pl-card {
+    cursor: pointer; background: var(--panel); border: var(--border); border-radius: 12px;
+    padding: 10px; transition: background .12s;
+  }
+  .pl-card:hover { background: var(--panel3); }
+  .pl-cover {
+    position: relative; width: 100%; aspect-ratio: 1 / 1; border-radius: 8px;
+    overflow: hidden; background: var(--panel2); margin-bottom: 10px;
+    display: grid; place-items: center;
+  }
+  .pl-cover::after { content: '🎶'; font-size: 2.4rem; opacity: .45; }
+  .pl-cover.has::after { content: none; }
+  .pl-cover.single img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  .pl-cover.mosaic { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; gap: 2px; }
+  .pl-cover.mosaic img { width: 100%; height: 100%; object-fit: cover; }
+  .pl-name { font-weight: 600; font-size: .92rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pl-meta { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: .78rem; margin-top: 4px; }
+  .pl-meta span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .pl-av { width: 18px; height: 18px; border-radius: 50%; object-fit: cover; flex: none; }
   .pl-ph { display: grid; place-items: center; background: var(--panel3); font-size: .6rem; font-weight: 700; }
-  .pl-open { color: var(--muted); font-size: 1.3rem; flex: none; }
 
   /* Modal de playlist */
   .pl-modal { max-width: 920px; max-height: 90vh; display: flex; flex-direction: column; }
@@ -828,19 +849,21 @@
     </div>
 
     <div class="subpage" id="sub-library">
-      <div class="pl-section">
-        <div class="pl-head">
-          <h3>🎶 Playlists</h3>
-        </div>
+      <div class="subtabs ltabs">
+        <button class="ltab active" data-ltab="songs">🎵 Canciones</button>
+        <button class="ltab" data-ltab="playlists">🎶 Playlists</button>
+      </div>
+      <div class="lpage active" id="lpage-songs">
+        <input type="text" id="library-search" class="sound-search" placeholder="🔍 Buscar canción en la biblioteca...">
+        <div id="library-list"></div>
+      </div>
+      <div class="lpage" id="lpage-playlists">
         <div class="pl-create">
           <input type="text" id="pl-new-name" placeholder="Nombre de la nueva playlist..." maxlength="80" onkeydown="if(event.key==='Enter')createPlaylist()">
           <button onclick="createPlaylist()">➕ Crear</button>
         </div>
         <div id="playlists-list" class="playlists-list"></div>
       </div>
-      <h3 class="pl-songs-title">🎵 Canciones</h3>
-      <input type="text" id="library-search" class="sound-search" placeholder="🔍 Buscar canción en la biblioteca...">
-      <div id="library-list"></div>
     </div>
   </div>
 
@@ -1110,6 +1133,16 @@ document.querySelectorAll('.subtab').forEach(st => {
     if (st.dataset.sub === 'stats') loadStats()
     if (st.dataset.sub === 'manage') loadSoundAdmin()
     if (st.dataset.sub === 'audit') loadSoundAudit()
+  }
+})
+
+// Tabs internos de Biblioteca (Canciones / Playlists)
+document.querySelectorAll('.ltab').forEach(lt => {
+  lt.onclick = () => {
+    document.querySelectorAll('.ltab').forEach(t => t.classList.remove('active'))
+    document.querySelectorAll('.lpage').forEach(p => p.classList.remove('active'))
+    lt.classList.add('active')
+    document.getElementById('lpage-' + lt.dataset.ltab).classList.add('active')
   }
 })
 
@@ -2034,15 +2067,27 @@ function renderPlaylists() {
     const av = p.owner_avatar
       ? `<img class="pl-av" src="${esc(p.owner_avatar)}" alt="">`
       : `<span class="pl-av pl-ph">${esc((author[0] || '?').toUpperCase())}</span>`
-    return `<div class="pl-row" onclick="showPlaylist(${p.id})">
-      <span class="pl-ico">🎶</span>
-      <div class="pl-info">
-        <div class="pl-name">${esc(p.name)}</div>
-        <div class="pl-meta">${av}<span>por ${author}${mine ? ' (tú)' : ''} · ${p.item_count} ${p.item_count === 1 ? 'canción' : 'canciones'}</span></div>
-      </div>
-      <span class="pl-open">›</span>
+    return `<div class="pl-card" onclick="showPlaylist(${p.id})">
+      ${playlistCoverHTML(p.cover_ids)}
+      <div class="pl-name" title="${esc(p.name)}">${esc(p.name)}</div>
+      <div class="pl-meta">${av}<span>por ${author}${mine ? ' (tú)' : ''} · ${p.item_count} ${p.item_count === 1 ? 'canción' : 'canciones'}</span></div>
     </div>`
   }).join('')
+}
+
+// Carátula de la playlist: mosaico 2x2 con las 4 primeras canciones que tengan
+// arte (como YouTube Music). Con menos de 4, una sola carátula; sin ninguna,
+// el marcador 🎶.
+function playlistCoverHTML(coverIds) {
+  const ids = (coverIds || []).slice(0, 4)
+  if (ids.length >= 4) {
+    const imgs = ids.map(id => `<img src="${esc(webUrl('/art/' + id))}" alt="" onerror="this.style.visibility='hidden'">`).join('')
+    return `<div class="pl-cover mosaic has">${imgs}</div>`
+  }
+  if (ids.length >= 1) {
+    return `<div class="pl-cover single has"><img src="${esc(webUrl('/art/' + ids[0]))}" alt="" onerror="this.closest('.pl-cover').classList.remove('has')"></div>`
+  }
+  return `<div class="pl-cover"></div>`
 }
 
 async function createPlaylist() {
