@@ -863,9 +863,20 @@ async function resolveInput(url) {
 }
 
 // ── Comandos del motor ────────────────────────────────────────────────────
-function addToQueue(url, voiceChannelId, guildId, textChannelId, title) {
+// Forma { id, name, avatar } de quién pidió la canción, desde un GuildMember de
+// Discord (comandos !p y slash). Mismo shape que el user de los sonidos.
+function requesterFromMember(member) {
+  if (!member) return null
+  return {
+    id: member.id,
+    name: member.displayName || member.user?.username || 'Alguien',
+    avatar: member.displayAvatarURL ? member.displayAvatarURL() : null,
+  }
+}
+
+function addToQueue(url, voiceChannelId, guildId, textChannelId, title, addedBy = null) {
   if (queue.length >= MAX_QUEUE) throw new Error(`La cola está llena (máximo ${MAX_QUEUE})`)
-  const item = { url, title: title || url, duration: null, voiceChannelId, guildId, textChannelId }
+  const item = { url, title: title || url, duration: null, voiceChannelId, guildId, textChannelId, addedBy }
   // La metadata (título/duración) NO se pide aquí para no lanzar otro yt-dlp que
   // compita con el arranque del stream; la rellena backgroundWork cuando ya suena.
   queue.push(item)
@@ -1063,7 +1074,7 @@ client.on('interactionCreate', async (interaction) => {
     }
     let r
     try {
-      r = addToQueue(resolved.url, member.voice.channel.id, interaction.guildId, interaction.channelId, resolved.title)
+      r = addToQueue(resolved.url, member.voice.channel.id, interaction.guildId, interaction.channelId, resolved.title, requesterFromMember(member))
     } catch (err) {
       await interaction.editReply(err.message)
       return
@@ -1306,7 +1317,7 @@ client.on('messageCreate', async (message) => {
     }
     let r
     try {
-      r = addToQueue(resolved.url, member.voice.channel.id, message.guildId, message.channelId, resolved.title)
+      r = addToQueue(resolved.url, member.voice.channel.id, message.guildId, message.channelId, resolved.title, requesterFromMember(member))
     } catch (err) {
       await message.reply(err.message)
       return
@@ -1363,10 +1374,10 @@ function getState() {
     current: current ? { url: current.url, title: current.title, duration: current.duration, songId: current.songId ?? null } : null,
     elapsed: elapsed(),
     paused: musicPlayer.state.status === AudioPlayerStatus.Paused,
-    queue: queue.map(i => ({ url: i.url, title: i.title, duration: i.duration })),
+    queue: queue.map(i => ({ url: i.url, title: i.title, duration: i.duration, addedBy: i.addedBy || null })),
     // Reproducidas recientes (en memoria), de más antigua a más reciente,
     // para mostrarlas en gris en la cola sin que desaparezcan.
-    played: history.slice(-20).map(i => ({ url: i.url, title: i.title, duration: i.duration })),
+    played: history.slice(-20).map(i => ({ url: i.url, title: i.title, duration: i.duration, addedBy: i.addedBy || null })),
     historyCount: history.length,
     connected: !!connection,
     voiceChannel: currentChannelName,
@@ -1529,7 +1540,9 @@ http.createServer(async (req, res) => {
           const resolved = await resolveInput(body.url)
           const t = currentVoiceTarget()
           if (!t) return sendJson({ error: 'El bot no está en un canal de voz' }, 400)
-          const r = addToQueue(resolved.url, t.vcId, t.gId, null, resolved.title)
+          const pu = panelUser(req)
+          const addedBy = pu ? { id: pu.id, name: pu.display_name || pu.username, avatar: pu.avatar_url || null } : null
+          const r = addToQueue(resolved.url, t.vcId, t.gId, null, resolved.title, addedBy)
           return sendJson({ ok: true, ...r })
         }
         case '/api/music/cache': {
@@ -1543,7 +1556,9 @@ http.createServer(async (req, res) => {
           if (!song) return sendJson({ error: 'Canción no encontrada' }, 404)
           const t = currentVoiceTarget()
           if (!t) return sendJson({ error: 'El bot no está en un canal de voz' }, 400)
-          const r = addToQueue(song.source_url, t.vcId, t.gId, null, song.title || song.source_url)
+          const pu = panelUser(req)
+          const addedBy = pu ? { id: pu.id, name: pu.display_name || pu.username, avatar: pu.avatar_url || null } : null
+          const r = addToQueue(song.source_url, t.vcId, t.gId, null, song.title || song.source_url, addedBy)
           return sendJson({ ok: true, ...r })
         }
         case '/api/skip': return sendJson({ ok: cmdSkip() })

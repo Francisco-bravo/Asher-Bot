@@ -349,6 +349,11 @@
   .queue-item .grip { color: var(--muted); cursor: grab; user-select: none; }
   .queue-item .num { color: var(--muted); min-width: 22px; font-variant-numeric: tabular-nums; }
   .queue-item .title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Chip "agregado por" (cola y reproducidas) */
+  .q-by { display: inline-flex; align-items: center; gap: 5px; flex: none; max-width: 130px; color: var(--muted); font-size: .76rem; }
+  .q-by-av { width: 18px; height: 18px; border-radius: 50%; object-fit: cover; flex: none; }
+  .q-by-ph { display: grid; place-items: center; background: var(--panel3); font-size: .6rem; }
+  .q-by-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .queue-item button {
     border: none; background: transparent; color: var(--muted);
     cursor: pointer; font-size: 1rem; padding: 4px;
@@ -456,6 +461,8 @@
     animation: sn-in .18s ease;
   }
   @keyframes sn-in { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: none; } }
+  .sound-notif.leaving { animation: sn-out .2s ease forwards; pointer-events: none; }
+  @keyframes sn-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateX(20px); } }
   .sn-av { width: 34px; height: 34px; border-radius: 50%; object-fit: cover; flex: none; }
   .sn-av-ph { display: grid; place-items: center; background: var(--panel3); font-size: 1rem; }
   .sn-text { min-width: 0; }
@@ -1007,6 +1014,17 @@ function render() {
   fill.style.width = (state.current && state.current.duration)
     ? Math.min(100, state.elapsed / state.current.duration * 100) + '%' : '0%'
 
+  // Chip compacto "agregado por" (avatar + nombre de Discord/web) para una fila
+  // de la cola o de reproducidas. Vacío si no se registró quién la pidió.
+  function addedByHtml(addedBy) {
+    if (!addedBy) return ''
+    const name = esc(addedBy.name || 'Alguien')
+    const av = addedBy.avatar
+      ? `<img class="q-by-av" src="${esc(addedBy.avatar)}" alt="">`
+      : '<span class="q-by-av q-by-ph">👤</span>'
+    return `<span class="q-by" title="Agregado por ${name}">${av}<span class="q-by-name">${name}</span></span>`
+  }
+
   // No reconstruir la lista mientras se está arrastrando un elemento
   if (dragIndex === null) {
     const list = document.getElementById('queue-list')
@@ -1017,6 +1035,7 @@ function render() {
       rows.push(`<li class="track-played">
         <span class="status-ico" title="Ya reproducida">✓</span>
         <span class="title" title="${esc(item.url)}">${esc(item.title)}</span>
+        ${addedByHtml(item.addedBy)}
         <span class="num">${fmt(item.duration)}</span>
         <button class="re-add" data-url="${esc(item.url)}" title="Volver a agregar a la cola">↻</button>
       </li>`)
@@ -1035,6 +1054,7 @@ function render() {
         <span class="grip" title="Arrastra para reordenar">☰</span>
         <span class="num">${i + 1}.</span>
         <span class="title" title="${esc(item.url)}">${esc(item.title)}</span>
+        ${addedByHtml(item.addedBy)}
         <span class="num">${fmt(item.duration)}</span>
         <button class="del" onclick="api('/api/queue/remove',{index:${i}})" title="Quitar">✕</button>
       </li>`)
@@ -1235,19 +1255,43 @@ function updatePlayingButtons() {
 // Notificación en vivo por cada sonido que suena: nombre + quién lo reproduce.
 // Aparece al dispararse y desaparece sola cuando el sonido termina (sale de
 // state.playingSounds), por lo que "dura lo que está sonando".
+// Reconcilia el DOM por el `id` único de cada sonido en lugar de reconstruir
+// todo el innerHTML en cada render(): así los nodos ya visibles se quedan
+// intactos (sin re-disparar la animación de entrada ni recargar el avatar) y
+// solo entran los sonidos nuevos / salen los que terminaron. Evita el parpadeo.
 function renderSoundNotifs() {
   const wrap = document.getElementById('sound-notifs')
   if (!wrap) return
   const playing = (state && state.playingSounds) || []
-  wrap.innerHTML = playing.map(p => {
+  const ids = new Set(playing.map(p => String(p.id)))
+
+  // Quitar (con animación de salida) las notificaciones de sonidos que terminaron
+  const existing = new Map()
+  for (const node of [...wrap.children]) {
+    if (ids.has(node.dataset.id)) {
+      existing.set(node.dataset.id, node)
+    } else if (!node.classList.contains('leaving')) {
+      node.classList.add('leaving')
+      node.addEventListener('animationend', () => node.remove(), { once: true })
+    }
+  }
+
+  // Agregar solo los sonidos nuevos (los existentes no se tocan)
+  for (const p of playing) {
+    const id = String(p.id)
+    if (existing.has(id)) continue
     const who = p.user ? esc(p.user.name) : 'Alguien'
     const av = p.user && p.user.avatar
       ? `<img class="sn-av" src="${esc(p.user.avatar)}" alt="">`
       : '<span class="sn-av sn-av-ph">🔊</span>'
-    return `<div class="sound-notif">${av}<div class="sn-text">` +
+    const div = document.createElement('div')
+    div.className = 'sound-notif'
+    div.dataset.id = id
+    div.innerHTML = `${av}<div class="sn-text">` +
       `<div class="sn-label">🔊 ${esc(p.label || 'Sonido')}</div>` +
-      `<div class="sn-who">${who} lo está reproduciendo</div></div></div>`
-  }).join('')
+      `<div class="sn-who">${who} lo está reproduciendo</div></div>`
+    wrap.appendChild(div)
+  }
 }
 
 // ── Estadísticas de sonidos (solo admin) ──
