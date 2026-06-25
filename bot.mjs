@@ -68,7 +68,6 @@ const PANEL_URL = (process.env.PANEL_URL || `http://localhost:${PORT}`).replace(
 // coma en PANEL_ORIGIN; en dev cualquier localhost se permite automáticamente.
 const PANEL_ORIGINS = new Set((process.env.PANEL_ORIGIN || '').split(',').map(s => s.trim().replace(/\/$/, '')).filter(Boolean))
 const SOUND_EXTS = new Set(['.mp3', '.wav', '.ogg', '.m4a', '.flac', '.webm'])
-const MUSIC_DUCK = 0.35 // volumen de la música mientras suena un efecto
 const MAX_QUEUE = 100
 const MAX_HISTORY = 100
 
@@ -76,12 +75,16 @@ const MAX_HISTORY = 100
 // se aplica encima de la igualación por loudness, a todos por igual. Es el único
 // volumen de sonidos: ya no hay slider por-usuario (todos suenan igual, normalizados).
 let soundBaseVolume = 1
+// Atenuación de la música mientras suena un efecto (ducking): factor 0..1 con el
+// que se multiplica la música. 0.35 = la música baja al 35% (una bajada del 65%).
+let musicDuck = 0.35
 try {
   const s = JSON.parse(readFileSync(SETTINGS_FILE, 'utf8'))
   soundBaseVolume = s.soundBaseVolume ?? 1
+  musicDuck = s.musicDuck ?? 0.35
 } catch {}
 function saveSettings() {
-  try { writeFileSync(SETTINGS_FILE, JSON.stringify({ soundBaseVolume })) } catch {}
+  try { writeFileSync(SETTINGS_FILE, JSON.stringify({ soundBaseVolume, musicDuck })) } catch {}
 }
 
 if (!existsSync(SOUNDS_DIR)) mkdirSync(SOUNDS_DIR, { recursive: true })
@@ -270,7 +273,7 @@ class MixerStream extends Readable {
   _mix(chunk) {
     const out = Buffer.from(chunk)
     for (let i = 0; i + 1 < out.length; i += 2) {
-      out.writeInt16LE((out.readInt16LE(i) * MUSIC_DUCK) | 0, i)
+      out.writeInt16LE((out.readInt16LE(i) * musicDuck) | 0, i)
     }
     for (const ov of [...this.overlays]) {
       if (ov.ended && ov.length === 0) { this.overlays.delete(ov); continue }
@@ -1377,6 +1380,15 @@ function cmdSoundBaseVolume(v) {
   return true
 }
 
+// Atenuación de la música al sonar un efecto. `v` = factor 0..1 (volumen de la
+// música durante el efecto). Aplica en vivo (los mixers leen `musicDuck`).
+function cmdMusicDuck(v) {
+  if (typeof v !== 'number' || isNaN(v)) return false
+  musicDuck = Math.min(1, Math.max(0, v))
+  saveSettings()
+  return true
+}
+
 // Sonidos que siguen reproduciéndose; limpia de paso las entradas terminadas
 function playingSounds() {
   const out = []
@@ -1509,6 +1521,7 @@ function getState() {
     voiceChannel: currentChannelName,
     playingSounds: playingSounds(),
     soundBaseVolume,
+    musicDuck,
   }
 }
 
@@ -1820,6 +1833,10 @@ http.createServer(async (req, res) => {
         case '/api/sound/base-volume': {
           if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)
           return sendJson({ ok: cmdSoundBaseVolume(body.volume), soundBaseVolume })
+        }
+        case '/api/sound/music-duck': {
+          if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)
+          return sendJson({ ok: cmdMusicDuck(body.value), musicDuck })
         }
         case '/api/disconnect': {
           if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)

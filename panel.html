@@ -905,6 +905,18 @@
             <button id="btn-base-volume">Guardar</button>
           </div>
         </div>
+        <div class="stats-section">
+          <h3>🎚️ Atenuación de la música al sonar un sonido</h3>
+          <p class="hint" style="margin:0 0 12px">
+            Cuánto <b>baja</b> el volumen de la música mientras suena un efecto del soundboard.
+            Ej.: <b>-65%</b> deja la música al 35%; <b>-10%</b> casi no la baja; <b>0%</b> no la baja.
+          </p>
+          <div class="add-row" style="max-width:380px; align-items:center">
+            <input type="number" id="music-duck" step="5" min="0" max="100" value="65" style="max-width:110px">
+            <span id="music-duck-label" style="min-width:48px; font-weight:600; font-variant-numeric:tabular-nums">-65%</span>
+            <button id="btn-music-duck">Guardar</button>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -1328,7 +1340,7 @@ document.querySelectorAll('.mtab').forEach(mt => {
     document.querySelectorAll('.mpage').forEach(p => p.classList.remove('active'))
     mt.classList.add('active')
     document.getElementById('mpage-' + mt.dataset.mtab).classList.add('active')
-    if (mt.dataset.mtab === 'vars') syncBaseVolumeInput()
+    if (mt.dataset.mtab === 'vars') { syncBaseVolumeInput(); syncMusicDuckInput() }
   }
 })
 
@@ -1346,6 +1358,34 @@ document.getElementById('btn-base-volume').addEventListener('click', async () =>
   try {
     const data = await api('/api/sound/base-volume', { volume: v })
     if (data && data.ok) toast('Volumen base guardado ✓') // api() ya avisa si falla
+  } finally { btn.disabled = false; btn.textContent = orig }
+})
+
+// Atenuación de la música (ducking): el input es la BAJADA en %; musicDuck del
+// estado es el factor 0..1 (volumen de la música durante el efecto).
+function syncMusicDuckInput() {
+  const inp = document.getElementById('music-duck')
+  if (!inp || !state || state.musicDuck == null) return
+  const pct = Math.round((1 - state.musicDuck) * 100)
+  if (document.activeElement !== inp) inp.value = pct
+  updateMusicDuckLabel()
+}
+function updateMusicDuckLabel() {
+  const inp = document.getElementById('music-duck'), lbl = document.getElementById('music-duck-label')
+  if (inp && lbl) lbl.textContent = '-' + Math.max(0, Math.min(100, Math.round(Number(inp.value) || 0))) + '%'
+}
+document.getElementById('music-duck').addEventListener('input', updateMusicDuckLabel)
+document.getElementById('btn-music-duck').addEventListener('click', async () => {
+  const inp = document.getElementById('music-duck')
+  let pct = Number(inp.value)
+  if (!Number.isFinite(pct)) { toast('Valor inválido'); return }
+  pct = Math.max(0, Math.min(100, pct))
+  const value = 1 - pct / 100   // factor de la música durante el efecto
+  const btn = document.getElementById('btn-music-duck')
+  btn.disabled = true; const orig = btn.textContent; btn.textContent = 'Guardando...'
+  try {
+    const data = await api('/api/sound/music-duck', { value })
+    if (data && data.ok) toast('Atenuación guardada ✓')
   } finally { btn.disabled = false; btn.textContent = orig }
 })
 
