@@ -221,13 +221,6 @@
   }
 
   /* Soundboard: panel doble estilo Soundpad */
-  .vol-row {
-    display: flex; align-items: center; gap: 12px;
-    background: var(--panel); border: var(--border); border-radius: 12px;
-    padding: 12px 16px; margin-bottom: 14px;
-  }
-  .vol-row input[type="range"] { flex: 1; accent-color: var(--accent); height: 6px; cursor: pointer; }
-  .vol-row .vol-label { min-width: 46px; text-align: right; color: var(--text); font-size: .9rem; font-variant-numeric: tabular-nums; }
   .sb-layout { display: flex; gap: 14px; align-items: stretch; }
   .sb-sidebar {
     width: 240px; flex-shrink: 0; background: var(--panel); border: var(--border);
@@ -798,11 +791,6 @@
       <button class="subtab" id="subtab-audit" data-sub="audit">🕵️ Auditoría</button>
     </div>
     <div class="subpage active" id="sub-board">
-      <div class="vol-row">
-        <span>🔉</span>
-        <input type="range" id="snd-vol" min="0" max="150" step="5" value="90" title="Volumen de los sonidos">
-        <span class="vol-label" id="snd-vol-label">90%</span>
-      </div>
       <div class="sb-layout">
         <div class="sb-sidebar" id="sb-sidebar"></div>
         <div class="sb-main">
@@ -1214,7 +1202,8 @@ function applyView(mode) {
   document.body.classList.toggle('tabs-on-pc', mode === 'tabs')
   viewToggle.textContent = mode === 'tabs' ? '🔲 Vista dividida' : '🗂️ Pestañas'
 }
-let viewMode = localStorage.getItem('panelView') === 'tabs' ? 'tabs' : 'split'
+// Por defecto en PC se ve por pestañas; solo se usa vista dividida si el usuario la eligió.
+let viewMode = localStorage.getItem('panelView') === 'split' ? 'split' : 'tabs'
 applyView(viewMode)
 viewToggle.onclick = () => {
   viewMode = viewMode === 'tabs' ? 'split' : 'tabs'
@@ -1401,7 +1390,6 @@ function render() {
   }
 
   updatePlayingButtons()
-  updateVolumeUI()
   renderSoundNotifs()
 
   const npTitle = state.current ? state.current.title : 'Nada reproduciéndose'
@@ -1636,26 +1624,6 @@ document.getElementById('sound-search').addEventListener('input', renderSoundGri
 document.getElementById('sound-search').addEventListener('keydown', (e) => {
   if (e.key === 'Escape') { e.target.value = ''; renderSoundGrid() }
 })
-
-// ── Volumen de sonidos ──
-const volSlider = document.getElementById('snd-vol')
-const volLabel = document.getElementById('snd-vol-label')
-let volTouchedAt = 0
-
-volSlider.addEventListener('input', () => {
-  volTouchedAt = Date.now()
-  volLabel.textContent = volSlider.value + '%'
-  clearTimeout(volSlider._t)
-  volSlider._t = setTimeout(() => api('/api/sound/volume', { volume: volSlider.value / 100 }), 150)
-})
-
-function updateVolumeUI() {
-  // No pisar el slider mientras el usuario lo está moviendo
-  if (!state || state.soundVolume == null || Date.now() - volTouchedAt < 1500) return
-  const pct = Math.round(state.soundVolume * 100)
-  volSlider.value = pct
-  volLabel.textContent = pct + '%'
-}
 
 function updatePlayingButtons() {
   const playing = (state && state.playingSounds) || []

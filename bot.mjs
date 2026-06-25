@@ -72,18 +72,16 @@ const MUSIC_DUCK = 0.35 // volumen de la música mientras suena un efecto
 const MAX_QUEUE = 100
 const MAX_HISTORY = 100
 
-// Volumen de los efectos del soundboard, regulable desde el panel y persistido
-let soundVolume = 0.9
 // Volumen BASE de los sonidos: multiplicador global (1 = normal, 2 = el doble),
-// se aplica encima de la igualación por loudness, a todos por igual.
+// se aplica encima de la igualación por loudness, a todos por igual. Es el único
+// volumen de sonidos: ya no hay slider por-usuario (todos suenan igual, normalizados).
 let soundBaseVolume = 1
 try {
   const s = JSON.parse(readFileSync(SETTINGS_FILE, 'utf8'))
-  soundVolume = s.soundVolume ?? 0.9
   soundBaseVolume = s.soundBaseVolume ?? 1
 } catch {}
 function saveSettings() {
-  try { writeFileSync(SETTINGS_FILE, JSON.stringify({ soundVolume, soundBaseVolume })) } catch {}
+  try { writeFileSync(SETTINGS_FILE, JSON.stringify({ soundBaseVolume })) } catch {}
 }
 
 if (!existsSync(SOUNDS_DIR)) mkdirSync(SOUNDS_DIR, { recursive: true })
@@ -280,7 +278,7 @@ class MixerStream extends Readable {
       if (avail === 0) continue
       const data = this._takeFrom(ov, avail)
       for (let i = 0; i + 1 < data.length && i + 1 < out.length; i += 2) {
-        let v = out.readInt16LE(i) + ((data.readInt16LE(i) * soundVolume * soundBaseVolume) | 0)
+        let v = out.readInt16LE(i) + ((data.readInt16LE(i) * soundBaseVolume) | 0)
         if (v > 32767) v = 32767
         else if (v < -32768) v = -32768
         out.writeInt16LE(v, i)
@@ -293,7 +291,7 @@ class MixerStream extends Readable {
 // Mixer del soundboard SIN música: base de SILENCIO sobre la que se mezclan N
 // sonidos a la vez (sin límite, sin "uno a la vez"). Paceado a tiempo real. Se
 // auto-cierra tras unos segundos sin sonidos y devuelve la conexión al player de
-// música. El volumen (soundVolume) se aplica al mezclar, en vivo.
+// música. El volumen base (soundBaseVolume) se aplica al mezclar, en vivo.
 class SoundMixer extends Readable {
   constructor() {
     super()
@@ -334,7 +332,7 @@ class SoundMixer extends Readable {
       if (avail === 0) continue
       const data = this._takeFrom(ov, avail)
       for (let i = 0; i + 1 < data.length; i += 2) {
-        let v = out.readInt16LE(i) + ((data.readInt16LE(i) * soundVolume * soundBaseVolume) | 0)
+        let v = out.readInt16LE(i) + ((data.readInt16LE(i) * soundBaseVolume) | 0)
         if (v > 32767) v = 32767
         else if (v < -32768) v = -32768
         out.writeInt16LE(v, i)
@@ -1350,14 +1348,6 @@ async function playSound(soundId, user = null) {
   return id
 }
 
-function cmdSoundVolume(v) {
-  if (typeof v !== 'number' || isNaN(v)) return false
-  soundVolume = Math.min(2, Math.max(0, v))
-  if (directResource) directResource.volume.setVolume(soundVolume)
-  saveSettings()
-  return true
-}
-
 function cmdSoundBaseVolume(v) {
   if (typeof v !== 'number' || isNaN(v)) return false
   soundBaseVolume = Math.min(5, Math.max(0, v)) // hasta 5x para subirlo bastante
@@ -1496,7 +1486,6 @@ function getState() {
     connected: !!connection,
     voiceChannel: currentChannelName,
     playingSounds: playingSounds(),
-    soundVolume,
     soundBaseVolume,
   }
 }
@@ -1622,7 +1611,7 @@ const MUSIC_CONTROL_PATHS = new Set([
   '/api/play', '/api/music/play',
   '/api/skip', '/api/previous', '/api/pause', '/api/resume', '/api/stop', '/api/seek',
   '/api/queue/remove', '/api/queue/reorder', '/api/queue/move',
-  '/api/sound', '/api/sound/stop', '/api/sound/volume',
+  '/api/sound', '/api/sound/stop',
 ])
 
 http.createServer(async (req, res) => {
@@ -1798,7 +1787,6 @@ http.createServer(async (req, res) => {
           return sendJson({ ok: true, id })
         }
         case '/api/sound/stop': return sendJson({ ok: cmdStopSound(body.id) })
-        case '/api/sound/volume': return sendJson({ ok: cmdSoundVolume(body.volume) })
         case '/api/sound/base-volume': {
           if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)
           return sendJson({ ok: cmdSoundBaseVolume(body.volume), soundBaseVolume })
