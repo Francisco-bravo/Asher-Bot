@@ -513,7 +513,7 @@ function ytdlpResolveMeta(url) {
 // Devuelve [] si el link no es una playlist o no tiene entradas.
 function ytdlpFlatPlaylist(url) {
   return new Promise((resolve, reject) => {
-    const proc = spawn(YTDLP, ytdlpPlaylistArgs(['--print', '%(url)s\t%(title)s\t%(duration)s\t%(playlist_title)s', url]))
+    const proc = spawn(YTDLP, ytdlpPlaylistArgs(['--print', '%(url)s\t%(title)s\t%(duration)s\t%(playlist_title)s\t%(thumbnail)s', url]))
     bgProc = proc
     let out = '', err = ''
     proc.stdout.on('data', d => out += d)
@@ -523,12 +523,13 @@ function ytdlpFlatPlaylist(url) {
       if (bgProc === proc) bgProc = null
       if (code !== 0 && !out.trim()) return reject(new Error(err.trim().split('\n').pop() || 'No se pudo leer la playlist'))
       const entries = out.trim().split('\n').filter(Boolean).map(line => {
-        const [u, title, dur, plTitle] = line.split('\t')
+        const [u, title, dur, plTitle, thumb] = line.split('\t')
         return {
           url: u,
           title: (title && title !== 'NA') ? title : u,
           duration: parseFloat(dur),
           playlistTitle: (plTitle && plTitle !== 'NA') ? plTitle : null,
+          thumbnail: (thumb && thumb !== 'NA' && /^https?:\/\//i.test(thumb)) ? thumb : null,
         }
       }).filter(e => e.url && /^https?:\/\//i.test(e.url))
       resolve(entries)
@@ -576,20 +577,41 @@ function downloadToFile(url, destPath) {
 // Obtiene la carátula con yt-dlp y la guarda con la misma lógica del caché:
 // se baja una sola vez y queda persistida en el object-store (art_key). Si ya
 // está guardada, no hace nada. Best-effort: nunca rompe la reproducción.
-async function ensureSongArt(song, sourceUrl) {
-  if (!song || song.art_key) return
+// Baja una imagen (con timeout) desde su URL y la guarda como carátula del
+// sonido. Devuelve true si la guardó. No requiere descargar el audio.
+async function storeArtFromUrl(song, thumb) {
+  if (!song || song.art_key) return false
+  if (!thumb || !/^https?:\/\//i.test(thumb)) return false
+  const ctrl = new AbortController()
+  const t = setTimeout(() => ctrl.abort(), 8000)
   try {
-    const thumb = await ytdlpPrint(sourceUrl, 'thumbnail')
-    if (!thumb || !/^https?:\/\//i.test(thumb)) return
-    const res = await fetch(thumb)
-    if (!res.ok) return
+    const res = await fetch(thumb, { signal: ctrl.signal })
+    if (!res.ok) return false
     const buf = Buffer.from(await res.arrayBuffer())
-    if (!buf.length) return
+    if (!buf.length) return false
     let ext = (thumb.split(/[?#]/)[0].split('.').pop() || '').toLowerCase()
     if (!/^(jpg|jpeg|png|webp|gif)$/.test(ext)) ext = 'jpg'
     await art.store(song.id, buf, ext)
     song.art_key = `art/${song.id}.${ext}`
-  } catch { /* sin carátula: no pasa nada */ }
+    return true
+  } catch { return false } finally { clearTimeout(t) }
+}
+
+async function ensureSongArt(song, sourceUrl) {
+  if (!song || song.art_key) return
+  try { await storeArtFromUrl(song, await ytdlpPrint(sourceUrl, 'thumbnail')) }
+  catch { /* sin carátula: no pasa nada */ }
+}
+
+// Baja las carátulas de un set de canciones (con poca concurrencia), usando la
+// miniatura que ya trae la playlist. Solo la imagen, sin tocar el audio.
+async function fetchArtForSongs(items) {
+  const pending = items.filter(it => it.thumb && it.song && !it.song.art_key)
+  let i = 0
+  const worker = async () => {
+    while (i < pending.length) { const it = pending[i++]; try { await storeArtFromUrl(it.song, it.thumb) } catch {} }
+  }
+  await Promise.all(Array.from({ length: Math.min(6, pending.length) }, worker))
 }
 
 // Descarga a la caché SIN reproducir ni contar reproducción ("forzar caché").
@@ -1725,11 +1747,15 @@ http.createServer(async (req, res) => {
           try {
             const entries = (await ytdlpFlatPlaylist(body.url)).slice(0, 200) // tope de seguridad
             if (!entries.length) return sendJson({ error: 'No se encontraron canciones (¿es un link de playlist?)' }, 400)
-            const songIds = entries.map(e => {
-              const song = musicCache.findByUrl(e.url) || musicCache.upsertSong({ sourceUrl: e.url, title: e.title })
-              return song.id
-            })
+            const items = entries.map(e => ({
+              song: musicCache.findByUrl(e.url) || musicCache.upsertSong({ sourceUrl: e.url, title: e.title }),
+              thumb: e.thumbnail,
+            }))
+            const songIds = items.map(it => it.song.id)
             const name = entries.find(e => e.playlistTitle)?.playlistTitle || null
+            // Trae solo las carátulas (imagen, sin bajar audio) de la playlist, con
+            // tope de tiempo: lo que no alcance se completa en 2º plano (backfill).
+            await Promise.race([fetchArtForSongs(items), new Promise(r => setTimeout(r, 12000))])
             return sendJson({ ok: true, songIds, count: songIds.length, name })
           } catch (e) {
             return sendJson({ error: e.message || 'No se pudo resolver la playlist' }, 400)
