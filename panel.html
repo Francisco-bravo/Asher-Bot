@@ -349,6 +349,12 @@
   .queue-item .grip { color: var(--muted); cursor: grab; user-select: none; }
   .queue-item .num { color: var(--muted); min-width: 22px; font-variant-numeric: tabular-nums; }
   .queue-item .title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Carátula miniatura en la cola / reproducidas / sonando */
+  .q-art {
+    width: 32px; height: 32px; border-radius: 6px; flex: none; overflow: hidden;
+    background: var(--panel3) center/cover no-repeat;
+    display: grid; place-items: center; font-size: .85rem; color: var(--muted);
+  }
   /* Chip "agregado por" (cola y reproducidas) */
   .q-by { display: inline-flex; align-items: center; gap: 5px; flex: none; max-width: 130px; color: var(--muted); font-size: .76rem; }
   .q-by-av { width: 18px; height: 18px; border-radius: 50%; object-fit: cover; flex: none; }
@@ -448,6 +454,17 @@
   .modal-actions .cancel:hover { background: var(--bg); color: var(--text); }
   .modal-actions button:disabled { opacity: .5; cursor: not-allowed; }
 
+  /* Aviso cuando el usuario no está en el canal de voz del bot y por tanto no
+     puede controlar la música/sonidos. */
+  .control-lock {
+    display: flex; align-items: center; gap: 10px;
+    background: color-mix(in srgb, var(--accent) 14%, var(--panel));
+    border: var(--border); border-left: 3px solid var(--accent);
+    border-radius: 12px; padding: 11px 16px; margin-bottom: 14px;
+    font-size: .9rem; color: var(--text);
+  }
+  .control-lock::before { content: '🔒'; font-size: 1.05rem; }
+
   /* Notificaciones en vivo "quién reproduce qué" (dura lo que suena el sonido) */
   #sound-notifs {
     position: fixed; top: 16px; right: 16px; z-index: 30;
@@ -513,6 +530,8 @@
       <div class="user-chip" id="user-chip" title="Sesión iniciada"></div>
     </div>
   </div>
+
+  <div id="control-lock" class="control-lock" style="display:none"></div>
 
   <div class="tabs">
     <button class="tab active" data-page="sounds">🔊 Soundboard</button>
@@ -1000,6 +1019,15 @@ function render() {
   const dcBtn = document.getElementById('btn-disconnect')
   if (dcBtn) dcBtn.disabled = !state.connected
 
+  // Aviso de bloqueo: si el bot está en un canal y este usuario no está en él
+  // (y no es admin), no puede controlar nada → se lo explicamos.
+  const lock = document.getElementById('control-lock')
+  if (lock) {
+    const blocked = state.connected && state.canControl === false
+    lock.style.display = blocked ? 'flex' : 'none'
+    if (blocked) lock.textContent = `Únete al canal de voz 🔊 ${state.voiceChannel || ''} para controlar la música y los sonidos.`
+  }
+
   updatePlayingButtons()
   updateVolumeUI()
   renderSoundNotifs()
@@ -1025,6 +1053,13 @@ function render() {
     return `<span class="q-by" title="Agregado por ${name}">${av}<span class="q-by-name">${name}</span></span>`
   }
 
+  // Carátula miniatura de una canción. Se usa background-image para que, si /art
+  // aún no está listo (404), no aparezca el icono de imagen rota; 🎵 si no hay id.
+  function artThumb(songId) {
+    if (!songId) return '<span class="q-art q-art-ph">🎵</span>'
+    return `<span class="q-art" style="background-image:url('${esc(webUrl('/art/' + songId))}')"></span>`
+  }
+
   // No reconstruir la lista mientras se está arrastrando un elemento
   if (dragIndex === null) {
     const list = document.getElementById('queue-list')
@@ -1034,6 +1069,7 @@ function render() {
     for (const item of played) {
       rows.push(`<li class="track-played">
         <span class="status-ico" title="Ya reproducida">✓</span>
+        ${artThumb(item.songId)}
         <span class="title" title="${esc(item.url)}">${esc(item.title)}</span>
         ${addedByHtml(item.addedBy)}
         <span class="num">${fmt(item.duration)}</span>
@@ -1044,6 +1080,7 @@ function render() {
     if (state.current) {
       rows.push(`<li class="track-current">
         <span class="status-ico" title="Sonando">▶</span>
+        ${artThumb(state.current.songId)}
         <span class="title" title="${esc(state.current.url)}">${esc(state.current.title)}</span>
         <span class="num">${fmt(state.current.duration)}</span>
       </li>`)
@@ -1053,6 +1090,7 @@ function render() {
       rows.push(`<li class="queue-item" draggable="true" data-index="${i}">
         <span class="grip" title="Arrastra para reordenar">☰</span>
         <span class="num">${i + 1}.</span>
+        ${artThumb(item.songId)}
         <span class="title" title="${esc(item.url)}">${esc(item.title)}</span>
         ${addedByHtml(item.addedBy)}
         <span class="num">${fmt(item.duration)}</span>

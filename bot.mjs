@@ -1064,6 +1064,10 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.reply({ content: 'Necesitas estar en un canal de voz para usar `/p`.', flags: 64 }) // 64 = efímero
       return
     }
+    if (!memberCanControl(member)) {
+      await interaction.reply({ content: `El bot ya está en **${currentChannelName}**. Únete a ese canal para usar \`/p\`.`, flags: 64 })
+      return
+    }
     await interaction.deferReply({ flags: 64 })
     let resolved
     try {
@@ -1087,6 +1091,10 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   if (interaction.isStringSelectMenu() && interaction.customId === 'mp_seekto') {
+    if (!memberCanControl(interaction.member)) {
+      await interaction.reply({ content: 'Debes estar en el canal de voz del bot para controlar la música.', flags: 64 }).catch(() => {})
+      return
+    }
     cmdSeek(Number(interaction.values[0]))
     try { await interaction.deferUpdate() } catch {}
     updatePanel()
@@ -1110,6 +1118,13 @@ client.on('interactionCreate', async (interaction) => {
 
   if (!interaction.isButton()) return
   const id = interaction.customId
+
+  // Los botones del panel de Discord controlan la reproducción: solo quien esté
+  // en el canal de voz del bot (admins exentos).
+  if (!memberCanControl(interaction.member)) {
+    await interaction.reply({ content: 'Debes estar en el canal de voz del bot para usar estos controles.', flags: 64 }).catch(() => {})
+    return
+  }
 
   if (id === 'mp_goto') {
     if (!current) {
@@ -1307,6 +1322,10 @@ client.on('messageCreate', async (message) => {
       await message.reply('Necesitas estar en un canal de voz para usar `!p`.')
       return
     }
+    if (!memberCanControl(member)) {
+      await message.reply(`El bot ya está en **${currentChannelName}**. Únete a ese canal para usar \`!p\`.`)
+      return
+    }
 
     let resolved
     try {
@@ -1326,6 +1345,13 @@ client.on('messageCreate', async (message) => {
       await message.reply({ content: `Agregado a la cola (posición ${r.position}) en **${member.voice.channel.name}**`, flags: 4096 })
     }
     await sendPanel(message.channelId)
+    return
+  }
+
+  // Controles de reproducción por texto: solo quien esté en el canal de voz del
+  // bot (admins exentos).
+  if (['!skip', '!prev', '!pause', '!resume', '!stop'].includes(content) && !memberCanControl(message.member)) {
+    await message.reply(`Debes estar en el canal de voz del bot${currentChannelName ? ` (**${currentChannelName}**)` : ''} para controlar la música.`)
     return
   }
 
@@ -1374,10 +1400,10 @@ function getState() {
     current: current ? { url: current.url, title: current.title, duration: current.duration, songId: current.songId ?? null } : null,
     elapsed: elapsed(),
     paused: musicPlayer.state.status === AudioPlayerStatus.Paused,
-    queue: queue.map(i => ({ url: i.url, title: i.title, duration: i.duration, addedBy: i.addedBy || null })),
+    queue: queue.map(i => ({ url: i.url, title: i.title, duration: i.duration, songId: i.songId ?? null, addedBy: i.addedBy || null })),
     // Reproducidas recientes (en memoria), de más antigua a más reciente,
     // para mostrarlas en gris en la cola sin que desaparezcan.
-    played: history.slice(-20).map(i => ({ url: i.url, title: i.title, duration: i.duration, addedBy: i.addedBy || null })),
+    played: history.slice(-20).map(i => ({ url: i.url, title: i.title, duration: i.duration, songId: i.songId ?? null, addedBy: i.addedBy || null })),
     historyCount: history.length,
     connected: !!connection,
     voiceChannel: currentChannelName,
@@ -1406,6 +1432,36 @@ function panelUser(req) {
 function isPanelAdmin(req) {
   const u = panelUser(req)
   return !!(u && rbac.isAdmin(u.id))
+}
+
+// ¿El usuario (por su Discord id) está ahora mismo en el canal de voz del bot?
+function isInBotVoiceChannel(userId) {
+  if (!connection || !currentChannelId || !userId) return false
+  const guild = client.guilds.cache.get(connection.joinConfig.guildId)
+  if (!guild) return false
+  const vs = guild.voiceStates.cache.get(String(userId))
+  return !!(vs && vs.channelId === currentChannelId)
+}
+
+// ¿El usuario del panel puede controlar la música/sonidos? Solo si es admin
+// (exento) o si está en el canal de voz del bot. El acceso por contraseña legada
+// se trata como admin.
+function canControlMusic(req) {
+  if (authorizedByPassword(req)) return true
+  const u = panelUser(req)
+  if (!u) return false
+  if (rbac.isAdmin(u.id)) return true
+  return isInBotVoiceChannel(u.id)
+}
+
+// Variante para comandos/botones de Discord: admin siempre; si el bot ya está en
+// un canal, el miembro debe estar en ESE canal; si no hay conexión, se permite
+// (el primero en pedir trae el bot a su canal).
+function memberCanControl(member) {
+  if (!member) return false
+  if (rbac.isAdmin(member.id)) return true
+  if (!connection || !currentChannelId) return true
+  return member.voice?.channelId === currentChannelId
 }
 
 // Fallback legado: HTTP Basic con PANEL_PASSWORD (solo si está configurada).
@@ -1469,6 +1525,15 @@ function listVoiceChannels() {
   return out
 }
 
+// Acciones del panel que solo puede ejecutar quien esté en el canal de voz del
+// bot (o un admin): reproducir/encolar, controles de reproducción y sonidos.
+const MUSIC_CONTROL_PATHS = new Set([
+  '/api/play', '/api/music/play',
+  '/api/skip', '/api/previous', '/api/pause', '/api/resume', '/api/stop', '/api/seek',
+  '/api/queue/remove', '/api/queue/reorder', '/api/queue/move',
+  '/api/sound', '/api/sound/stop', '/api/sound/volume',
+])
+
 http.createServer(async (req, res) => {
   const sendJson = (data, status = 200) => {
     res.writeHead(status, { 'Content-Type': 'application/json' })
@@ -1522,7 +1587,11 @@ http.createServer(async (req, res) => {
         res.end(html)
         return
       }
-      if (path === '/api/state') return sendJson(getState())
+      if (path === '/api/state') {
+        const st = getState()
+        st.canControl = canControlMusic(req)   // ¿este usuario puede tocar la música/sonidos?
+        return sendJson(st)
+      }
       if (path === '/api/sounds') {
         const pu = panelUser(req)
         return sendJson(soundLib.tree(soundLib.listForUser(pu ? pu.id : null), folders.list()))
@@ -1534,6 +1603,9 @@ http.createServer(async (req, res) => {
     }
     if (req.method === 'POST') {
       const body = await readBody(req)
+      if (MUSIC_CONTROL_PATHS.has(path) && !canControlMusic(req)) {
+        return sendJson({ error: 'Debes estar en el canal de voz del bot para controlar la música o los sonidos' }, 403)
+      }
       switch (path) {
         case '/api/play': {
           if (!body.url) return sendJson({ error: 'Falta la URL' }, 400)
