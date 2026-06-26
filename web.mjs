@@ -56,6 +56,14 @@ function parseCookies(req) {
 // deja SameSite=Lax sin Secure. Configurable por env para no romper dev.
 const COOKIE_DOMAIN = process.env.COOKIE_DOMAIN || ''           // ej: .aronne.dev
 const COOKIE_CROSS_SITE = process.env.COOKIE_CROSS_SITE === '1' // None;Secure
+// Prefijo para diferenciar entornos que comparten Domain=.aronne.dev (test vs
+// prod). Sin prefijo la cookie de un entorno pisa la del otro (mismo nombre y
+// dominio) y obliga a re-loguearse al saltar entre subdominios. Test usa
+// COOKIE_PREFIX=test_ ; prod lo deja vacío (cookie `sid`). bot.mjs usa el mismo.
+const COOKIE_PREFIX = process.env.COOKIE_PREFIX || ''
+const SID_COOKIE = COOKIE_PREFIX + 'sid'
+const OAUTH_STATE_COOKIE = COOKIE_PREFIX + 'oauth_state'
+const OAUTH_RETURN_COOKIE = COOKIE_PREFIX + 'oauth_return'
 function setCookie(res, name, value, { maxAge, clear } = {}) {
   const sameSite = COOKIE_CROSS_SITE ? 'None' : 'Lax'
   const attrs = [`${name}=${clear ? '' : encodeURIComponent(value)}`, 'Path=/', 'HttpOnly', `SameSite=${sameSite}`]
@@ -87,7 +95,7 @@ const send = (res, status, data) => {
 }
 
 function currentUser(req) {
-  const token = parseCookies(req).sid
+  const token = parseCookies(req)[SID_COOKIE]
   return token ? auth.getSession(token) : null
 }
 
@@ -102,10 +110,10 @@ function isSafeReturn(ret) {
 function authLoginRedirect(req, res, url) {
   if (!CLIENT_ID) return send(res, 500, { error: 'Falta DISCORD_CLIENT_ID en el entorno' })
   const state = randomBytes(16).toString('hex')
-  setCookie(res, 'oauth_state', state, { maxAge: 600 })
+  setCookie(res, OAUTH_STATE_COOKIE, state, { maxAge: 600 })
   // Guarda a dónde volver tras el login (p.ej. el panel del bot en otro puerto).
   const ret = url.searchParams.get('return')
-  if (ret && isSafeReturn(ret)) setCookie(res, 'oauth_return', ret, { maxAge: 600 })
+  if (ret && isSafeReturn(ret)) setCookie(res, OAUTH_RETURN_COOKIE, ret, { maxAge: 600 })
   const authUrl = 'https://discord.com/oauth2/authorize?' + new URLSearchParams({
     response_type: 'code',
     client_id: CLIENT_ID,
@@ -121,7 +129,7 @@ async function authCallback(req, res, url) {
   const code = url.searchParams.get('code')
   const state = url.searchParams.get('state')
   const cookies = parseCookies(req)
-  if (!code || !state || state !== cookies.oauth_state) {
+  if (!code || !state || state !== cookies[OAUTH_STATE_COOKIE]) {
     return send(res, 400, { error: 'Estado OAuth inválido' })
   }
   // Intercambiar el código por un token
@@ -160,12 +168,12 @@ async function authCallback(req, res, url) {
   if (wasNew) auth.assignRole(user.id, totalBefore === 0 ? 'admin' : 'user')
 
   const token = auth.createSession(user.id)
-  setCookie(res, 'sid', token, { maxAge: 30 * 24 * 60 * 60 })
-  setCookie(res, 'oauth_state', '', { clear: true })
+  setCookie(res, SID_COOKIE, token, { maxAge: 30 * 24 * 60 * 60 })
+  setCookie(res, OAUTH_STATE_COOKIE, '', { clear: true })
   // Vuelve al destino guardado (panel del bot) si es seguro; si no, a la home.
-  const ret = cookies.oauth_return
+  const ret = cookies[OAUTH_RETURN_COOKIE]
   const dest = ret && isSafeReturn(ret) ? ret : '/'
-  setCookie(res, 'oauth_return', '', { clear: true })
+  setCookie(res, OAUTH_RETURN_COOKIE, '', { clear: true })
   res.writeHead(302, { Location: dest })
   res.end()
 }
@@ -221,9 +229,9 @@ http.createServer(async (req, res) => {
     if (req.method === 'GET' && path === '/auth/login') return authLoginRedirect(req, res, url)
     if (req.method === 'GET' && path === '/auth/callback') return await authCallback(req, res, url)
     if (req.method === 'POST' && path === '/auth/logout') {
-      const token = parseCookies(req).sid
+      const token = parseCookies(req)[SID_COOKIE]
       if (token) auth.deleteSession(token)
-      setCookie(res, 'sid', '', { clear: true })
+      setCookie(res, SID_COOKIE, '', { clear: true })
       res.writeHead(302, { Location: '/' })
       res.end()
       return

@@ -63,6 +63,9 @@ const PANEL_PASSWORD = process.env.PANEL_PASSWORD || ''
 // y PANEL_URL es a dónde debe volver la web tras el login.
 const WEB_URL = (process.env.WEB_URL || 'http://localhost:8770').replace(/\/$/, '')
 const PANEL_URL = (process.env.PANEL_URL || `http://localhost:${PORT}`).replace(/\/$/, '')
+// Nombre de la cookie de sesión: debe coincidir con web.mjs (COOKIE_PREFIX).
+// Diferencia entornos que comparten Domain=.aronne.dev (test usa test_sid).
+const SID_COOKIE = (process.env.COOKIE_PREFIX || '') + 'sid'
 // Orígenes del navegador autorizados a llamar a esta API con credenciales (CORS).
 // En Pages el panel vive en otro subdominio (panel-test.aronne.dev). Lista por
 // coma en PANEL_ORIGIN; en dev cualquier localhost se permite automáticamente.
@@ -1536,7 +1539,7 @@ function parseCookies(req) {
 
 // Usuario del panel a partir de la cookie de sesión compartida con la web.
 function panelUser(req) {
-  const token = parseCookies(req).sid
+  const token = parseCookies(req)[SID_COOKIE]
   return token ? auth.getSession(token) : null
 }
 

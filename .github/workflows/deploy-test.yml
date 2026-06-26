@@ -21,6 +21,7 @@ jobs:
             ubuntu@144.22.62.84:~/
           ssh -i key.pem -o StrictHostKeyChecking=no ubuntu@144.22.62.84 "\
             echo 'Node en la VM:'; node -v; \
+            grep -q '^COOKIE_PREFIX=' ~/.env || echo 'COOKIE_PREFIX=test_' >> ~/.env; \
             sudo systemctl restart music-bot; \
             sudo systemctl restart music-web || echo 'music-web aún no configurado (Fase 3)'"
           rm key.pem
