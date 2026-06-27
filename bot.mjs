@@ -96,6 +96,9 @@ let soundBaseVolume = 1
 // Atenuación de la música mientras suena un efecto (ducking): factor 0..1 con el
 // que se multiplica la música. 0.35 = la música baja al 35% (una bajada del 65%).
 let musicDuck = 0.35
+// Volumen de la música (multiplicador 0..2; 1 = original). Se aplica en vivo al
+// mezclar. Editable desde la web (slider) y desde Discord (botones +/-).
+let musicVolume = 1
 // Objetivo de sonoridad (LUFS) al que se igualan los sonidos. Sube/baja el
 // volumen general SIN saturar (lo limita el techo de true-peak). Editable en el panel.
 let soundTargetLufs = TARGET_I
@@ -103,11 +106,12 @@ try {
   const s = JSON.parse(readFileSync(SETTINGS_FILE, 'utf8'))
   soundBaseVolume = s.soundBaseVolume ?? 1
   musicDuck = s.musicDuck ?? 0.35
+  if (s.musicVolume != null) musicVolume = s.musicVolume
   if (s.soundTargetLufs != null) soundTargetLufs = s.soundTargetLufs
 } catch {}
 soundTargetLufs = setTargetI(soundTargetLufs) // aplica el objetivo cargado
 function saveSettings() {
-  try { writeFileSync(SETTINGS_FILE, JSON.stringify({ soundBaseVolume, musicDuck, soundTargetLufs })) } catch {}
+  try { writeFileSync(SETTINGS_FILE, JSON.stringify({ soundBaseVolume, musicDuck, musicVolume, soundTargetLufs })) } catch {}
 }
 
 if (!existsSync(SOUNDS_DIR)) mkdirSync(SOUNDS_DIR, { recursive: true })
@@ -200,6 +204,17 @@ const SILENCE = Buffer.alloc(19200) // 50ms de silencio
 const BYTES_PER_MS = 192 // PCM s16le 48kHz estéreo
 const LEAD_BYTES = 96000 // ~500ms de adelanto máximo sobre lo reproducido
 
+// Multiplica en sitio las muestras PCM s16le por `factor`, con recorte a ±32767.
+function applyGainInPlace(buf, factor) {
+  for (let i = 0; i + 1 < buf.length; i += 2) {
+    let v = (buf.readInt16LE(i) * factor) | 0
+    if (v > 32767) v = 32767
+    else if (v < -32768) v = -32768
+    buf.writeInt16LE(v, i)
+  }
+  return buf
+}
+
 class MixerStream extends Readable {
   // getPlayedMs: cuántos ms lleva reproducidos el player. El mixer solo avanza
   // LEAD_BYTES por delante de eso; sin este freno, el encoder opus consume la
@@ -275,7 +290,12 @@ class MixerStream extends Readable {
         this.leftover = chunk.subarray(SILENCE.length)
         chunk = chunk.subarray(0, SILENCE.length)
       }
-      const out = this.overlays.size > 0 ? this._mix(chunk) : chunk
+      // Con sonidos encima → _mix (aplica ducking + volumen de música). Sin
+      // sonidos → solo el volumen de música (si no es 1; si es 1, pasa tal cual).
+      let out
+      if (this.overlays.size > 0) out = this._mix(chunk)
+      else if (musicVolume !== 1) out = applyGainInPlace(Buffer.from(chunk), musicVolume)
+      else out = chunk
       this.pushedBytes += out.length
       if (!this.push(out)) return
     }
@@ -296,9 +316,8 @@ class MixerStream extends Readable {
 
   _mix(chunk) {
     const out = Buffer.from(chunk)
-    for (let i = 0; i + 1 < out.length; i += 2) {
-      out.writeInt16LE((out.readInt16LE(i) * musicDuck) | 0, i)
-    }
+    // Música: atenuada por el ducking y escalada por el volumen de música.
+    applyGainInPlace(out, musicDuck * musicVolume)
     for (const ov of [...this.overlays]) {
       if (ov.ended && ov.length === 0) { this.overlays.delete(ov); continue }
       const avail = Math.min(out.length, ov.length) & ~1
@@ -1204,12 +1223,13 @@ function panelPayload() {
     .setColor(0x5865f2)
     .setTitle(PANEL_TITLE)
     .setDescription(lines.join('\n'))
-  if (currentChannelName) embed.setFooter({ text: `🔊 ${currentChannelName}` })
+  const volFooter = `Volumen música: ${Math.round(musicVolume * 100)}%`
+  embed.setFooter({ text: (currentChannelName ? `🔊 ${currentChannelName} · ` : '') + volFooter })
   const row1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('mp_prev').setEmoji('⏮').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('mp_back10').setLabel('-10s').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('mp_voldown').setEmoji('🔉').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('mp_toggle').setEmoji(paused ? '▶' : '⏸').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('mp_fwd10').setLabel('+10s').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('mp_volup').setEmoji('🔊').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('mp_skip').setEmoji('⏭').setStyle(ButtonStyle.Secondary),
   )
   const row2 = new ActionRowBuilder().addComponents(
@@ -1358,9 +1378,9 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   if (id === 'mp_prev') cmdPrevious()
-  else if (id === 'mp_back10') cmdSeek(elapsed() - 10)
+  else if (id === 'mp_voldown') cmdMusicVolume(musicVolume - 0.1)
   else if (id === 'mp_toggle') { if (!cmdPause()) cmdResume() }
-  else if (id === 'mp_fwd10') cmdSeek(elapsed() + 10)
+  else if (id === 'mp_volup') cmdMusicVolume(musicVolume + 0.1)
   else if (id === 'mp_skip') cmdSkip()
   else if (id === 'mp_stop') cmdStop()
   else return
@@ -1492,6 +1512,15 @@ function cmdSoundTargetLufs(v) {
   soundLib.normalizeAll({ force: true })
     .then(r => { if (r.total) console.log(`Volumen: ${r.analyzed}/${r.total} sonidos re-medidos a ${soundTargetLufs} LUFS`) })
     .catch(err => console.error('re-normalizar sonidos:', err.message))
+  return true
+}
+
+// Volumen de la música (multiplicador 0..2; 1 = original). Aplica en vivo (el
+// mixer lee `musicVolume`). Devuelve el valor ya aplicado (clamp) o false si inválido.
+function cmdMusicVolume(v) {
+  if (typeof v !== 'number' || isNaN(v)) return false
+  musicVolume = Math.round(Math.min(2, Math.max(0, v)) * 100) / 100
+  saveSettings()
   return true
 }
 
@@ -1637,6 +1666,7 @@ function getState() {
     playingSounds: playingSounds(),
     soundBaseVolume,
     musicDuck,
+    musicVolume,
     soundTargetLufs,
   }
 }
@@ -1761,6 +1791,7 @@ function listVoiceChannels() {
 const MUSIC_CONTROL_PATHS = new Set([
   '/api/play', '/api/music/play',
   '/api/skip', '/api/previous', '/api/pause', '/api/resume', '/api/stop', '/api/seek',
+  '/api/music-volume',
   '/api/queue/remove', '/api/queue/reorder', '/api/queue/move',
   '/api/sound', '/api/sound/stop',
 ])
@@ -1908,6 +1939,10 @@ http.createServer(async (req, res) => {
         case '/api/seek': {
           const to = body.to !== undefined ? body.to : elapsed() + (body.delta || 0)
           return sendJson({ ok: cmdSeek(to) })
+        }
+        case '/api/music-volume': {
+          const v = body.to !== undefined ? body.to : musicVolume + (body.delta || 0)
+          return sendJson({ ok: cmdMusicVolume(v), musicVolume })
         }
         case '/api/queue/remove': {
           const i = body.index

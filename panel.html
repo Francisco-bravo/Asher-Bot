@@ -370,19 +370,22 @@
   .pb-art img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
   .pb-title { font-weight: 600; font-size: .95rem; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .pb-center { display: flex; flex-direction: column; gap: 7px; flex: 0 1 560px; max-width: 620px; }
-  .pb-spacer { flex: 1; } /* equilibra para centrar los controles (estilo Spotify) */
+  /* Lado derecho con el volumen; flex:1 equilibra para centrar los controles (estilo Spotify) */
+  .pb-right { flex: 1; display: flex; align-items: center; justify-content: flex-end; }
+  .pb-volume { display: flex; align-items: center; gap: 8px; width: 100%; max-width: 170px; }
+  .pb-volume input[type=range] { flex: 1; min-width: 70px; accent-color: var(--accent); cursor: pointer; }
+  .pb-vol-ico { font-size: 1rem; opacity: .85; flex-shrink: 0; }
   .pb-progress { display: flex; align-items: center; gap: 10px; }
   .pb-progress span { color: var(--muted); font-size: .72rem; font-variant-numeric: tabular-nums; flex-shrink: 0; }
   .pb-progress .progress { flex: 1; }
   @media (max-width: 820px) {
     .pb-center { flex: 0 1 auto; }
-    .pb-spacer { display: none; }
+    .pb-right { display: none; }
   }
   @media (max-width: 560px) {
     .player-bar { gap: 10px; padding: 8px 12px; }
     .pb-art { width: 44px; height: 44px; }
     .pb-progress span { display: none; } /* en móvil, solo la barra */
-    .ctrl-seek { display: none; }        /* oculta -10s/+10s en móvil */
   }
   /* La barra es clicable para abrir la vista expandida; los controles y la zona
      de tiempo/progreso no la abren. Sin resaltado al pasar el cursor. */
@@ -1207,9 +1210,7 @@
   <div class="pb-center">
     <div class="controls">
       <button class="ctrl" onclick="api('/api/previous',{})" title="Anterior">⏮</button>
-      <button class="ctrl ctrl-seek" onclick="api('/api/seek',{delta:-10})" title="Atrasar 10s">-10s</button>
       <button class="ctrl" id="btn-toggle" onclick="togglePause()" title="Pausar/Reanudar">⏸</button>
-      <button class="ctrl ctrl-seek" onclick="api('/api/seek',{delta:10})" title="Adelantar 10s">+10s</button>
       <button class="ctrl" onclick="api('/api/skip',{})" title="Siguiente">⏭</button>
       <button class="ctrl danger" onclick="api('/api/stop',{})" title="Detener (la canción pasa a reproducidas; el bot no se desconecta)">⏹</button>
     </div>
@@ -1219,7 +1220,13 @@
       <span id="t-total">–</span>
     </div>
   </div>
-  <div class="pb-spacer"></div>
+  <div class="pb-right">
+    <div class="pb-volume" title="Volumen de la música">
+      <span class="pb-vol-ico">🔊</span>
+      <input type="range" id="music-volume" min="0" max="200" step="5" value="100"
+             oninput="onMusicVolumeInput(this.value)" onchange="saveMusicVolume(this.value)">
+    </div>
+  </div>
 </div>
 
 <div id="toast"></div>
@@ -1470,6 +1477,15 @@ document.getElementById('progress').onclick = (e) => {
   api('/api/seek', { to: frac * state.current.duration })
 }
 
+// Volumen de la música (slider web; en Discord son los botones 🔉/🔊). El valor
+// del slider es 0..200 (%); el backend lo guarda como multiplicador 0..2.
+function updateVolIcon(pct) {
+  const ico = document.querySelector('.pb-vol-ico')
+  if (ico) ico.textContent = pct == 0 ? '🔇' : pct < 60 ? '🔈' : pct < 120 ? '🔉' : '🔊'
+}
+function onMusicVolumeInput(pct) { updateVolIcon(pct) } // feedback inmediato al arrastrar
+function saveMusicVolume(pct) { api('/api/music-volume', { to: Number(pct) / 100 }) }
+
 // Vista "reproduciendo ahora" a pantalla completa: se abre al tocar la barra
 // (la zona de la carátula/título) y se cierra con el botón ▾, clic fuera o Escape.
 function openNpView() { document.getElementById('np-view').style.display = 'flex' }
@@ -1479,8 +1495,8 @@ function toggleNpView() {
   if (v.style.display === 'flex') closeNpView(); else openNpView()
 }
 document.getElementById('player-bar').onclick = (e) => {
-  // Los botones de control y la zona de tiempo/progreso no abren la vista.
-  if (e.target.closest('.controls') || e.target.closest('.pb-progress')) return
+  // Los botones de control, la zona de tiempo/progreso y el volumen no abren la vista.
+  if (e.target.closest('.controls') || e.target.closest('.pb-progress') || e.target.closest('.pb-right')) return
   toggleNpView()
 }
 document.getElementById('npv-close').onclick = closeNpView
@@ -1538,6 +1554,11 @@ function render() {
   document.getElementById('npv-title').textContent = npTitle
   updateNpArt()
   document.getElementById('btn-toggle').textContent = state.paused ? '▶' : '⏸'
+  const volSlider = document.getElementById('music-volume')
+  if (volSlider && state.musicVolume != null && document.activeElement !== volSlider) {
+    volSlider.value = Math.round(state.musicVolume * 100)
+    updateVolIcon(volSlider.value)
+  }
   document.getElementById('t-elapsed').textContent = state.current ? fmt(state.elapsed) : '0:00'
   document.getElementById('t-total').textContent = state.current ? fmt(state.current.duration) : '–'
 
