@@ -1529,9 +1529,15 @@ function updateVolIcon(pct) {
 function onMusicVolumeInput(pct) { updateVolIcon(pct) } // feedback inmediato al arrastrar
 async function saveMusicVolume(pct) {
   const data = await api('/api/music-volume', { to: Number(pct) / 100 })
-  // Si fue rechazado (p. ej. límite de 1 cambio cada 2s, global web+Discord),
-  // devolver el slider al valor real para no mostrar un nivel que no se aplicó.
-  if (!data || !data.ok) refresh()
+  // Si fue rechazado (p. ej. dentro del cooldown global web+Discord), devolver el
+  // slider a su valor real. Se hace directo (no vía render) porque el slider suele
+  // tener el foco tras soltarlo y render lo deja intacto mientras esté enfocado.
+  if (!data || !data.ok) {
+    const real = (data && data.musicVolume != null) ? data.musicVolume
+      : (state && state.musicVolume != null ? state.musicVolume : 1)
+    const inp = document.getElementById('music-volume')
+    if (inp) { inp.value = Math.round(real * 100); updateVolIcon(inp.value) }
+  }
 }
 
 // Vista "reproduciendo ahora" a pantalla completa: se abre al tocar la barra
