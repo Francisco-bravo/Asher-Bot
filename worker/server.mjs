@@ -282,9 +282,22 @@ function downloadToCacheRaw(src, key) {
   })
 }
 
+// Clave CANÓNICA: los términos de búsqueda (no-URL) se resuelven al link real del
+// video para que "despacito" y el link del mismo video compartan la MISMA clave (no
+// se duplica el audio en disco y el badge de la biblioteca queda exacto). Las URLs
+// http ya vienen canónicas del bot (cleanYouTubeUrl) → se usan tal cual, SIN costo
+// extra (no se llama a yt-dlp). Devuelve también la meta si tuvo que resolverla.
+async function resolveKeyAndUrl(src) {
+  if (/^https?:\/\//i.test(src)) return { key: keyOf(src), url: src, meta: null }
+  const meta = await getMeta(src)            // resuelve + cachea (yt-dlp solo la 1ª vez)
+  const url = meta.url || src
+  return { key: keyOf(url), url, meta }
+}
+
 // Baja la carátula (si no está) y la sirve. Guarda art/<key> + el mime en el índice.
 async function serveArt(res, src) {
-  const key = keyOf(src)
+  let key, url, pre
+  try { pre = await resolveKeyAndUrl(src); key = pre.key; url = pre.url } catch (e) { res.writeHead(404); return res.end('sin meta: ' + e.message) }
   const file = join(ART_DIR, key)
   const mimeOf = u => {
     const e = (u.split(/[?#]/)[0].split('.').pop() || '').toLowerCase()
@@ -294,8 +307,8 @@ async function serveArt(res, src) {
     res.writeHead(200, { 'Content-Type': index[key].artMime, 'Cache-Control': 'public, max-age=86400' })
     return createReadStream(file).pipe(res)
   }
-  let meta
-  try { meta = await getMeta(src) } catch (e) { res.writeHead(404); return res.end('sin meta: ' + e.message) }
+  let meta = pre.meta
+  if (!meta) { try { meta = await getMeta(url) } catch (e) { res.writeHead(404); return res.end('sin meta: ' + e.message) } }
   if (!meta.thumbnail) { res.writeHead(404); return res.end('sin caratula') }
   const ctrl = new AbortController()
   const t = setTimeout(() => ctrl.abort(), 8000)
@@ -365,10 +378,10 @@ const server = http.createServer(async (req, res) => {
     if (p === '/audio' && req.method === 'GET') {
       if (!needSrc()) return
       const seek = Math.max(0, parseInt(u.searchParams.get('seek') || '0', 10) || 0)
-      const key = keyOf(src)
+      const { key, url } = await resolveKeyAndUrl(src)
       const file = audioPath(key)
       if (existsSync(file)) return streamCached(res, file, seek, key)
-      return await extractAndStream(res, src, seek, key, true)
+      return await extractAndStream(res, url, seek, key, true)
     }
 
     if (p === '/art' && req.method === 'GET') {
@@ -378,22 +391,23 @@ const server = http.createServer(async (req, res) => {
 
     if (p === '/ensure' && req.method === 'POST') {
       if (!needSrc()) return
-      const key = keyOf(src)
+      const { key, url } = await resolveKeyAndUrl(src)
       if (existsSync(audioPath(key))) { touch(key); return sendJson(res, 200, { cached: true }) }
-      await downloadToCache(src, key)
+      await downloadToCache(url, key)
       return sendJson(res, 200, { cached: true })
     }
 
     if (p === '/keep' && req.method === 'POST') {
       if (!needSrc()) return
       const keep = u.searchParams.get('keep') !== '0'
-      touch(keyOf(src), { keep })
+      const { key } = await resolveKeyAndUrl(src)
+      touch(key, { keep })
       return sendJson(res, 200, { keep })
     }
 
     if (p === '/cache' && req.method === 'DELETE') {
       if (!needSrc()) return
-      const key = keyOf(src)
+      const { key } = await resolveKeyAndUrl(src)
       try { rmSync(audioPath(key), { force: true }) } catch {}
       try { rmSync(join(ART_DIR, key), { force: true }) } catch {}
       try { rmSync(metaPath(key), { force: true }) } catch {}
