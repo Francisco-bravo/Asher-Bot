@@ -571,16 +571,47 @@ function startRemoteStream(item, seekSec, song) {
         backgroundWork()
       })
     } catch (e) {
-      streamDownloading = false
-      if (!ac.signal.aborted) {
-        console.error('worker stream:', e.message)
-        // 502 = el worker no pudo extraer (video no disponible/privado/eliminado).
-        playFailReason = /HTTP 4\d\d|HTTP 5\d\d/.test(e.message) ? 'no disponible' : 'no se pudo obtener el audio'
-      }
-      try { ff.stdin.end() } catch {}
+      if (ac.signal.aborted) { streamDownloading = false; try { ff.stdin.end() } catch {}; return }
+      // El worker (Alemania) no pudo extraer. Causa típica: video GEO-RESTRINGIDO a
+      // la región de Santiago (disponible en Chile, no en Alemania). Fallback: se
+      // extrae LOCALMENTE en Santiago y se alimenta el MISMO ffmpeg decodificador.
+      console.warn('worker no pudo servir, fallback local en Santiago:', e.message)
+      startLocalFallback(ff, item, song, seekSec)
     }
   })()
   return ff.stdout
+}
+
+// Fallback de reproducción: extrae con yt-dlp LOCAL (Santiago) y lo pipea al ffmpeg
+// `ff` que ya decodifica a PCM (es agnóstico al formato de entrada). Resuelve los
+// videos geo-restringidos a Chile que el worker alemán no puede bajar. Si también
+// falla acá, se marca playFailReason para avisar. (El seek no se reaplica en el
+// fallback: arranca desde 0; es un caso de borde poco frecuente.)
+function startLocalFallback(ff, item, song, seekSec) {
+  try {
+    const yt = spawn(YTDLP, ytdlpArgs(['--no-playlist', '-f', 'bestaudio/best', '-o', '-', item.url]))
+    activeProcs.push(yt)
+    yt.stdout.pipe(ff.stdin)
+    yt.stdout.on('error', () => {})
+    let ytErr = ''
+    yt.stderr.on('data', d => { if (ytErr.length < 2000) ytErr += d })
+    yt.on('error', err => {
+      streamDownloading = false
+      console.error('fallback yt-dlp:', err.message)
+      playFailReason = 'no se pudo obtener el audio'
+      try { ff.stdin.end() } catch {}
+    })
+    yt.on('close', code => {
+      streamDownloading = false
+      if (code && code !== 0) { console.error('fallback yt-dlp exit', code, ytErr.slice(0, 300)); playFailReason = 'no disponible' }
+      else if (song && seekSec === 0) { try { musicCache.recordPlay(song) } catch {} }
+      backgroundWork()
+    })
+  } catch (e) {
+    streamDownloading = false
+    playFailReason = 'no se pudo obtener el audio'
+    try { ff.stdin.end() } catch {}
+  }
 }
 
 function killStreamProcs() {
