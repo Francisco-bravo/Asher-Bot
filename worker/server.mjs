@@ -421,6 +421,37 @@ const server = http.createServer(async (req, res) => {
       catch (e) { return sendJson(res, e.playlistError ? 422 : 500, { error: e.message }) }
     }
 
+    // Importar un audio YA descargado (lo sube el bot desde su disco local): se
+    // transcodifica a Opus y se guarda con la clave canónica. Sirve para subir al
+    // worker canciones que solo un nodo podía bajar (geo-restringidas) y que queden
+    // accesibles desde todos los ambientes. Cuerpo = bytes de audio crudo.
+    if (p === '/import' && req.method === 'POST') {
+      if (!needSrc()) return
+      const { key } = await resolveKeyAndUrl(src)
+      const ff = spawn(FFMPEG, ['-loglevel', 'error', '-i', 'pipe:0', '-vn', '-ar', '48000', '-ac', '2', '-c:a', 'libopus', '-b:a', '160k', '-f', 'ogg', 'pipe:1'])
+      const tmp = `${audioPath(key)}.${process.pid}.${Date.now()}.part`
+      const ws = createWriteStream(tmp)
+      let ffErr = '', failed = false
+      const fail = (code, msg) => { if (failed) return; failed = true; try { rmSync(tmp, { force: true }) } catch {}; try { ff.kill('SIGKILL') } catch {}; if (!res.headersSent) { res.writeHead(code); res.end(msg) } }
+      req.on('error', () => fail(400, 'error de subida'))
+      req.pipe(ff.stdin)
+      ff.stdout.pipe(ws)
+      ff.stdin.on('error', () => {})
+      ff.stderr.on('data', d => { if (ffErr.length < 2000) ffErr += d })
+      ff.on('error', e => fail(500, 'ffmpeg: ' + e.message))
+      ws.on('finish', () => {
+        if (failed) return
+        try {
+          if (statSync(tmp).size < 1000) return fail(422, 'audio inválido/vacío: ' + ffErr.slice(0, 200))
+          renameSync(tmp, audioPath(key))
+          touch(key, { size: statSync(audioPath(key)).size })
+          evictIfNeeded()
+          sendJson(res, 200, { imported: true, key, size: statSync(audioPath(key)).size })
+        } catch (e) { fail(500, e.message) }
+      })
+      return
+    }
+
     // Claves (sha1 de la URL) que el worker tiene cacheadas en disco. La web lo cruza
     // con la biblioteca para indicar dónde está cada canción (local vs worker).
     if (p === '/cached-keys' && req.method === 'GET') {
