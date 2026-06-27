@@ -248,8 +248,17 @@ http.createServer(async (req, res) => {
     if (mArt && req.method === 'GET') {
       const song = music.getById(Number(mArt[1]))
       if (!song) { res.writeHead(404); res.end('Sin carátula'); return }
-      // Worker: la carátula vive en su disco (la baja la 1ª vez que se pide). Las
-      // canciones subidas (source_url upload:) no están en el worker → object-store.
+      const store = getStore()
+      // PRIORIDAD: la carátula elegida/resuelta (art_key en object-store) manda. Solo
+      // si no hay art_key se cae a la miniatura del worker (YouTube) como fallback.
+      // exists/getStream son sync en local-store y async en s3-store; await unifica ambos.
+      if (song.art_key && await store.exists(song.art_key)) {
+        const ext = song.art_key.split('.').pop().toLowerCase()
+        res.writeHead(200, { 'Content-Type': ART_MIME[ext] || 'application/octet-stream', 'Cache-Control': 'public, max-age=60' })
+        ;(await store.getStream(song.art_key)).pipe(res)
+        return
+      }
+      // Sin art_key: miniatura del worker (la baja la 1ª vez). Uploads (upload:) no van al worker.
       if (USE_WORKER && /^https?:\/\//i.test(song.source_url)) {
         try {
           const r = await workerReq('GET', '/art', song.source_url)
@@ -258,15 +267,9 @@ http.createServer(async (req, res) => {
             Readable.fromWeb(r.body).pipe(res)
             return
           }
-        } catch { /* cae al object-store */ }
+        } catch { /* nada */ }
       }
-      const store = getStore()
-      // exists/getStream son sync en local-store y async en s3-store; await unifica ambos.
-      if (!song.art_key || !(await store.exists(song.art_key))) { res.writeHead(404); res.end('Sin carátula'); return }
-      const ext = song.art_key.split('.').pop().toLowerCase()
-      res.writeHead(200, { 'Content-Type': ART_MIME[ext] || 'application/octet-stream', 'Cache-Control': 'public, max-age=86400' })
-      ;(await store.getStream(song.art_key)).pipe(res)
-      return
+      res.writeHead(404); res.end('Sin carátula'); return
     }
     if (req.method === 'GET' && path === '/auth/login') return authLoginRedirect(req, res, url)
     if (req.method === 'GET' && path === '/auth/callback') return await authCallback(req, res, url)
