@@ -407,6 +407,13 @@ const server = http.createServer(async (req, res) => {
       catch (e) { return sendJson(res, e.playlistError ? 422 : 500, { error: e.message }) }
     }
 
+    // Claves (sha1 de la URL) que el worker tiene cacheadas en disco. La web lo cruza
+    // con la biblioteca para indicar dónde está cada canción (local vs worker).
+    if (p === '/cached-keys' && req.method === 'GET') {
+      const keys = Object.keys(index).filter(k => existsSync(audioPath(k)))
+      return sendJson(res, 200, { keys })
+    }
+
     // Límite de concurrencia (ajustable en caliente desde "Variables Generales").
     if (p === '/config') {
       if (req.method === 'POST') {

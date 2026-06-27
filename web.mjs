@@ -4,7 +4,7 @@
 // Corre en su propio puerto (WEB_PORT). El control en vivo (play/skip/sonidos)
 // sigue en bot.mjs.
 import http from 'node:http'
-import { randomBytes } from 'node:crypto'
+import { randomBytes, createHash } from 'node:crypto'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Readable } from 'node:stream'
@@ -47,6 +47,19 @@ function workerReq(method, path, sourceUrl, extra = {}) {
   if (sourceUrl) u.searchParams.set('url', sourceUrl)
   for (const [k, v] of Object.entries(extra)) u.searchParams.set(k, v)
   return fetch(u, { method, headers: { Authorization: `Bearer ${MUSIC_WORKER_TOKEN}` } })
+}
+// Misma clave que el worker (sha1 de la fuente) para cruzar la biblioteca con lo
+// que el worker tiene cacheado. Se cachea la respuesta unos segundos.
+const sha1 = s => createHash('sha1').update(s).digest('hex')
+let _workerKeys = { at: 0, set: new Set() }
+async function getWorkerCachedKeys() {
+  if (!USE_WORKER) return new Set()
+  if (Date.now() - _workerKeys.at < 8000) return _workerKeys.set
+  try {
+    const r = await workerReq('GET', '/cached-keys')
+    if (r.ok) { const j = await r.json(); _workerKeys = { at: Date.now(), set: new Set(j.keys || []) } }
+  } catch { /* worker caído: se devuelve lo último conocido */ }
+  return _workerKeys.set
 }
 
 getDb() // dispara migraciones
@@ -576,7 +589,15 @@ http.createServer(async (req, res) => {
 
     // ── Música / caché ────────────────────────────────────────────────────
     if (req.method === 'GET' && path === '/api/music') {
-      return send(res, 200, music.listAll())
+      const list = music.listAll()
+      // location: 'local' (caché de Santiago) | 'worker' (lo tiene el worker) | 'none'.
+      const wk = await getWorkerCachedKeys()
+      for (const s of list) {
+        s.location = s.cached ? 'local'
+          : (USE_WORKER && /^https?:/i.test(s.source_url || '') && wk.has(sha1(s.source_url))) ? 'worker'
+          : 'none'
+      }
+      return send(res, 200, list)
     }
     // Subir una canción permanente (archivo de audio del usuario). Solo admin.
     if (req.method === 'POST' && path === '/api/music/upload') {

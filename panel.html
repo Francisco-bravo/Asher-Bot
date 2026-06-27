@@ -2820,21 +2820,25 @@ function renderMusicList(songs) {
   if (!songs.length) { box.innerHTML = '<p class="empty">No hay canciones en la caché todavía.</p>'; return }
   box.innerHTML = songs.map(s => {
     const isUpload = String(s.source_url).startsWith('upload:')
+    // location: 'local' (en Santiago) | 'worker' (en el worker) | 'none' (sin caché)
+    const loc = s.location || (s.cached ? 'local' : 'none')
+    const locBadge = loc === 'local' ? '<span class="badge cached" title="Audio guardado en Santiago (local)">💾 en Santiago</span>'
+      : loc === 'worker' ? '<span class="badge store" title="Audio guardado en el worker (fuera)">☁️ en el worker</span>'
+      : ''
     const badges = [
-      s.cached ? '<span class="badge cached">en caché</span>' : '',
-      s.persisted ? '<span class="badge store">respaldada</span>' : '',
+      locBadge,
       s.permanent ? '<span class="badge perm">📌 permanente</span>' : '',
     ].join('')
     const meta = [
       s.artist ? esc(s.artist) : null,
       s.duration_ms ? fmt(s.duration_ms / 1000) : null,
       `${s.play_count} repr.`,
-      s.cached ? 'caché ' + fmtBytes(s.cache_size) : null,
+      (loc === 'local' && s.cache_size) ? 'caché ' + fmtBytes(s.cache_size) : null,
       s.last_played_at ? 'última: ' + fmtDate(s.last_played_at) : 'sin reproducir',
     ].filter(Boolean).join(' · ')
     const actions = [
       `<button onclick="playSong(${s.id})">▶ Reproducir</button>`,
-      (!s.cached && !isUpload) ? `<button onclick="forceCacheId(${s.id})">⬇️ Forzar caché</button>` : '',
+      (loc === 'none' && !isUpload) ? `<button onclick="forceCacheId(${s.id})">⬇️ Forzar caché</button>` : '',
       (isAdmin && !isUpload) ? `<button onclick="renameSong(${s.id})">✏️ Renombrar</button>` : '',
       isAdmin ? `<button onclick="togglePermanent(${s.id},${s.permanent ? 0 : 1})">${s.permanent ? 'Quitar 📌' : 'Hacer 📌'}</button>` : '',
       isAdmin ? `<button class="danger" onclick="deleteSong(${s.id})">🗑 Eliminar</button>` : '',
