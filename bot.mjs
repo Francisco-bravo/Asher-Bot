@@ -36,6 +36,7 @@ import * as auth from './lib/auth.mjs'
 import * as rbac from './lib/rbac.mjs'
 import * as musicCache from './lib/music-cache.mjs'
 import * as art from './lib/art.mjs'
+import * as artsearch from './lib/artsearch.mjs'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const IS_WIN = process.platform === 'win32'
@@ -851,11 +852,19 @@ async function storeArtFromUrl(song, thumb) {
 
 async function ensureSongArt(song, sourceUrl) {
   if (!song || song.art_key) return
-  // En modo worker la carátula la guarda y sirve el worker (web /art/:id la proxea
-  // bajo demanda). Santiago no baja carátulas con yt-dlp.
-  if (USE_WORKER) return
-  try { await storeArtFromUrl(song, await ytdlpPrint(sourceUrl, 'thumbnail')) }
-  catch { /* sin carátula: no pasa nada */ }
+  // Carátula: iTunes → Deezer → miniatura "de siempre" (YouTube). La miniatura la
+  // da el worker (workerMeta) en modo worker, o yt-dlp local si no.
+  const localFile = (() => { try { return musicCache.hasLocal(song) ? musicCache.cachePath(song) : null } catch { return null } })()
+  const thumbFallback = async () => {
+    let thumb = null
+    if (USE_WORKER) { try { thumb = (await workerMeta(sourceUrl)).thumbnail } catch {} }
+    else { try { thumb = await ytdlpPrint(sourceUrl, 'thumbnail') } catch {} }
+    return thumb ? artsearch.fetchImg(thumb) : null
+  }
+  try {
+    const r = await artsearch.resolveArt(song, { localFile, thumbFallback })
+    if (r) { await art.store(song.id, r.buf, r.ext); song.art_key = `art/${song.id}.${r.ext}` }
+  } catch { /* sin carátula: no pasa nada */ }
 }
 
 // Baja las carátulas de un set de canciones (con poca concurrencia), usando la
@@ -921,8 +930,8 @@ async function enrich(item) {
     updatePanel()
     return true
   }
-  // 2) Carátula (solo modo local; en modo worker la sirve el worker bajo demanda).
-  if (!USE_WORKER && !song.art_key) { await ensureSongArt(song, sourceUrl); updatePanel(); return true }
+  // 2) Carátula (iTunes-first; una sola vez por item para no entrar en bucle).
+  if (!item.artTried && !song.art_key) { item.artTried = true; await ensureSongArt(song, sourceUrl); updatePanel(); return true }
   return false
 }
 

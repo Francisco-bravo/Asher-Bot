@@ -18,6 +18,8 @@
     "tweetnacl": "^1.0.3"
   },
   "optionalDependencies": {
-    "opusscript": "^0.1.1"
+    "opusscript": "^0.1.1",
+    "album-art": "^4.0.0",
+    "music-metadata": "^10.0.0"
   }
 }

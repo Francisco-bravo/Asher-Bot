@@ -20,6 +20,8 @@ const folders = await import('./lib/folders.mjs')
 const playlists = await import('./lib/playlists.mjs')
 const playHistory = await import('./lib/history.mjs')
 const music = await import('./lib/music-cache.mjs')
+const artStore = await import('./lib/art.mjs')
+const artsearch = await import('./lib/artsearch.mjs')
 const { getStore } = await import('./lib/storage/index.mjs')
 
 const PORT = Number(process.env.WEB_PORT || 8770)
@@ -635,6 +637,32 @@ http.createServer(async (req, res) => {
         workerReq('POST', '/keep', song.source_url, { keep: song.permanent ? '1' : '0' }).catch(() => {})
       }
       return send(res, 200, { id: song.id, permanent: song.permanent })
+    }
+    // Botón ✏️: busca la carátula en iTunes → Deezer → álbum (album-art) → arte
+    // embebido (music-metadata) → miniatura de YouTube, y la fija. Solo admin.
+    const mArtSearch = path.match(/^\/api\/music\/(\d+)\/art-search$/)
+    if (mArtSearch && req.method === 'POST') {
+      if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un admin' })
+      const song = music.getById(Number(mArtSearch[1]))
+      if (!song) return send(res, 404, { error: 'Canción no encontrada' })
+      const body = JSON.parse((await readBody(req)).toString() || '{}')
+      const query = (body.query || '').trim() || null
+      let localFile = null
+      try { localFile = music.cachePath(song) } catch {}
+      const thumbFallback = async () => {
+        if (!USE_WORKER || !/^https?:\/\//i.test(song.source_url)) return null
+        try {
+          const r = await workerReq('GET', '/art', song.source_url)
+          if (!r.ok) return null
+          const buf = Buffer.from(await r.arrayBuffer())
+          const ct = (r.headers.get('content-type') || '').toLowerCase()
+          return buf.length ? { buf, ext: ct.includes('png') ? 'png' : 'jpg' } : null
+        } catch { return null }
+      }
+      const r = await artsearch.resolveArt(song, { manual: true, query, localFile, thumbFallback })
+      if (!r) return send(res, 404, { error: 'No se encontró carátula en ninguna fuente' })
+      await artStore.store(song.id, r.buf, r.ext)
+      return send(res, 200, { ok: true, id: song.id, ext: r.ext })
     }
     // Borrar una canción (caché + object-store + fila). Solo admin.
     const mId = path.match(/^\/api\/music\/(\d+)$/)
