@@ -946,6 +946,19 @@
             <button id="btn-music-duck">Guardar</button>
           </div>
         </div>
+        <div class="stats-section">
+          <h3>⏳ Límite de cambios de volumen de música</h3>
+          <p class="hint" style="margin:0 0 12px">
+            Tiempo mínimo entre cambios del volumen de música, <b>compartido</b> entre la web y Discord,
+            para que no se solapen los ajustes de varias personas. Ej.: <b>2</b> = un cambio cada 2 s ·
+            <b>0</b> = sin límite.
+          </p>
+          <div class="add-row" style="max-width:380px; align-items:center">
+            <input type="number" id="music-vol-cooldown" step="0.5" min="0" max="30" value="2" style="max-width:110px">
+            <span style="font-weight:600">seg</span>
+            <button id="btn-music-vol-cooldown">Guardar</button>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -1373,7 +1386,7 @@ document.querySelectorAll('.mtab').forEach(mt => {
     document.querySelectorAll('.mpage').forEach(p => p.classList.remove('active'))
     mt.classList.add('active')
     document.getElementById('mpage-' + mt.dataset.mtab).classList.add('active')
-    if (mt.dataset.mtab === 'vars') { syncBaseVolumeInput(); syncTargetLufsInput(); syncMusicDuckInput() }
+    if (mt.dataset.mtab === 'vars') { syncBaseVolumeInput(); syncTargetLufsInput(); syncMusicDuckInput(); syncMusicVolCooldownInput() }
   }
 })
 
@@ -1439,6 +1452,24 @@ document.getElementById('btn-music-duck').addEventListener('click', async () => 
   } finally { btn.disabled = false; btn.textContent = orig }
 })
 
+// Límite de cambios de volumen de música (enfriamiento global web+Discord, en seg).
+function syncMusicVolCooldownInput() {
+  const inp = document.getElementById('music-vol-cooldown')
+  if (inp && state && state.musicVolumeCooldownMs != null && document.activeElement !== inp)
+    inp.value = state.musicVolumeCooldownMs / 1000
+}
+document.getElementById('btn-music-vol-cooldown').addEventListener('click', async () => {
+  const inp = document.getElementById('music-vol-cooldown')
+  const sec = Number(inp.value)
+  if (!Number.isFinite(sec) || sec < 0 || sec > 30) { toast('Valor inválido (0 a 30)'); return }
+  const btn = document.getElementById('btn-music-vol-cooldown')
+  btn.disabled = true; const orig = btn.textContent; btn.textContent = 'Guardando...'
+  try {
+    const data = await api('/api/music-volume-cooldown', { seconds: sec })
+    if (data && data.ok) toast('Límite guardado ✓')
+  } finally { btn.disabled = false; btn.textContent = orig }
+})
+
 function toast(msg) {
   const el = document.getElementById('toast')
   el.textContent = msg
@@ -1496,7 +1527,12 @@ function updateVolIcon(pct) {
   if (ico) ico.textContent = pct == 0 ? '🔇' : pct < 60 ? '🔈' : pct < 120 ? '🔉' : '🔊'
 }
 function onMusicVolumeInput(pct) { updateVolIcon(pct) } // feedback inmediato al arrastrar
-function saveMusicVolume(pct) { api('/api/music-volume', { to: Number(pct) / 100 }) }
+async function saveMusicVolume(pct) {
+  const data = await api('/api/music-volume', { to: Number(pct) / 100 })
+  // Si fue rechazado (p. ej. límite de 1 cambio cada 2s, global web+Discord),
+  // devolver el slider al valor real para no mostrar un nivel que no se aplicó.
+  if (!data || !data.ok) refresh()
+}
 
 // Vista "reproduciendo ahora" a pantalla completa: se abre al tocar la barra
 // (la zona de la carátula/título) y se cierra con el botón ▾, clic fuera o Escape.

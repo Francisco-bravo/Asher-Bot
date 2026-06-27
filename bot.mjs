@@ -99,6 +99,9 @@ let musicDuck = 0.35
 // Volumen de la música (multiplicador 0..2; 1 = original). Se aplica en vivo al
 // mezclar. Editable desde la web (slider) y desde Discord (botones +/-).
 let musicVolume = 1
+// Enfriamiento GLOBAL (ms) entre cambios de volumen de música (web + Discord), para
+// que no se solapen ajustes de varias personas. Configurable en Variables Generales.
+let musicVolumeCooldownMs = 2000
 // Objetivo de sonoridad (LUFS) al que se igualan los sonidos. Sube/baja el
 // volumen general SIN saturar (lo limita el techo de true-peak). Editable en el panel.
 let soundTargetLufs = TARGET_I
@@ -107,11 +110,12 @@ try {
   soundBaseVolume = s.soundBaseVolume ?? 1
   musicDuck = s.musicDuck ?? 0.35
   if (s.musicVolume != null) musicVolume = s.musicVolume
+  if (s.musicVolumeCooldownMs != null) musicVolumeCooldownMs = s.musicVolumeCooldownMs
   if (s.soundTargetLufs != null) soundTargetLufs = s.soundTargetLufs
 } catch {}
 soundTargetLufs = setTargetI(soundTargetLufs) // aplica el objetivo cargado
 function saveSettings() {
-  try { writeFileSync(SETTINGS_FILE, JSON.stringify({ soundBaseVolume, musicDuck, musicVolume, soundTargetLufs })) } catch {}
+  try { writeFileSync(SETTINGS_FILE, JSON.stringify({ soundBaseVolume, musicDuck, musicVolume, musicVolumeCooldownMs, soundTargetLufs })) } catch {}
 }
 
 if (!existsSync(SOUNDS_DIR)) mkdirSync(SOUNDS_DIR, { recursive: true })
@@ -1377,10 +1381,16 @@ client.on('interactionCreate', async (interaction) => {
     return
   }
 
-  if (id === 'mp_prev') cmdPrevious()
-  else if (id === 'mp_voldown') cmdMusicVolume(musicVolume - 0.1)
+  if (id === 'mp_voldown' || id === 'mp_volup') {
+    const left = musicVolumeCooldownLeft()
+    if (left > 0) {
+      await interaction.reply({ content: `⏳ Espera ${Math.ceil(left / 1000)}s para volver a cambiar el volumen.`, flags: 64 }).catch(() => {})
+      return
+    }
+    cmdMusicVolume(musicVolume + (id === 'mp_volup' ? 0.1 : -0.1))
+  }
+  else if (id === 'mp_prev') cmdPrevious()
   else if (id === 'mp_toggle') { if (!cmdPause()) cmdResume() }
-  else if (id === 'mp_volup') cmdMusicVolume(musicVolume + 0.1)
   else if (id === 'mp_skip') cmdSkip()
   else if (id === 'mp_stop') cmdStop()
   else return
@@ -1516,10 +1526,26 @@ function cmdSoundTargetLufs(v) {
 }
 
 // Volumen de la música (multiplicador 0..2; 1 = original). Aplica en vivo (el
-// mixer lee `musicVolume`). Devuelve el valor ya aplicado (clamp) o false si inválido.
+// mixer lee `musicVolume`). Throttle GLOBAL (web + Discord comparten este estado):
+// como máximo 1 cambio cada `musicVolumeCooldownMs` para que no se solapen los
+// ajustes de varias personas (configurable; 0 = sin límite).
+let lastMusicVolumeAt = 0
+function musicVolumeCooldownLeft() {
+  return Math.max(0, musicVolumeCooldownMs - (Date.now() - lastMusicVolumeAt))
+}
 function cmdMusicVolume(v) {
   if (typeof v !== 'number' || isNaN(v)) return false
+  if (musicVolumeCooldownLeft() > 0) return false // limitado: aún en enfriamiento
+  lastMusicVolumeAt = Date.now()
   musicVolume = Math.round(Math.min(2, Math.max(0, v)) * 100) / 100
+  saveSettings()
+  return true
+}
+
+// Enfriamiento (segundos) entre cambios de volumen de música. 0 = sin límite.
+function cmdMusicVolumeCooldown(sec) {
+  if (typeof sec !== 'number' || isNaN(sec)) return false
+  musicVolumeCooldownMs = Math.round(Math.min(30, Math.max(0, sec)) * 1000)
   saveSettings()
   return true
 }
@@ -1667,6 +1693,7 @@ function getState() {
     soundBaseVolume,
     musicDuck,
     musicVolume,
+    musicVolumeCooldownMs,
     soundTargetLufs,
   }
 }
@@ -1941,6 +1968,8 @@ http.createServer(async (req, res) => {
           return sendJson({ ok: cmdSeek(to) })
         }
         case '/api/music-volume': {
+          const left = musicVolumeCooldownLeft()
+          if (left > 0) return sendJson({ error: `Espera ${Math.ceil(left / 1000)}s para volver a cambiar el volumen`, retryMs: left, musicVolume }, 429)
           const v = body.to !== undefined ? body.to : musicVolume + (body.delta || 0)
           return sendJson({ ok: cmdMusicVolume(v), musicVolume })
         }
@@ -1992,6 +2021,10 @@ http.createServer(async (req, res) => {
         case '/api/sound/target-lufs': {
           if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)
           return sendJson({ ok: cmdSoundTargetLufs(body.value), soundTargetLufs })
+        }
+        case '/api/music-volume-cooldown': {
+          if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)
+          return sendJson({ ok: cmdMusicVolumeCooldown(body.seconds), musicVolumeCooldownMs })
         }
         case '/api/disconnect': {
           if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)
