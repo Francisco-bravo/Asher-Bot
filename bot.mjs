@@ -589,9 +589,21 @@ function startRemoteStream(item, seekSec, song) {
 // fallback: arranca desde 0; es un caso de borde poco frecuente.)
 function startLocalFallback(ff, item, song, seekSec) {
   try {
+    // Tee a la caché LOCAL en disco (Santiago) SOLO si hay canción y sin seek (audio
+    // completo) → la próxima vez hasLocal(song) es true y se reproduce desde el
+    // archivo, sin re-extraer. Tras el umbral de reproducciones queda persistida
+    // localmente (sobrevive a la evicción LRU): clave para los geo-restringidos,
+    // que solo Santiago puede bajar.
+    let cacheFile = null, partPath = null, cp = null
+    if (song && seekSec === 0) {
+      cp = musicCache.cachePath(song)
+      partPath = `${cp}.${process.pid}.${Date.now()}.part`
+      try { cacheFile = createWriteStream(partPath) } catch { cacheFile = null }
+    }
     const yt = spawn(YTDLP, ytdlpArgs(['--no-playlist', '-f', 'bestaudio/best', '-o', '-', item.url]))
     activeProcs.push(yt)
     yt.stdout.pipe(ff.stdin)
+    if (cacheFile) { yt.stdout.pipe(cacheFile); cacheFile.on('error', () => { cacheFile = null }) }
     yt.stdout.on('error', () => {})
     let ytErr = ''
     yt.stderr.on('data', d => { if (ytErr.length < 2000) ytErr += d })
@@ -599,12 +611,26 @@ function startLocalFallback(ff, item, song, seekSec) {
       streamDownloading = false
       console.error('fallback yt-dlp:', err.message)
       playFailReason = 'no se pudo obtener el audio'
+      if (cacheFile) cacheFile.end(() => { try { rmSync(partPath, { force: true }) } catch {} })
       try { ff.stdin.end() } catch {}
     })
     yt.on('close', code => {
       streamDownloading = false
-      if (code && code !== 0) { console.error('fallback yt-dlp exit', code, ytErr.slice(0, 300)); playFailReason = 'no disponible' }
-      else if (song && seekSec === 0) { try { musicCache.recordPlay(song) } catch {} }
+      if (code && code !== 0) {
+        console.error('fallback yt-dlp exit', code, ytErr.slice(0, 300))
+        playFailReason = 'no disponible'
+        if (cacheFile) cacheFile.end(() => { try { rmSync(partPath, { force: true }) } catch {} })
+      } else if (cacheFile) {
+        cacheFile.end(() => {
+          try {
+            renameSync(partPath, cp)
+            musicCache.registerPlay(song, cp).catch(e => console.warn('cacheo fallback:', e.message))
+            console.log(`Cacheado local (fallback geo): canción ${song.id}`)
+          } catch (e) { console.warn('cacheo fallback falló:', e.message); try { rmSync(partPath, { force: true }) } catch {} }
+        })
+      } else if (song && seekSec === 0) {
+        try { musicCache.recordPlay(song) } catch {}
+      }
       backgroundWork()
     })
   } catch (e) {
