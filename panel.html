@@ -344,6 +344,7 @@
     .sb-sidebar { width: 100%; max-height: 220px; }
   }
   .sound-btn {
+    position: relative;
     padding: 18px 12px; border: var(--border); border-radius: 12px;
     background: var(--panel); color: var(--text); cursor: pointer;
     font-size: .92rem; font-weight: 600; word-break: break-word; line-height: 1.25;
@@ -351,6 +352,17 @@
   }
   .sound-btn:hover { background: var(--accent); border-color: transparent; box-shadow: 0 4px 12px var(--accent-glow); }
   .sound-btn:active { transform: scale(.96); }
+  /* Previsualización: escuchar el sonido EN LA WEB (no en Discord), en una esquina */
+  .sb-prev {
+    position: absolute; top: 4px; right: 4px; width: 22px; height: 22px;
+    display: grid; place-items: center; border-radius: 50%; border: var(--border);
+    background: var(--panel2); color: var(--text); font-size: .7rem; line-height: 1;
+    opacity: .55; transition: opacity .1s, background .1s, transform .05s;
+  }
+  .sound-btn:hover .sb-prev { opacity: .9; }
+  .sb-prev:hover { opacity: 1; background: var(--accent); border-color: transparent; transform: scale(1.12); }
+  .sb-prev.previewing { opacity: 1; background: var(--accent); border-color: transparent; color: #fff; }
+  .sm-btn.previewing { background: var(--accent); border-color: transparent; color: #fff; }
   .hint { color: var(--muted); font-size: .82rem; margin-top: 16px; line-height: 1.5; }
   .hint code { background: var(--panel); padding: 2px 6px; border-radius: 5px; font-size: .9em; }
 
@@ -1767,6 +1779,7 @@ function soundButton(s) {
   const renamed = s.alias && s.alias !== s.label
   const tip = name + (renamed ? ' — original: ' + s.label : '') + (s.owner ? ' — subido por ' + s.owner : '') + (priv ? ' (privado)' : '')
   return `<button class="sound-btn${priv ? ' private' : ''}" draggable="true" data-file="${esc(s.file)}" data-id="${s.id}" title="${esc(tip)}">` +
+    `<span class="sb-prev" data-prev="${s.id}" role="button" title="Previsualizar (escuchar en la web)">🎧</span>` +
     `<span class="sb-label">${esc(name)}${priv ? '<span class="lock">🔒</span>' : ''}</span>` +
     (renamed ? `<span class="sb-orig">${esc(s.label)}</span>` : '') + `</button>`
 }
@@ -2013,7 +2026,8 @@ function renderMgmtGrid() {
 function mgmtCard(s) {
   const priv = s.visibility === 'private'
   const owner = s.owner ? `<span class="sm-owner">${priv ? '🔒 ' : ''}de ${esc(s.owner)}</span>` : (priv ? '<span class="sm-owner">🔒</span>' : '')
-  const actions = `<button class="sm-btn" data-act="rename" title="Renombrar (para todos)">✏️</button>` +
+  const actions = `<button class="sm-btn" data-act="preview" title="Previsualizar (escuchar en la web)">🎧</button>` +
+    `<button class="sm-btn" data-act="rename" title="Renombrar (para todos)">✏️</button>` +
     `<button class="sm-btn" data-act="trim" title="Recortar el sonido">✂️</button>` +
     (s.hidden
       ? `<button class="sm-btn" data-act="unhide" title="Restaurar (volver a mostrar)">↩️</button>` +
@@ -2102,6 +2116,8 @@ document.getElementById('mgmt-grid').addEventListener('click', async (e) => {
           await mgmtAction('POST', '/api/sound-admin/rename', { soundId: id, label: value, visibility: extra.visibility, offsetDb: extra.offsetDb }, card)
       },
     })
+  } else if (act === 'preview') {
+    previewSound(id)
   } else if (act === 'trim') {
     openTrimModal(id, label)
   } else if (act === 'hide') {
@@ -2237,8 +2253,41 @@ sbSidebar.addEventListener('drop', async (e) => {
   await moveSoundToFolder(id, row.dataset.path)
 })
 
-// Un clic reproduce; otro clic detiene si sigue sonando
+// Previsualización: reproduce el sonido EN EL NAVEGADOR (no en Discord), bajando
+// el audio vía /api/sound-audio/:id (mismo endpoint que el recortador, sirve a
+// quien pueda ver el sonido). Un solo audio a la vez; volver a pulsar lo detiene.
+let previewAudio = null, previewId = null
+function markPreview(id, on) {
+  document.querySelectorAll(`.sb-prev[data-prev="${id}"], .sound-manage[data-id="${id}"] [data-act="preview"]`)
+    .forEach(el => el.classList.toggle('previewing', on))
+}
+function stopPreview() {
+  if (previewAudio) {
+    try { previewAudio.pause() } catch {}
+    if (previewAudio.src.startsWith('blob:')) URL.revokeObjectURL(previewAudio.src)
+    previewAudio = null
+  }
+  if (previewId != null) { markPreview(previewId, false); previewId = null }
+}
+async function previewSound(id) {
+  if (previewId === id) { stopPreview(); return } // toggle: ya sonando → parar
+  stopPreview()
+  try {
+    const res = await webFetch('/api/sound-audio/' + id)
+    if (!res.ok) { toast('No se pudo cargar el sonido'); return }
+    const url = URL.createObjectURL(await res.blob())
+    previewAudio = new Audio(url)
+    previewId = id
+    markPreview(id, true)
+    previewAudio.onended = previewAudio.onerror = () => stopPreview()
+    await previewAudio.play().catch(() => stopPreview())
+  } catch { stopPreview() }
+}
+
+// Un clic en el botón reproduce en Discord; otro clic lo detiene si sigue sonando.
 document.getElementById('sound-grid').addEventListener('click', async (e) => {
+  const prev = e.target.closest('.sb-prev')
+  if (prev) { e.stopPropagation(); previewSound(Number(prev.dataset.prev)); return }
   const btn = e.target.closest('.sound-btn')
   if (!btn) return
   const file = btn.dataset.file
