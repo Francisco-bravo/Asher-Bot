@@ -2418,9 +2418,9 @@ async function loadMusic() {
 // título y artista debajo. `cardAction`/`btnAction` son expresiones JS (la carta
 // entera y el botón flotante pueden disparar acciones distintas).
 function songCardHTML(s, cardAction, btnAction, icon = '➕', title = 'Agregar') {
-  const art = s.art_key
-    ? `<span class="song-art"><img src="${esc(webUrl('/art/' + s.id))}" alt="" onerror="this.remove()"></span>`
-    : `<span class="song-art"></span>`
+  // Siempre se intenta la carátula vía /art/:id; si no hay (404) onerror la quita.
+  // En modo worker la carátula no está en art_key sino que la sirve el worker.
+  const art = `<span class="song-art"><img src="${esc(webUrl('/art/' + s.id))}" alt="" onerror="this.remove()"></span>`
   const artist = [s.artist ? esc(s.artist) : null, s.duration_ms ? fmt(s.duration_ms / 1000) : null].filter(Boolean).join(' · ')
   return `<div class="song-card" onclick="${cardAction}">
     ${art}

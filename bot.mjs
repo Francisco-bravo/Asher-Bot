@@ -89,6 +89,29 @@ function workerAudioUrl(src, seekSec) {
   return u
 }
 
+// Cliente del worker: metadata/carátula/caché/playlist los hace el CX33 (que
+// además GUARDA el audio/carátula en su disco). Santiago no usa yt-dlp salvo
+// que estas llamadas fallen (fallback local, ver más abajo).
+function workerHeaders() { return { Authorization: `Bearer ${MUSIC_WORKER_TOKEN}` } }
+async function workerReq(method, path, src, extra = {}) {
+  const u = new URL(MUSIC_WORKER_URL + path)
+  if (src) u.searchParams.set('url', src)
+  for (const [k, v] of Object.entries(extra)) u.searchParams.set(k, v)
+  const res = await fetch(u, { method, headers: workerHeaders() })
+  if (!res.ok) throw new Error(`worker ${path} HTTP ${res.status}`)
+  return res
+}
+// Devuelve { url, title, duration(seg), uploader, thumbnail, ext } o lanza.
+async function workerMeta(src) { return (await workerReq('GET', '/meta', src)).json() }
+// Pre-descarga al disco del worker (forzar caché / gapless). No trae bytes a Santiago.
+async function workerEnsure(src) { await workerReq('POST', '/ensure', src) }
+// Marca/desmarca una canción como no-evictable en el worker (permanente).
+async function workerKeep(src, keep) { try { await workerReq('POST', '/keep', src, { keep: keep ? '1' : '0' }) } catch {} }
+// Borra audio+carátula+meta del disco del worker.
+async function workerDelete(src) { try { await workerReq('DELETE', '/cache', src) } catch {} }
+// Expande una playlist por link en el worker.
+async function workerPlaylist(src) { return (await workerReq('GET', '/playlist', src)).json() }
+
 // Volumen BASE de los sonidos: multiplicador global (1 = normal, 2 = el doble),
 // se aplica encima de la igualación por loudness, a todos por igual. Es el único
 // volumen de sonidos: ya no hay slider por-usuario (todos suenan igual, normalizados).
@@ -503,46 +526,27 @@ function startRemoteStream(item, seekSec, song) {
   ff.stdin.on('error', () => {})
   activeProcs = [ff]
 
-  // Caché: solo si no hay seek (con seek el worker entrega audio recortado, no la
-  // canción completa). El Opus se guarda tal cual; startFileStream lo decodifica.
-  let cacheFile = null, partPath = null, cp = null
-  if (song && seekSec === 0) {
-    cp = musicCache.cachePath(song)
-    partPath = `${cp}.${process.pid}.${Date.now()}.part`
-    try { cacheFile = createWriteStream(partPath) } catch { cacheFile = null }
-  }
-
+  // El audio se almacena en el DISCO DEL WORKER (no se guarda copia local en
+  // Santiago). Aquí solo se contabiliza la reproducción (play_count/historial).
   const ac = new AbortController()
   remoteAbort = ac
   ;(async () => {
     try {
       const res = await fetch(workerAudioUrl(item.url, seekSec), {
-        headers: { Authorization: `Bearer ${MUSIC_WORKER_TOKEN}` },
+        headers: workerHeaders(),
         signal: ac.signal,
       })
       if (!res.ok || !res.body) throw new Error(`worker HTTP ${res.status}`)
       const web = Readable.fromWeb(res.body)
       web.on('error', () => {})
       web.pipe(ff.stdin)
-      if (cacheFile) web.pipe(cacheFile)
-      web.on('end', async () => {
+      web.on('end', () => {
         streamDownloading = false
-        if (cacheFile) {
-          try { cacheFile.end() } catch {}
-          try {
-            renameSync(partPath, cp)
-            await musicCache.registerPlay(song, cp)
-            console.log(`Cacheado (worker): canción ${song.id}`)
-          } catch (e) {
-            console.warn('Cacheo (worker) falló:', e.message)
-            try { rmSync(partPath, { force: true }) } catch {}
-          }
-        }
+        if (song && seekSec === 0) { try { musicCache.recordPlay(song) } catch {} }
         backgroundWork()
       })
     } catch (e) {
       streamDownloading = false
-      if (cacheFile) { try { cacheFile.end() } catch {}; try { rmSync(partPath, { force: true }) } catch {} }
       if (!ac.signal.aborted) console.error('worker stream:', e.message)
       try { ff.stdin.end() } catch {}
     }
@@ -556,7 +560,19 @@ function killStreamProcs() {
   activeProcs = []
 }
 
-function fetchMeta(item) {
+async function fetchMeta(item) {
+  if (USE_WORKER) {
+    try {
+      const m = await workerMeta(item.url)
+      if (m.title) item.title = m.title
+      if (m.duration) item.duration = m.duration
+      updatePanel()
+      return
+    } catch { /* worker caído → fallback local */ }
+  }
+  return fetchMetaLocal(item)
+}
+function fetchMetaLocal(item) {
   return new Promise(resolve => {
     const proc = spawn(YTDLP, ytdlpArgs([
       '--skip-download', '--print', '%(title)s\n%(duration)s', item.url
@@ -606,7 +622,16 @@ function ytdlpPrint(url, field) {
 
 // Resuelve fuente real + título + duración en UNA sola llamada (resuelve también
 // términos de búsqueda ytsearch1:). Para crear canciones de playlist con metadata.
-function ytdlpResolveMeta(url) {
+async function ytdlpResolveMeta(url) {
+  if (USE_WORKER) {
+    try {
+      const m = await workerMeta(url)
+      if (m.url) return { sourceUrl: m.url, title: m.title || null, duration: m.duration }
+    } catch { /* fallback local */ }
+  }
+  return ytdlpResolveMetaLocal(url)
+}
+function ytdlpResolveMetaLocal(url) {
   return new Promise(resolve => {
     const proc = spawn(YTDLP, ytdlpArgs(['--skip-download', '--print', '%(webpage_url)s\t%(title)s\t%(duration)s', url]))
     bgProc = proc
@@ -623,7 +648,14 @@ function ytdlpResolveMeta(url) {
 
 // Lista las entradas (url + título) de una playlist sin resolver cada video.
 // Devuelve [] si el link no es una playlist o no tiene entradas.
-function ytdlpFlatPlaylist(url) {
+async function ytdlpFlatPlaylist(url) {
+  if (USE_WORKER) {
+    try { return await workerPlaylist(url) }
+    catch { /* fallback local */ }
+  }
+  return ytdlpFlatPlaylistLocal(url)
+}
+function ytdlpFlatPlaylistLocal(url) {
   return new Promise((resolve, reject) => {
     const proc = spawn(YTDLP, ytdlpPlaylistArgs(['--print', '%(url)s\t%(title)s\t%(duration)s\t%(playlist_title)s\t%(thumbnail)s', url]))
     bgProc = proc
@@ -661,6 +693,7 @@ function killBgYtdlp() {
 async function resolveSource(item) {
   if (/^https?:\/\//i.test(item.url)) return item.url
   if (musicCache.findByUrl(item.url)) return item.url
+  if (USE_WORKER) { try { return (await workerMeta(item.url)).url || item.url } catch {} }
   return (await ytdlpPrint(item.url, 'webpage_url')) || item.url
 }
 
@@ -723,6 +756,9 @@ async function storeArtFromUrl(song, thumb) {
 
 async function ensureSongArt(song, sourceUrl) {
   if (!song || song.art_key) return
+  // En modo worker la carátula la guarda y sirve el worker (web /art/:id la proxea
+  // bajo demanda). Santiago no baja carátulas con yt-dlp.
+  if (USE_WORKER) return
   try { await storeArtFromUrl(song, await ytdlpPrint(sourceUrl, 'thumbnail')) }
   catch { /* sin carátula: no pasa nada */ }
 }
@@ -743,6 +779,13 @@ async function forceCacheAudio(item) {
   const sourceUrl = await resolveSource(item)
   const song = musicCache.findByUrl(sourceUrl)
     || musicCache.upsertSong({ sourceUrl, title: item.title })
+  if (USE_WORKER) {
+    // Se cachea en el disco del WORKER (no en Santiago). La carátula la baja el
+    // worker bajo demanda; aquí solo aseguramos el audio.
+    await workerEnsure(sourceUrl)
+    if (song.permanent) workerKeep(sourceUrl, true)
+    return song
+  }
   await musicCache.ensureCached(song, destPath => downloadToFile(sourceUrl, destPath))
   await ensureSongArt(song, sourceUrl) // al forzar caché, también traemos la carátula
   return song
@@ -783,8 +826,8 @@ async function enrich(item) {
     updatePanel()
     return true
   }
-  // 2) Carátula.
-  if (!song.art_key) { await ensureSongArt(song, sourceUrl); updatePanel(); return true }
+  // 2) Carátula (solo modo local; en modo worker la sirve el worker bajo demanda).
+  if (!USE_WORKER && !song.art_key) { await ensureSongArt(song, sourceUrl); updatePanel(); return true }
   return false
 }
 
@@ -797,6 +840,15 @@ async function cacheToDisk(item) {
   const sourceUrl = song ? song.source_url : await resolveSource(item)
   if (!song) song = musicCache.findByUrl(sourceUrl) || musicCache.upsertSong({ sourceUrl, title: item.title })
   item.songId = song.id
+  // Modo worker: pre-cachea en el disco del WORKER → su próxima /audio es HIT
+  // (instantáneo, gapless). El play puede esperar bgPromise si va a sonar esta.
+  if (USE_WORKER) {
+    bgSongId = song.id
+    bgPromise = workerEnsure(sourceUrl)
+    try { await bgPromise; console.log(`Pre-cacheada en el worker (gapless): canción ${song.id}`); return true }
+    catch { return false }
+    finally { if (bgSongId === song.id) { bgSongId = null; bgPromise = null } }
+  }
   if (musicCache.hasLocal(song) || song.persisted) return false // ya lista
   // bgPromise = SOLO la descarga del audio (lo que la reproducción necesita
   // esperar para arrancar gapless); la carátula va después, sin bloquear el play.

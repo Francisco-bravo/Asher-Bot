@@ -7,6 +7,7 @@ import http from 'node:http'
 import { randomBytes } from 'node:crypto'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { Readable } from 'node:stream'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 try { process.loadEnvFile(join(ROOT, '.env')) } catch { /* las vars pueden venir del entorno */ }
@@ -34,6 +35,19 @@ const SOUND_EXTS = new Set(['mp3', 'wav', 'ogg', 'm4a', 'flac', 'webm'])
 const MAX_UPLOAD = 10 * 1024 * 1024 // 10 MB por sonido
 const MUSIC_EXTS = new Set(['mp3', 'wav', 'ogg', 'm4a', 'flac', 'webm', 'opus'])
 const MAX_MUSIC = 50 * 1024 * 1024 // 50 MB por canción
+
+// Worker de música (CX33): guarda y sirve audio/carátulas. La web proxea la
+// carátula desde el worker y le avisa de borrados/permanencia. Sin la env, todo
+// sigue saliendo del object-store local como antes.
+const MUSIC_WORKER_URL = (process.env.MUSIC_WORKER_URL || '').replace(/\/$/, '')
+const MUSIC_WORKER_TOKEN = process.env.MUSIC_WORKER_TOKEN || ''
+const USE_WORKER = !!MUSIC_WORKER_URL
+function workerReq(method, path, sourceUrl, extra = {}) {
+  const u = new URL(MUSIC_WORKER_URL + path)
+  if (sourceUrl) u.searchParams.set('url', sourceUrl)
+  for (const [k, v] of Object.entries(extra)) u.searchParams.set(k, v)
+  return fetch(u, { method, headers: { Authorization: `Bearer ${MUSIC_WORKER_TOKEN}` } })
+}
 
 getDb() // dispara migraciones
 
@@ -218,9 +232,22 @@ http.createServer(async (req, res) => {
     const mArt = path.match(/^\/art\/(\d+)$/)
     if (mArt && req.method === 'GET') {
       const song = music.getById(Number(mArt[1]))
+      if (!song) { res.writeHead(404); res.end('Sin carátula'); return }
+      // Worker: la carátula vive en su disco (la baja la 1ª vez que se pide). Las
+      // canciones subidas (source_url upload:) no están en el worker → object-store.
+      if (USE_WORKER && /^https?:\/\//i.test(song.source_url)) {
+        try {
+          const r = await workerReq('GET', '/art', song.source_url)
+          if (r.ok && r.body) {
+            res.writeHead(200, { 'Content-Type': r.headers.get('content-type') || 'image/jpeg', 'Cache-Control': 'public, max-age=86400' })
+            Readable.fromWeb(r.body).pipe(res)
+            return
+          }
+        } catch { /* cae al object-store */ }
+      }
       const store = getStore()
       // exists/getStream son sync en local-store y async en s3-store; await unifica ambos.
-      if (!song || !song.art_key || !(await store.exists(song.art_key))) { res.writeHead(404); res.end('Sin carátula'); return }
+      if (!song.art_key || !(await store.exists(song.art_key))) { res.writeHead(404); res.end('Sin carátula'); return }
       const ext = song.art_key.split('.').pop().toLowerCase()
       res.writeHead(200, { 'Content-Type': ART_MIME[ext] || 'application/octet-stream', 'Cache-Control': 'public, max-age=86400' })
       ;(await store.getStream(song.art_key)).pipe(res)
@@ -582,13 +609,22 @@ http.createServer(async (req, res) => {
       const body = JSON.parse((await readBody(req)).toString() || '{}')
       const song = music.setPermanent(Number(mPerm[1]), !!body.permanent)
       if (!song) return send(res, 404, { error: 'Canción no encontrada' })
+      // El worker no debe evictar las permanentes de su disco.
+      if (USE_WORKER && /^https?:\/\//i.test(song.source_url)) {
+        workerReq('POST', '/keep', song.source_url, { keep: song.permanent ? '1' : '0' }).catch(() => {})
+      }
       return send(res, 200, { id: song.id, permanent: song.permanent })
     }
     // Borrar una canción (caché + object-store + fila). Solo admin.
     const mId = path.match(/^\/api\/music\/(\d+)$/)
     if (mId && req.method === 'DELETE') {
       if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un admin' })
+      const song = music.getById(Number(mId[1])) // capturar source_url antes de borrar la fila
       const ok = await music.removeSong(Number(mId[1]))
+      // Borra también la copia del disco del worker.
+      if (ok && USE_WORKER && song && /^https?:\/\//i.test(song.source_url)) {
+        workerReq('DELETE', '/cache', song.source_url).catch(() => {})
+      }
       return send(res, ok ? 200 : 404, ok ? { ok: true } : { error: 'Canción no encontrada' })
     }
 
