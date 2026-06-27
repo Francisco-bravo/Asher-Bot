@@ -313,9 +313,25 @@ async function serveArt(res, src) {
 }
 
 // Expande una playlist (sin resolver cada video).
+// Traduce un error de yt-dlp de playlist a un mensaje claro para el usuario.
+function classifyPlaylistError(text) {
+  const t = (text || '').toLowerCase()
+  if (/private|privada/.test(t)) return 'La playlist es PRIVADA. Cámbiala a "Pública" o "No listada" en YouTube y reintenta.'
+  if (/does not exist|unavailable|deleted|removed|not found|no longer|404/.test(t)) return 'La playlist no existe o fue eliminada. Verifica que el enlace sea correcto.'
+  if (/sign in|log in|confirm you|members-only|cookies|age/.test(t)) return 'La playlist requiere iniciar sesión (es privada o solo para miembros).'
+  return 'No se pudo acceder a la playlist. Asegúrate de que el enlace sea correcto y de que la playlist sea pública o "no listada".'
+}
+
 async function getPlaylist(src) {
-  const out = await withSlot(() => ytdlpText(['--flat-playlist', '--print',
-    '%(url)s\t%(title)s\t%(duration)s\t%(playlist_title)s\t%(thumbnail)s', src]))
+  let out
+  try {
+    out = await withSlot(() => ytdlpText(['--flat-playlist', '--print',
+      '%(url)s\t%(title)s\t%(duration)s\t%(playlist_title)s\t%(thumbnail)s', src]))
+  } catch (e) {
+    const err = new Error(classifyPlaylistError(e.message))
+    err.playlistError = true
+    throw err
+  }
   return out.trim().split('\n').filter(Boolean).map(line => {
     const [u, title, dur, plTitle, thumb] = line.split('\t')
     return {
@@ -387,7 +403,8 @@ const server = http.createServer(async (req, res) => {
 
     if (p === '/playlist' && req.method === 'GET') {
       if (!needSrc()) return
-      return sendJson(res, 200, await getPlaylist(src))
+      try { return sendJson(res, 200, await getPlaylist(src)) }
+      catch (e) { return sendJson(res, e.playlistError ? 422 : 500, { error: e.message }) }
     }
 
     // Límite de concurrencia (ajustable en caliente desde "Variables Generales").

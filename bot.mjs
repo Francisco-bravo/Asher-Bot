@@ -109,8 +109,21 @@ async function workerEnsure(src) { await workerReq('POST', '/ensure', src) }
 async function workerKeep(src, keep) { try { await workerReq('POST', '/keep', src, { keep: keep ? '1' : '0' }) } catch {} }
 // Borra audio+carátula+meta del disco del worker.
 async function workerDelete(src) { try { await workerReq('DELETE', '/cache', src) } catch {} }
-// Expande una playlist por link en el worker.
-async function workerPlaylist(src) { return (await workerReq('GET', '/playlist', src)).json() }
+// Expande una playlist por link en el worker. Un 422 = error REAL de la playlist
+// (privada/eliminada): se propaga con mensaje claro y SIN fallback local (que daría
+// el mismo error). Otros fallos (worker caído) sí permiten fallback.
+async function workerPlaylist(src) {
+  const u = new URL(MUSIC_WORKER_URL + '/playlist')
+  u.searchParams.set('url', src)
+  const res = await fetch(u, { headers: workerHeaders() })
+  if (res.status === 422) {
+    let msg = 'No se pudo acceder a la playlist'
+    try { msg = (await res.json()).error || msg } catch {}
+    const err = new Error(msg); err.playlistError = true; throw err
+  }
+  if (!res.ok) throw new Error(`worker /playlist HTTP ${res.status}`)
+  return res.json()
+}
 
 // Volumen BASE de los sonidos: multiplicador global (1 = normal, 2 = el doble),
 // se aplica encima de la igualación por loudness, a todos por igual. Es el único
@@ -210,6 +223,7 @@ let bgProc = null              // proceso yt-dlp de fondo en curso (para poder m
 let bgSongId = null            // id de la canción que el fondo está pre-cacheando
 let bgPromise = null           // promesa del pre-cacheo en curso (para esperarlo si toca)
 const BG_WORK_INTERVAL = 10000 // cada 10s intenta enriquecer/cachear de fondo
+let playFailReason = null // si la canción actual no se pudo reproducir, el motivo (para avisar)
 let seekOffset = 0      // segundos ya descartados por seek en el stream actual
 let seekTarget = 0      // desde dónde arrancar el próximo stream
 let transition = 'next' // qué hacer cuando el player quede idle: next | previous | seek | stop
@@ -558,7 +572,11 @@ function startRemoteStream(item, seekSec, song) {
       })
     } catch (e) {
       streamDownloading = false
-      if (!ac.signal.aborted) console.error('worker stream:', e.message)
+      if (!ac.signal.aborted) {
+        console.error('worker stream:', e.message)
+        // 502 = el worker no pudo extraer (video no disponible/privado/eliminado).
+        playFailReason = /HTTP 4\d\d|HTTP 5\d\d/.test(e.message) ? 'no disponible' : 'no se pudo obtener el audio'
+      }
       try { ff.stdin.end() } catch {}
     }
   })()
@@ -662,9 +680,18 @@ function ytdlpResolveMetaLocal(url) {
 async function ytdlpFlatPlaylist(url) {
   if (USE_WORKER) {
     try { return await workerPlaylist(url) }
-    catch { /* fallback local */ }
+    catch (e) { if (e.playlistError) throw e /* error real → no enmascarar con fallback */ }
   }
   return ytdlpFlatPlaylistLocal(url)
+}
+// Traduce un error de yt-dlp de playlist a un mensaje claro (fallback local; el
+// worker tiene su propia copia de esta lógica).
+function classifyPlaylistError(text) {
+  const t = (text || '').toLowerCase()
+  if (/private|privada/.test(t)) return 'La playlist es PRIVADA. Cámbiala a "Pública" o "No listada" en YouTube y reintenta.'
+  if (/does not exist|unavailable|deleted|removed|not found|no longer|404/.test(t)) return 'La playlist no existe o fue eliminada. Verifica que el enlace sea correcto.'
+  if (/sign in|log in|confirm you|members-only|cookies|age/.test(t)) return 'La playlist requiere iniciar sesión (es privada o solo para miembros).'
+  return 'No se pudo acceder a la playlist. Asegúrate de que el enlace sea correcto y de que la playlist sea pública o "no listada".'
 }
 function ytdlpFlatPlaylistLocal(url) {
   return new Promise((resolve, reject) => {
@@ -676,7 +703,7 @@ function ytdlpFlatPlaylistLocal(url) {
     proc.on('error', e => { if (bgProc === proc) bgProc = null; reject(e) })
     proc.on('close', code => {
       if (bgProc === proc) bgProc = null
-      if (code !== 0 && !out.trim()) return reject(new Error(err.trim().split('\n').pop() || 'No se pudo leer la playlist'))
+      if (code !== 0 && !out.trim()) { const e = new Error(classifyPlaylistError(err)); e.playlistError = true; return reject(e) }
       const entries = out.trim().split('\n').filter(Boolean).map(line => {
         const [u, title, dur, plTitle, thumb] = line.split('\t')
         return {
@@ -998,6 +1025,7 @@ async function ensurePlaying() {
       seekOffset = seekTarget
       seekTarget = 0
       currentPlaying = false // aún en extracción/carga: no enriquecer hasta que suene
+      playFailReason = null  // se setea si el stream del worker falla (video no disponible)
       console.log(`Reproduciendo: ${current.title || current.url}${seekOffset ? ` (desde ${seekOffset}s)` : ''}`)
       // PRIORIDAD: arrancar la reproducción cuanto antes, con UN solo yt-dlp.
       // No se resuelve ni se baja carátula/metadata aquí (eso lo hace el proceso
@@ -1044,6 +1072,7 @@ async function ensurePlaying() {
       musicPlayer.once(AudioPlayerStatus.Playing, () => { currentPlaying = true; backgroundWork() })
 
       const err = await waitIdle(musicPlayer)
+      const reachedPlaying = currentPlaying // ¿llegó a sonar antes de quedar idle?
       currentPlaying = false // terminó: no enriquecer esta canción ya
       killStreamProcs()
       currentResource = null
@@ -1051,7 +1080,11 @@ async function ensurePlaying() {
       if (err) {
         console.error('Error reproduciendo:', err.message)
         await notifyError(current, err)
+      } else if (playFailReason && !reachedPlaying) {
+        // El stream del worker falló y la canción nunca llegó a sonar → avisar y omitir.
+        await notifyUnavailable(current, playFailReason)
       }
+      playFailReason = null
 
       const t = transition
       transition = 'next'
@@ -1091,6 +1124,16 @@ async function notifyError(item, err) {
   } catch {}
 }
 
+// Aviso cuando una canción no se pudo reproducir (video no disponible, privado,
+// eliminado…). Se omite y se sigue con la cola.
+async function notifyUnavailable(item, reason) {
+  if (!item?.textChannelId) return
+  try {
+    const ch = await client.channels.fetch(item.textChannelId)
+    await ch.send(`⚠️ No se pudo reproducir \`${item.title || item.url}\` (${reason}). La salté y sigo con la cola.`)
+  } catch {}
+}
+
 // ── Resolución de links de otras plataformas ─────────────────────────────
 // Spotify y Apple Music usan DRM: no se pueden streamear sin cuenta. Se leen
 // los metadatos públicos del link (sin cuenta) y se busca la canción en
@@ -1115,6 +1158,29 @@ async function spotifyMeta(url) {
   return d.title
 }
 
+// Limpia una URL de YouTube de una CANCIÓN suelta: deja solo el video, quitando
+// list=RD… (radio/mix), start_radio, index, pp, t, etc. — basura que a menudo hace
+// que el "video" sea una radio no reproducible. Soporta watch/youtu.be/shorts/embed/
+// live. Para hosts que no son YouTube (SoundCloud, Bandcamp…) devuelve la URL igual.
+// OJO: NO se usa para playlists (el import necesita el list=…).
+function cleanYouTubeUrl(url) {
+  try {
+    const u = new URL(url)
+    const host = u.hostname.replace(/^(www|m|music)\./, '')
+    if (host === 'youtu.be') {
+      const id = u.pathname.slice(1).split('/')[0]
+      return id ? `https://www.youtube.com/watch?v=${id}` : url
+    }
+    if (host === 'youtube.com') {
+      const v = u.searchParams.get('v')
+      if (v) return `https://www.youtube.com/watch?v=${v}`
+      const m = u.pathname.match(/^\/(?:shorts|embed|live|v)\/([^/?#]+)/)
+      if (m) return `https://www.youtube.com/watch?v=${m[1]}`
+    }
+  } catch { /* no es URL válida: se devuelve tal cual */ }
+  return url
+}
+
 async function resolveInput(url) {
   url = url.trim()
   // No es un link: tratarlo como búsqueda en YouTube
@@ -1137,7 +1203,8 @@ async function resolveInput(url) {
     if (!t || !t.trackName) throw new Error('No se pudo leer el link de Apple Music')
     return { url: `ytsearch1:${t.artistName} ${t.trackName}`, title: `${t.artistName} - ${t.trackName} (vía YouTube)` }
   }
-  return { url }
+  // Link directo (YouTube u otra plataforma): limpiar la basura de YouTube si aplica.
+  return { url: cleanYouTubeUrl(url) }
 }
 
 // Resuelve cualquier entrada (link o búsqueda, igual que la cola) a una canción
