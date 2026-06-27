@@ -128,6 +128,9 @@ let musicVolumeCooldownMs = 2000
 // Objetivo de sonoridad (LUFS) al que se igualan los sonidos. Sube/baja el
 // volumen general SIN saturar (lo limita el techo de true-peak). Editable en el panel.
 let soundTargetLufs = TARGET_I
+// Tope de extracciones yt-dlp simultáneas en el worker (cola lo que exceda).
+// Protege la CPU del CX33 y el anti-bot de YouTube. Configurable en Variables Generales.
+let workerMaxConcurrency = 3
 try {
   const s = JSON.parse(readFileSync(SETTINGS_FILE, 'utf8'))
   soundBaseVolume = s.soundBaseVolume ?? 1
@@ -135,11 +138,19 @@ try {
   if (s.musicVolume != null) musicVolume = s.musicVolume
   if (s.musicVolumeCooldownMs != null) musicVolumeCooldownMs = s.musicVolumeCooldownMs
   if (s.soundTargetLufs != null) soundTargetLufs = s.soundTargetLufs
+  if (s.workerMaxConcurrency != null) workerMaxConcurrency = s.workerMaxConcurrency
 } catch {}
 soundTargetLufs = setTargetI(soundTargetLufs) // aplica el objetivo cargado
 function saveSettings() {
-  try { writeFileSync(SETTINGS_FILE, JSON.stringify({ soundBaseVolume, musicDuck, musicVolume, musicVolumeCooldownMs, soundTargetLufs })) } catch {}
+  try { writeFileSync(SETTINGS_FILE, JSON.stringify({ soundBaseVolume, musicDuck, musicVolume, musicVolumeCooldownMs, soundTargetLufs, workerMaxConcurrency })) } catch {}
 }
+// Empuja el límite de concurrencia al worker (best-effort; el worker arranca con
+// su default por env y el bot le impone el valor de Variables Generales).
+async function pushWorkerConfig() {
+  if (!USE_WORKER) return
+  try { await workerReq('POST', '/config', null, { concurrency: String(workerMaxConcurrency) }) } catch {}
+}
+pushWorkerConfig() // al arrancar, sincroniza el worker con el ajuste guardado
 
 if (!existsSync(SOUNDS_DIR)) mkdirSync(SOUNDS_DIR, { recursive: true })
 
@@ -1602,6 +1613,15 @@ function cmdMusicVolumeCooldown(sec) {
   return true
 }
 
+// Tope de extracciones yt-dlp simultáneas en el worker (1..16). Lo aplica en vivo.
+function cmdWorkerConcurrency(n) {
+  if (typeof n !== 'number' || isNaN(n)) return false
+  workerMaxConcurrency = Math.round(Math.min(16, Math.max(1, n)))
+  saveSettings()
+  pushWorkerConfig()
+  return true
+}
+
 // Atenuación de la música al sonar un efecto. `v` = factor 0..1 (volumen de la
 // música durante el efecto). Aplica en vivo (los mixers leen `musicDuck`).
 function cmdMusicDuck(v) {
@@ -1747,6 +1767,8 @@ function getState() {
     musicVolume,
     musicVolumeCooldownMs,
     soundTargetLufs,
+    workerEnabled: USE_WORKER,
+    workerMaxConcurrency,
   }
 }
 
@@ -2077,6 +2099,10 @@ http.createServer(async (req, res) => {
         case '/api/music-volume-cooldown': {
           if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)
           return sendJson({ ok: cmdMusicVolumeCooldown(body.seconds), musicVolumeCooldownMs })
+        }
+        case '/api/worker-concurrency': {
+          if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)
+          return sendJson({ ok: cmdWorkerConcurrency(body.value), workerMaxConcurrency })
         }
         case '/api/disconnect': {
           if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)

@@ -959,6 +959,19 @@
             <button id="btn-music-vol-cooldown">Guardar</button>
           </div>
         </div>
+        <div class="stats-section" id="worker-conc-section">
+          <h3>🎚️ Concurrencia del worker de música</h3>
+          <p class="hint" style="margin:0 0 12px">
+            Máximo de extracciones de YouTube (yt-dlp) <b>simultáneas</b> en el worker; lo que exceda
+            hace cola. Protege la CPU del worker y evita el bloqueo anti-bot de YouTube ante ráfagas.
+            Más alto = más paralelismo y más riesgo de saturar; más bajo = más seguro y más lento. Recomendado: <b>3</b>.
+          </p>
+          <div class="add-row" style="max-width:380px; align-items:center">
+            <input type="number" id="worker-conc" step="1" min="1" max="16" value="3" style="max-width:110px">
+            <span style="font-weight:600">a la vez</span>
+            <button id="btn-worker-conc">Guardar</button>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -1386,7 +1399,7 @@ document.querySelectorAll('.mtab').forEach(mt => {
     document.querySelectorAll('.mpage').forEach(p => p.classList.remove('active'))
     mt.classList.add('active')
     document.getElementById('mpage-' + mt.dataset.mtab).classList.add('active')
-    if (mt.dataset.mtab === 'vars') { syncBaseVolumeInput(); syncTargetLufsInput(); syncMusicDuckInput(); syncMusicVolCooldownInput() }
+    if (mt.dataset.mtab === 'vars') { syncBaseVolumeInput(); syncTargetLufsInput(); syncMusicDuckInput(); syncMusicVolCooldownInput(); syncWorkerConcInput() }
   }
 })
 
@@ -1467,6 +1480,26 @@ document.getElementById('btn-music-vol-cooldown').addEventListener('click', asyn
   try {
     const data = await api('/api/music-volume-cooldown', { seconds: sec })
     if (data && data.ok) toast('Límite guardado ✓')
+  } finally { btn.disabled = false; btn.textContent = orig }
+})
+
+// Concurrencia del worker de música (extracciones yt-dlp simultáneas).
+function syncWorkerConcInput() {
+  const sec = document.getElementById('worker-conc-section')
+  if (sec) sec.style.display = (state && state.workerEnabled) ? '' : 'none'
+  const inp = document.getElementById('worker-conc')
+  if (inp && state && state.workerMaxConcurrency != null && document.activeElement !== inp)
+    inp.value = state.workerMaxConcurrency
+}
+document.getElementById('btn-worker-conc').addEventListener('click', async () => {
+  const inp = document.getElementById('worker-conc')
+  const n = Number(inp.value)
+  if (!Number.isInteger(n) || n < 1 || n > 16) { toast('Valor inválido (1 a 16)'); return }
+  const btn = document.getElementById('btn-worker-conc')
+  btn.disabled = true; const orig = btn.textContent; btn.textContent = 'Guardando...'
+  try {
+    const data = await api('/api/worker-concurrency', { value: n })
+    if (data && data.ok) toast('Concurrencia guardada ✓')
   } finally { btn.disabled = false; btn.textContent = orig }
 })
 

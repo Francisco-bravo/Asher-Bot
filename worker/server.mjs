@@ -66,6 +66,29 @@ function saveIndex() {
 }
 function touch(key, patch = {}) { index[key] = { ...(index[key] || {}), ...patch, last: Date.now() }; saveIndex() }
 
+// ── Límite de concurrencia de yt-dlp (ajustable en caliente vía POST /config) ──
+// Protege la CPU del CX33 y evita el anti-bot de YouTube ante ráfagas (p.ej. la
+// Biblioteca pidiendo muchas carátulas de golpe). El bot empuja el valor desde
+// "Variables Generales". Lo que excede el tope hace cola hasta que se libera un slot.
+let MAX_CONC = Math.max(1, +(process.env.MAX_CONCURRENCY || 3))
+let active = 0
+const waiters = []
+function pump() { while (waiters.length && active < MAX_CONC) { active++; waiters.shift()() } }
+function acquire() { if (active < MAX_CONC) { active++; return Promise.resolve() } return new Promise(r => waiters.push(r)) }
+function release() { active = Math.max(0, active - 1); pump() }
+async function withSlot(fn) { await acquire(); try { return await fn() } finally { release() } }
+function setMaxConc(n) { MAX_CONC = Math.max(1, n | 0); pump() }
+
+// Deduplicación de operaciones en vuelo: si llega la misma clave mientras se
+// procesa, se comparte la misma promesa en vez de lanzar otro yt-dlp.
+const inflight = new Map()
+function dedup(key, fn) {
+  if (inflight.has(key)) return inflight.get(key)
+  const p = (async () => { try { return await fn() } finally { inflight.delete(key) } })()
+  inflight.set(key, p)
+  return p
+}
+
 function ytdlpArgs(extra) {
   // Node resuelve el desafío de firma de YouTube (mismo runtime que el bot).
   const a = ['--no-warnings', '--js-runtimes', `node:${NODE}`]
@@ -106,9 +129,12 @@ async function resolveMeta(src) {
 async function getMeta(src) {
   const mp = metaPath(keyOf(src))
   if (existsSync(mp)) { try { return JSON.parse(readFileSync(mp, 'utf8')) } catch {} }
-  const meta = await resolveMeta(src)
-  try { writeFileSync(mp, JSON.stringify(meta)) } catch {}
-  return meta
+  return dedup('meta:' + keyOf(src), async () => {
+    if (existsSync(mp)) { try { return JSON.parse(readFileSync(mp, 'utf8')) } catch {} }
+    const meta = await withSlot(() => resolveMeta(src))
+    try { writeFileSync(mp, JSON.stringify(meta)) } catch {}
+    return meta
+  })
 }
 
 // LRU: si el total supera el tope, expulsa los menos usados que no sean "keep".
@@ -158,7 +184,10 @@ function streamCached(res, file, seek, key) {
 
 // Extrae con yt-dlp→ffmpeg y transmite Opus. Si doCache y seek==0, hace tee a
 // disco y al terminar (yt-dlp código 0, sin abortar) lo deja en audio/<key>.opus.
-function extractAndStream(res, src, seek, key, doCache) {
+async function extractAndStream(res, src, seek, key, doCache) {
+  await acquire() // la extracción cuenta para el límite de concurrencia
+  let slotReleased = false
+  const releaseSlot = () => { if (!slotReleased) { slotReleased = true; release() } }
   const yt = spawn(YTDLP, ytdlpArgs(['--no-playlist', '-f', 'bestaudio/best', '-o', '-', src]))
   const ff = spawn(FFMPEG, opusArgs('pipe:0', seek))
   res.writeHead(200, { 'Content-Type': 'audio/ogg', 'Cache-Control': 'no-store', 'X-Cache': 'miss' })
@@ -183,12 +212,13 @@ function extractAndStream(res, src, seek, key, doCache) {
   const kill = () => { aborted = true; try { yt.kill('SIGKILL') } catch {} try { ff.kill('SIGKILL') } catch {} }
   res.on('close', () => { if (!ended) kill() })
 
-  yt.on('error', e => { console.error('yt-dlp:', e.message); try { res.destroy() } catch {} })
-  ff.on('error', e => { console.error('ffmpeg:', e.message); try { res.destroy() } catch {} })
+  yt.on('error', e => { console.error('yt-dlp:', e.message); releaseSlot(); try { res.destroy() } catch {} })
+  ff.on('error', e => { console.error('ffmpeg:', e.message); releaseSlot(); try { res.destroy() } catch {} })
   yt.on('close', code => { ytCode = code; if (code && !aborted) console.error('yt-dlp exit', code, ytErr.slice(0, 300)) })
 
   ff.on('close', () => {
     ended = true
+    releaseSlot()
     try { res.end() } catch {}
     if (!ws) return
     ws.end(() => {
@@ -208,7 +238,11 @@ function extractAndStream(res, src, seek, key, doCache) {
 }
 
 // Descarga a disco SIN transmitir (para /ensure: forzar caché / prefetch).
+// Dedup por clave + slot de concurrencia (no satura ante varios /ensure juntos).
 function downloadToCache(src, key) {
+  return dedup('ensure:' + key, () => withSlot(() => downloadToCacheRaw(src, key)))
+}
+function downloadToCacheRaw(src, key) {
   return new Promise((resolve, reject) => {
     const yt = spawn(YTDLP, ytdlpArgs(['--no-playlist', '-f', 'bestaudio/best', '-o', '-', src]))
     const ff = spawn(FFMPEG, opusArgs('pipe:0', 0))
@@ -266,8 +300,8 @@ async function serveArt(res, src) {
 
 // Expande una playlist (sin resolver cada video).
 async function getPlaylist(src) {
-  const out = await ytdlpText(['--flat-playlist', '--print',
-    '%(url)s\t%(title)s\t%(duration)s\t%(playlist_title)s\t%(thumbnail)s', src])
+  const out = await withSlot(() => ytdlpText(['--flat-playlist', '--print',
+    '%(url)s\t%(title)s\t%(duration)s\t%(playlist_title)s\t%(thumbnail)s', src]))
   return out.trim().split('\n').filter(Boolean).map(line => {
     const [u, title, dur, plTitle, thumb] = line.split('\t')
     return {
@@ -340,6 +374,15 @@ const server = http.createServer(async (req, res) => {
     if (p === '/playlist' && req.method === 'GET') {
       if (!needSrc()) return
       return sendJson(res, 200, await getPlaylist(src))
+    }
+
+    // Límite de concurrencia (ajustable en caliente desde "Variables Generales").
+    if (p === '/config') {
+      if (req.method === 'POST') {
+        const c = parseInt(u.searchParams.get('concurrency') || '', 10)
+        if (!isNaN(c)) setMaxConc(c)
+      }
+      return sendJson(res, 200, { concurrency: MAX_CONC, active, queued: waiters.length })
     }
 
     res.writeHead(404); res.end('not found')
