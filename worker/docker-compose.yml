@@ -1,0 +1,32 @@
+# music-worker desplegado sobre la red/proxy que ya tiene Coolify (Traefik v3.6,
+# cert-resolver "letsencrypt" por HTTP-challenge). HTTPS automático en el dominio.
+services:
+  music-worker:
+    build: .
+    image: music-worker:latest
+    container_name: music-worker
+    restart: unless-stopped
+    networks: [coolify]
+    environment:
+      - WORKER_TOKEN=${WORKER_TOKEN:?set WORKER_TOKEN}
+      - AUDIO_FORMAT=opus
+    volumes:
+      - /opt/music-worker/cookies.txt:/cookies.txt:ro
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=coolify
+      # HTTPS
+      - traefik.http.routers.music.rule=Host(`music.aronne.dev`)
+      - traefik.http.routers.music.entrypoints=https
+      - traefik.http.routers.music.tls=true
+      - traefik.http.routers.music.tls.certresolver=letsencrypt
+      - traefik.http.services.music.loadbalancer.server.port=8080
+      # HTTP -> redirige a HTTPS (y sirve el ACME challenge)
+      - traefik.http.routers.music-http.rule=Host(`music.aronne.dev`)
+      - traefik.http.routers.music-http.entrypoints=http
+      - traefik.http.routers.music-http.middlewares=music-redirect
+      - traefik.http.middlewares.music-redirect.redirectscheme.scheme=https
+
+networks:
+  coolify:
+    external: true

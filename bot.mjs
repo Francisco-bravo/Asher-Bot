@@ -29,7 +29,7 @@ import http from 'node:http'
 import ffmpegStatic from 'ffmpeg-static'
 import { getDb } from './lib/db.mjs'
 import * as soundLib from './lib/sounds.mjs'
-import { effectiveGain } from './lib/loudness.mjs'
+import { effectiveGain, setTargetI, TARGET_I } from './lib/loudness.mjs'
 import * as folders from './lib/folders.mjs'
 import * as playHistory from './lib/history.mjs'
 import * as auth from './lib/auth.mjs'
@@ -74,6 +74,21 @@ const SOUND_EXTS = new Set(['.mp3', '.wav', '.ogg', '.m4a', '.flac', '.webm'])
 const MAX_QUEUE = 100
 const MAX_HISTORY = 100
 
+// ── Worker de música (audio en dos nodos, Opción A(ii)) ────────────────────
+// Si MUSIC_WORKER_URL está definido, la EXTRACCIÓN/descarga pesada de YouTube se
+// hace en el worker remoto (CX33, Alemania) que devuelve Opus por HTTP; aquí solo
+// se decodifica ese Opus → PCM para el mixer (CPU trivial). Sin la env, el bot
+// usa yt-dlp local exactamente como antes. Los sonidos SIEMPRE son locales.
+const MUSIC_WORKER_URL = (process.env.MUSIC_WORKER_URL || '').replace(/\/$/, '')
+const MUSIC_WORKER_TOKEN = process.env.MUSIC_WORKER_TOKEN || ''
+const USE_WORKER = !!MUSIC_WORKER_URL
+function workerAudioUrl(src, seekSec) {
+  const u = new URL(MUSIC_WORKER_URL + '/audio')
+  u.searchParams.set('url', src)
+  if (seekSec > 0) u.searchParams.set('seek', String(seekSec))
+  return u
+}
+
 // Volumen BASE de los sonidos: multiplicador global (1 = normal, 2 = el doble),
 // se aplica encima de la igualación por loudness, a todos por igual. Es el único
 // volumen de sonidos: ya no hay slider por-usuario (todos suenan igual, normalizados).
@@ -81,13 +96,18 @@ let soundBaseVolume = 1
 // Atenuación de la música mientras suena un efecto (ducking): factor 0..1 con el
 // que se multiplica la música. 0.35 = la música baja al 35% (una bajada del 65%).
 let musicDuck = 0.35
+// Objetivo de sonoridad (LUFS) al que se igualan los sonidos. Sube/baja el
+// volumen general SIN saturar (lo limita el techo de true-peak). Editable en el panel.
+let soundTargetLufs = TARGET_I
 try {
   const s = JSON.parse(readFileSync(SETTINGS_FILE, 'utf8'))
   soundBaseVolume = s.soundBaseVolume ?? 1
   musicDuck = s.musicDuck ?? 0.35
+  if (s.soundTargetLufs != null) soundTargetLufs = s.soundTargetLufs
 } catch {}
+soundTargetLufs = setTargetI(soundTargetLufs) // aplica el objetivo cargado
 function saveSettings() {
-  try { writeFileSync(SETTINGS_FILE, JSON.stringify({ soundBaseVolume, musicDuck })) } catch {}
+  try { writeFileSync(SETTINGS_FILE, JSON.stringify({ soundBaseVolume, musicDuck, soundTargetLufs })) } catch {}
 }
 
 if (!existsSync(SOUNDS_DIR)) mkdirSync(SOUNDS_DIR, { recursive: true })
@@ -157,6 +177,7 @@ let currentChannelId = null
 let currentChannelName = null
 let soundActive = 0
 let activeProcs = []
+let remoteAbort = null   // AbortController del fetch al worker de música (si USE_WORKER)
 let soundIdSeq = 0
 const activeSounds = new Map() // id -> { file, proc, ov?, mixer?, direct? }
 
@@ -445,7 +466,69 @@ function startStreamAndCache(item, seekSec, song) {
   return ff.stdout
 }
 
+// Opción A(ii): reproduce desde el worker remoto. El CX33 corre yt-dlp+ffmpeg y
+// devuelve Opus por HTTP; aquí solo se decodifica a PCM s16le para el mixer (no
+// hay yt-dlp local). Si song y no hay seek, se hace tee del Opus a la caché en la
+// misma bajada. Devuelve la salida PCM de inmediato; el fetch se resuelve aparte.
+function startRemoteStream(item, seekSec, song) {
+  killBgYtdlp() // por si había trabajo de fondo local
+  streamDownloading = true
+  const args = ['-loglevel', 'error', '-i', 'pipe:0', '-vn', '-ar', '48000', '-ac', '2', '-f', 's16le', 'pipe:1']
+  const ff = spawn(FFMPEG, args)
+  ff.on('error', err => console.error('ffmpeg(worker):', err.message))
+  ff.stderr.on('data', d => process.stderr.write(d))
+  ff.stdin.on('error', () => {})
+  activeProcs = [ff]
+
+  // Caché: solo si no hay seek (con seek el worker entrega audio recortado, no la
+  // canción completa). El Opus se guarda tal cual; startFileStream lo decodifica.
+  let cacheFile = null, partPath = null, cp = null
+  if (song && seekSec === 0) {
+    cp = musicCache.cachePath(song)
+    partPath = `${cp}.${process.pid}.${Date.now()}.part`
+    try { cacheFile = createWriteStream(partPath) } catch { cacheFile = null }
+  }
+
+  const ac = new AbortController()
+  remoteAbort = ac
+  ;(async () => {
+    try {
+      const res = await fetch(workerAudioUrl(item.url, seekSec), {
+        headers: { Authorization: `Bearer ${MUSIC_WORKER_TOKEN}` },
+        signal: ac.signal,
+      })
+      if (!res.ok || !res.body) throw new Error(`worker HTTP ${res.status}`)
+      const web = Readable.fromWeb(res.body)
+      web.on('error', () => {})
+      web.pipe(ff.stdin)
+      if (cacheFile) web.pipe(cacheFile)
+      web.on('end', async () => {
+        streamDownloading = false
+        if (cacheFile) {
+          try { cacheFile.end() } catch {}
+          try {
+            renameSync(partPath, cp)
+            await musicCache.registerPlay(song, cp)
+            console.log(`Cacheado (worker): canción ${song.id}`)
+          } catch (e) {
+            console.warn('Cacheo (worker) falló:', e.message)
+            try { rmSync(partPath, { force: true }) } catch {}
+          }
+        }
+        backgroundWork()
+      })
+    } catch (e) {
+      streamDownloading = false
+      if (cacheFile) { try { cacheFile.end() } catch {}; try { rmSync(partPath, { force: true }) } catch {} }
+      if (!ac.signal.aborted) console.error('worker stream:', e.message)
+      try { ff.stdin.end() } catch {}
+    }
+  })()
+  return ff.stdout
+}
+
 function killStreamProcs() {
+  if (remoteAbort) { try { remoteAbort.abort() } catch {} ; remoteAbort = null }
   for (const p of activeProcs) { try { p.kill() } catch {} }
   activeProcs = []
 }
@@ -558,9 +641,21 @@ async function resolveSource(item) {
   return (await ytdlpPrint(item.url, 'webpage_url')) || item.url
 }
 
+// Pre-cacheo vía worker remoto: baja el Opus por HTTP y lo guarda en destPath.
+async function downloadViaWorker(url, destPath) {
+  const res = await fetch(workerAudioUrl(url, 0), {
+    headers: { Authorization: `Bearer ${MUSIC_WORKER_TOKEN}` },
+  })
+  if (!res.ok || !res.body) throw new Error(`worker HTTP ${res.status}`)
+  await pipeline(Readable.fromWeb(res.body), createWriteStream(destPath))
+}
+
 // Descarga el audio a un archivo exacto (destPath). yt-dlp escribe con su propia
 // extensión, así que bajamos a destPath.<ext> y renombramos a destPath.
 function downloadToFile(url, destPath) {
+  // Con worker remoto: el Opus llega por HTTP y se guarda tal cual (startFileStream
+  // lo decodifica). Así el pre-cacheo de fondo tampoco corre yt-dlp en Santiago.
+  if (USE_WORKER) return downloadViaWorker(url, destPath)
   return new Promise((resolve, reject) => {
     const proc = spawn(YTDLP, ytdlpArgs(['-f', 'bestaudio/best', '-o', `${destPath}.%(ext)s`, url]))
     bgProc = proc
@@ -840,15 +935,19 @@ async function ensurePlaying() {
           // URL no cacheada: stream + tee a caché en la MISMA descarga (1 yt-dlp).
           const s = song || musicCache.upsertSong({ sourceUrl: raw, title: current.title })
           current.songId = s.id
-          stream = startStreamAndCache({ ...current, url: raw }, seekOffset, s)
+          stream = USE_WORKER
+            ? startRemoteStream({ ...current, url: raw }, seekOffset, s)
+            : startStreamAndCache({ ...current, url: raw }, seekOffset, s)
         } else {
           // Término de búsqueda: stream directo (yt-dlp resuelve y reproduce en una
           // sola pasada). El cacheo/resolución lo hará el proceso de inactividad.
-          stream = startStream(current, seekOffset)
+          stream = USE_WORKER
+            ? startRemoteStream(current, seekOffset, null)
+            : startStream(current, seekOffset)
         }
       } catch (err) {
         console.warn('Reproducción: fallback a streaming directo:', err.message)
-        stream = startStream(current, seekOffset)
+        stream = USE_WORKER ? startRemoteStream(current, seekOffset, null) : startStream(current, seekOffset)
       }
       currentMixer = new MixerStream(stream, () => currentResource ? currentResource.playbackDuration : 0)
       currentResource = createAudioResource(currentMixer, { inputType: StreamType.Raw })
@@ -1383,6 +1482,19 @@ function cmdSoundBaseVolume(v) {
   return true
 }
 
+// Objetivo de loudness (LUFS): cambia a cuánto se igualan los sonidos. Al cambiarlo
+// hay que re-medir todos (la ganancia es por archivo); se dispara en segundo plano.
+function cmdSoundTargetLufs(v) {
+  if (typeof v !== 'number' || isNaN(v)) return false
+  soundTargetLufs = setTargetI(v)
+  saveSettings()
+  // Re-mide TODOS los sonidos con el nuevo objetivo (no bloquea la respuesta).
+  soundLib.normalizeAll({ force: true })
+    .then(r => { if (r.total) console.log(`Volumen: ${r.analyzed}/${r.total} sonidos re-medidos a ${soundTargetLufs} LUFS`) })
+    .catch(err => console.error('re-normalizar sonidos:', err.message))
+  return true
+}
+
 // Atenuación de la música al sonar un efecto. `v` = factor 0..1 (volumen de la
 // música durante el efecto). Aplica en vivo (los mixers leen `musicDuck`).
 function cmdMusicDuck(v) {
@@ -1525,6 +1637,7 @@ function getState() {
     playingSounds: playingSounds(),
     soundBaseVolume,
     musicDuck,
+    soundTargetLufs,
   }
 }
 
@@ -1840,6 +1953,10 @@ http.createServer(async (req, res) => {
         case '/api/sound/music-duck': {
           if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)
           return sendJson({ ok: cmdMusicDuck(body.value), musicDuck })
+        }
+        case '/api/sound/target-lufs': {
+          if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)
+          return sendJson({ ok: cmdSoundTargetLufs(body.value), soundTargetLufs })
         }
         case '/api/disconnect': {
           if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)

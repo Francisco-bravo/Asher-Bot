@@ -906,6 +906,20 @@
           </div>
         </div>
         <div class="stats-section">
+          <h3>📏 Objetivo de sonoridad (loudness)</h3>
+          <p class="hint" style="margin:0 0 12px">
+            A qué nivel se <b>igualan</b> todos los sonidos. Sube el volumen general <b>sin saturar</b>
+            (un techo interno evita el recorte). <b>-16</b> = solo igualar (más bajo) ·
+            <b>-6.5</b> ≈ al triple (más fuerte). Valores más altos = más fuerte. Al guardar se
+            <b>vuelven a medir todos</b> los sonidos en segundo plano (puede tardar un poco).
+          </p>
+          <div class="add-row" style="max-width:380px; align-items:center">
+            <input type="number" id="target-lufs" step="0.5" min="-30" max="0" value="-6.5" style="max-width:120px">
+            <span style="font-weight:600">LUFS</span>
+            <button id="btn-target-lufs">Guardar</button>
+          </div>
+        </div>
+        <div class="stats-section">
           <h3>🎚️ Atenuación de la música al sonar un sonido</h3>
           <p class="hint" style="margin:0 0 12px">
             Cuánto <b>baja</b> el volumen de la música mientras suena un efecto del soundboard.
@@ -1340,7 +1354,7 @@ document.querySelectorAll('.mtab').forEach(mt => {
     document.querySelectorAll('.mpage').forEach(p => p.classList.remove('active'))
     mt.classList.add('active')
     document.getElementById('mpage-' + mt.dataset.mtab).classList.add('active')
-    if (mt.dataset.mtab === 'vars') { syncBaseVolumeInput(); syncMusicDuckInput() }
+    if (mt.dataset.mtab === 'vars') { syncBaseVolumeInput(); syncTargetLufsInput(); syncMusicDuckInput() }
   }
 })
 
@@ -1358,6 +1372,23 @@ document.getElementById('btn-base-volume').addEventListener('click', async () =>
   try {
     const data = await api('/api/sound/base-volume', { volume: v })
     if (data && data.ok) toast('Volumen base guardado ✓') // api() ya avisa si falla
+  } finally { btn.disabled = false; btn.textContent = orig }
+})
+
+// Objetivo de loudness (LUFS): lee el valor actual y, al guardar, re-mide todos.
+function syncTargetLufsInput() {
+  const inp = document.getElementById('target-lufs')
+  if (inp && state && state.soundTargetLufs != null && document.activeElement !== inp) inp.value = state.soundTargetLufs
+}
+document.getElementById('btn-target-lufs').addEventListener('click', async () => {
+  const inp = document.getElementById('target-lufs')
+  const v = Number(inp.value)
+  if (!Number.isFinite(v) || v < -30 || v > 0) { toast('Valor inválido (-30 a 0)'); return }
+  const btn = document.getElementById('btn-target-lufs')
+  btn.disabled = true; const orig = btn.textContent; btn.textContent = 'Guardando...'
+  try {
+    const data = await api('/api/sound/target-lufs', { value: v })
+    if (data && data.ok) toast('Objetivo guardado ✓ — re-midiendo sonidos en segundo plano')
   } finally { btn.disabled = false; btn.textContent = orig }
 })
 
