@@ -52,6 +52,11 @@ if (existsSync(COOKIES)) {
 
 // Clave estable por fuente: las URLs directas se hashean tal cual; el bot SIEMPRE
 // pasa la URL canónica (resuelta antes con /meta), así audio/art/meta comparten clave.
+// Red de seguridad: una petición con error (p.ej. video no disponible) NUNCA debe
+// tumbar el worker. Logueamos y seguimos vivos.
+process.on('unhandledRejection', e => console.error('unhandledRejection:', e?.message || e))
+process.on('uncaughtException', e => console.error('uncaughtException:', e?.message || e))
+
 const keyOf = src => createHash('sha1').update(src).digest('hex')
 const audioPath = key => join(AUDIO_DIR, `${key}.opus`)
 const metaPath = key => join(META_DIR, `${key}.json`)
@@ -190,10 +195,8 @@ async function extractAndStream(res, src, seek, key, doCache) {
   const releaseSlot = () => { if (!slotReleased) { slotReleased = true; release() } }
   const yt = spawn(YTDLP, ytdlpArgs(['--no-playlist', '-f', 'bestaudio/best', '-o', '-', src]))
   const ff = spawn(FFMPEG, opusArgs('pipe:0', seek))
-  res.writeHead(200, { 'Content-Type': 'audio/ogg', 'Cache-Control': 'no-store', 'X-Cache': 'miss' })
 
   yt.stdout.pipe(ff.stdin)
-  ff.stdout.pipe(res)
   yt.stdout.on('error', () => {})
   ff.stdin.on('error', () => {})
 
@@ -201,13 +204,22 @@ async function extractAndStream(res, src, seek, key, doCache) {
   if (doCache && seek === 0) {
     tmp = `${audioPath(key)}.${process.pid}.${Date.now()}.part`
     ws = createWriteStream(tmp)
-    ff.stdout.pipe(ws)
   }
 
-  let ytCode = null, aborted = false, ended = false
+  let ytCode = null, aborted = false, ended = false, headerSent = false
   let ytErr = ''
   yt.stderr.on('data', d => { if (ytErr.length < 2000) ytErr += d })
   ff.stderr.on('data', () => {})
+
+  // El 200 NO se envía hasta el primer byte de audio: si la extracción falla
+  // (video no disponible, etc.) se responde 502 en vez de un 200 vacío (que el
+  // bot interpretaba como "Invalid data" y hacía desaparecer la canción).
+  ff.stdout.on('data', chunk => {
+    if (!headerSent) { headerSent = true; res.writeHead(200, { 'Content-Type': 'audio/ogg', 'Cache-Control': 'no-store', 'X-Cache': 'miss' }) }
+    const ok = res.write(chunk)
+    if (ws) ws.write(chunk)
+    if (!ok) { ff.stdout.pause(); res.once('drain', () => ff.stdout.resume()) }
+  })
 
   const kill = () => { aborted = true; try { yt.kill('SIGKILL') } catch {} try { ff.kill('SIGKILL') } catch {} }
   res.on('close', () => { if (!ended) kill() })
@@ -219,11 +231,12 @@ async function extractAndStream(res, src, seek, key, doCache) {
   ff.on('close', () => {
     ended = true
     releaseSlot()
-    try { res.end() } catch {}
+    if (!headerSent && !aborted) { try { res.writeHead(502, { 'Content-Type': 'text/plain' }); res.end('extraction failed') } catch {} }
+    else { try { res.end() } catch {} }
     if (!ws) return
     ws.end(() => {
-      // Solo cachea si la extracción terminó bien y el cliente no abortó.
-      if (ytCode === 0 && !aborted) {
+      // Solo cachea si hubo audio real, la extracción terminó bien y no se abortó.
+      if (headerSent && ytCode === 0 && !aborted) {
         try {
           const dst = audioPath(key)
           renameSync(tmp, dst)
@@ -281,7 +294,8 @@ async function serveArt(res, src) {
     res.writeHead(200, { 'Content-Type': index[key].artMime, 'Cache-Control': 'public, max-age=86400' })
     return createReadStream(file).pipe(res)
   }
-  const meta = await getMeta(src)
+  let meta
+  try { meta = await getMeta(src) } catch (e) { res.writeHead(404); return res.end('sin meta: ' + e.message) }
   if (!meta.thumbnail) { res.writeHead(404); return res.end('sin caratula') }
   const ctrl = new AbortController()
   const t = setTimeout(() => ctrl.abort(), 8000)
@@ -338,12 +352,12 @@ const server = http.createServer(async (req, res) => {
       const key = keyOf(src)
       const file = audioPath(key)
       if (existsSync(file)) return streamCached(res, file, seek, key)
-      return extractAndStream(res, src, seek, key, true)
+      return await extractAndStream(res, src, seek, key, true)
     }
 
     if (p === '/art' && req.method === 'GET') {
       if (!needSrc()) return
-      return serveArt(res, src)
+      return await serveArt(res, src)
     }
 
     if (p === '/ensure' && req.method === 'POST') {
