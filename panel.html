@@ -595,6 +595,11 @@
   .song-cover img { position: relative; width: 100%; height: 100%; object-fit: cover; }
   .cover-edit { position: absolute; right: 2px; bottom: 2px; border: none; border-radius: 5px; background: rgba(0,0,0,.62); color: #fff; cursor: pointer; font-size: .72rem; line-height: 1; padding: 3px 5px; }
   .cover-edit:hover { background: rgba(0,0,0,.85); }
+  .art-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(108px, 1fr)); gap: 10px; max-height: 52vh; overflow: auto; }
+  .art-opt { cursor: pointer; border: 2px solid transparent; border-radius: 8px; overflow: hidden; background: var(--panel3); position: relative; }
+  .art-opt:hover { border-color: #5865f2; }
+  .art-opt img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; }
+  .art-opt .art-src { position: absolute; top: 0; left: 0; right: 0; background: rgba(0,0,0,.58); color: #fff; font-size: .64rem; padding: 2px 4px; text-align: center; }
   .song-head { display: flex; align-items: center; gap: 8px; }
   .song-title { font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .song-badges { display: flex; gap: 6px; flex-shrink: 0; }
@@ -1186,6 +1191,20 @@
     </div>
   </div>
 
+  <div class="modal-overlay" id="art-modal" style="display:none">
+    <div class="modal" style="max-width:680px">
+      <h2>🖼️ Buscar carátula</h2>
+      <p class="modal-folder" id="art-modal-song"></p>
+      <div class="add-row" style="align-items:center;margin-bottom:12px">
+        <input type="text" id="art-modal-query" placeholder="Artista y canción" style="flex:1" onkeydown="if(event.key==='Enter')doArtSearch()">
+        <button id="art-modal-search" onclick="doArtSearch()">Buscar</button>
+      </div>
+      <div id="art-modal-results" class="art-grid"><p class="empty">Escribe y busca…</p></div>
+      <div class="modal-actions">
+        <button type="button" class="cancel" onclick="closeArtModal()">Cerrar</button>
+      </div>
+    </div>
+  </div>
   <div class="modal-overlay" id="edit-modal" style="display:none">
     <div class="modal">
       <h2 id="edit-title">Editar nombre</h2>
@@ -2854,7 +2873,7 @@ function renderMusicList(songs) {
     const cover = `<div class="song-cover">
       <span class="song-cover-ph">🎵</span>
       <img src="${esc(webUrl('/art/' + s.id) + bust)}" alt="" onerror="this.style.display='none'">
-      ${isAdmin ? `<button class="cover-edit" title="Buscar carátula (iTunes/Deezer/…)" onclick="searchArt(${s.id})">✏️</button>` : ''}
+      ${isAdmin ? `<button class="cover-edit" title="Buscar carátula (iTunes/Deezer/…)" onclick="openArtModal(${s.id})">✏️</button>` : ''}
     </div>`
     return `<div class="song-card song-card-flex">
       ${cover}
@@ -2920,22 +2939,50 @@ async function playSong(id) {
 
 // Cache-busting de las carátulas tras actualizarlas (el navegador cachea /art/:id).
 const artBust = {}
-// Botón ✏️: buscar carátula en iTunes/Deezer/álbum/arte embebido y fijarla.
-async function searchArt(id) {
+// Botón ✏️: abre un modal que busca la carátula en TODAS las fuentes para elegir.
+let artModalId = null, artModalOpts = []
+function openArtModal(id) {
+  artModalId = id
   const s = musicSongs.find(x => x.id === id)
-  const def = s ? [s.artist, s.title].filter(Boolean).join(' ').trim() : ''
-  const q = prompt('Buscar carátula en iTunes / Deezer / álbum / arte embebido.\nTérmino de búsqueda:', def)
-  if (q === null) return
-  toast('Buscando carátula…')
+  document.getElementById('art-modal-song').textContent = s ? (s.title || '') : ''
+  document.getElementById('art-modal-query').value = s ? [s.artist, s.title].filter(Boolean).join(' ').trim() : ''
+  document.getElementById('art-modal-results').innerHTML = '<p class="empty">Buscando…</p>'
+  document.getElementById('art-modal').style.display = 'flex'
+  doArtSearch()
+}
+function closeArtModal() { document.getElementById('art-modal').style.display = 'none'; artModalId = null; artModalOpts = [] }
+async function doArtSearch() {
+  if (artModalId == null) return
+  const q = document.getElementById('art-modal-query').value.trim()
+  const box = document.getElementById('art-modal-results')
+  box.innerHTML = '<p class="empty">Buscando en iTunes, Deezer, álbum, archivo…</p>'
   try {
-    const res = await webFetch('/api/music/' + id + '/art-search', {
+    const res = await webFetch('/api/music/' + artModalId + '/art-options', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query: q }),
     })
     const d = await res.json().catch(() => null)
-    if (!res.ok) { toast(d && d.error ? d.error : 'No se encontró carátula'); return }
+    artModalOpts = (d && d.options) || []
+    if (!artModalOpts.length) { box.innerHTML = '<p class="empty">No se encontraron carátulas. Probá con otro término.</p>'; return }
+    box.innerHTML = artModalOpts.map((o, i) => `<div class="art-opt" onclick="pickArt(${i})" title="${esc(o.label || o.source)}">
+      <span class="art-src">${esc(o.source)}</span>
+      <img src="${esc(o.url)}" alt="" loading="lazy" onerror="this.closest('.art-opt').remove()">
+    </div>`).join('')
+  } catch { box.innerHTML = '<p class="empty">Error al buscar.</p>' }
+}
+async function pickArt(i) {
+  const o = artModalOpts[i]
+  if (!o || artModalId == null) return
+  const id = artModalId
+  toast('Guardando carátula…')
+  try {
+    const res = await webFetch('/api/music/' + id + '/art-set', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: o.url }),
+    })
+    const d = await res.json().catch(() => null)
+    if (!res.ok) { toast(d && d.error ? d.error : 'Error'); return }
     artBust[id] = Date.now()
     toast('Carátula actualizada ✓')
-    loadMusic()
+    closeArtModal(); loadMusic()
   } catch { toast('Error') }
 }
 

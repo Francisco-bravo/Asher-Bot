@@ -653,16 +653,35 @@ async function fetchMeta(item) {
       const m = await workerMeta(item.url)
       if (m.title) item.title = m.title
       if (m.duration) item.duration = m.duration
+      if (m.uploader) item.uploader = m.uploader
       updatePanel()
       return
     } catch { /* worker caído → fallback local */ }
   }
   return fetchMetaLocal(item)
 }
+// Deriva el artista: "Artista - Canción" → "Artista"; si el título es solo el
+// nombre de la canción, usa el CANAL (uploader) limpiando sufijos típicos de
+// YouTube ("- Topic", "VEVO", "Official"...).
+function cleanChannelName(u) {
+  return String(u || '').trim()
+    .replace(/\s*-\s*Topic$/i, '')
+    .replace(/\s*VEVO$/i, '')
+    .replace(/\s*[-–]?\s*(Official|Oficial)$/i, '')
+    .trim()
+}
+function deriveArtist(title, uploader) {
+  const parts = String(title || '').split(/\s+[-–—]\s+/)
+  if (parts.length >= 2) {
+    const cand = parts[0].trim()
+    if (cand.length >= 2 && cand.length <= 40) return cand
+  }
+  return cleanChannelName(uploader) || null
+}
 function fetchMetaLocal(item) {
   return new Promise(resolve => {
     const proc = spawn(YTDLP, ytdlpArgs([
-      '--skip-download', '--print', '%(title)s\n%(duration)s', item.url
+      '--skip-download', '--print', '%(title)s\n%(duration)s\n%(uploader)s', item.url
     ]))
     bgProc = proc
     let out = ''
@@ -670,10 +689,11 @@ function fetchMetaLocal(item) {
     proc.on('error', () => { if (bgProc === proc) bgProc = null; resolve() })
     proc.on('close', () => {
       if (bgProc === proc) bgProc = null
-      const [title, dur] = out.trim().split('\n')
+      const [title, dur, uploader] = out.trim().split('\n')
       if (title) item.title = title
       const d = parseFloat(dur)
       if (!isNaN(d)) item.duration = d
+      if (uploader && uploader !== 'NA') item.uploader = uploader
       updatePanel()
       resolve()
     })
@@ -926,7 +946,9 @@ async function enrich(item) {
     await fetchMeta(item) // setea item.title/duration reales (si los hay)
     const goodTitle = !isPoorTitle(item.title, sourceUrl) ? item.title : null
     const durationMs = (item.duration && !isNaN(item.duration)) ? item.duration * 1000 : null
-    song = musicCache.setMeta(song.id, { title: goodTitle, durationMs })
+    // Artista: del título ("Artista - Canción") o, si no, del canal. No pisa uno ya bueno.
+    const artist = song.artist ? null : deriveArtist(item.title, item.uploader)
+    song = musicCache.setMeta(song.id, { title: goodTitle, durationMs, artist })
     updatePanel()
     return true
   }

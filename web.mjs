@@ -664,6 +664,43 @@ http.createServer(async (req, res) => {
       await artStore.store(song.id, r.buf, r.ext)
       return send(res, 200, { ok: true, id: song.id, ext: r.ext })
     }
+    // Modal de carátula: lista candidatas de TODAS las fuentes para que el admin elija.
+    const mArtOptions = path.match(/^\/api\/music\/(\d+)\/art-options$/)
+    if (mArtOptions && req.method === 'POST') {
+      if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un admin' })
+      const song = music.getById(Number(mArtOptions[1]))
+      if (!song) return send(res, 404, { error: 'Canción no encontrada' })
+      const body = JSON.parse((await readBody(req)).toString() || '{}')
+      const query = (body.query || '').trim() || null
+      let localFile = null
+      try { localFile = music.cachePath(song) } catch {}
+      const options = await artsearch.searchAllOptions(song, { query, localFile })
+      // Añadir la miniatura "de siempre" (YouTube) como una opción más.
+      if (USE_WORKER && /^https?:\/\//i.test(song.source_url)) {
+        try {
+          const r = await workerReq('GET', '/meta', song.source_url)
+          if (r.ok) { const m = await r.json(); if (m.thumbnail) options.push({ source: 'YouTube', url: m.thumbnail, label: 'miniatura del video' }) }
+        } catch {}
+      }
+      return send(res, 200, { options })
+    }
+    // Modal de carátula: fija la carátula elegida (URL http o data:base64).
+    const mArtSet = path.match(/^\/api\/music\/(\d+)\/art-set$/)
+    if (mArtSet && req.method === 'POST') {
+      if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un admin' })
+      const song = music.getById(Number(mArtSet[1]))
+      if (!song) return send(res, 404, { error: 'Canción no encontrada' })
+      const body = JSON.parse((await readBody(req)).toString() || '{}')
+      const url = (body.url || '').trim()
+      if (!url) return send(res, 400, { error: 'Falta la imagen' })
+      let buf = null, ext = 'jpg'
+      const dm = url.match(/^data:image\/(\w+);base64,(.+)$/)
+      if (dm) { ext = dm[1] === 'png' ? 'png' : dm[1] === 'webp' ? 'webp' : 'jpg'; buf = Buffer.from(dm[2], 'base64') }
+      else { const img = await artsearch.fetchImg(url); if (img) { buf = img.buf; ext = img.ext } }
+      if (!buf || !buf.length) return send(res, 400, { error: 'No se pudo obtener la imagen' })
+      await artStore.store(song.id, buf, ext)
+      return send(res, 200, { ok: true, id: song.id, ext })
+    }
     // Borrar una canción (caché + object-store + fila). Solo admin.
     const mId = path.match(/^\/api\/music\/(\d+)$/)
     if (mId && req.method === 'DELETE') {
