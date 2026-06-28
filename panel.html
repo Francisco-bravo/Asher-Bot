@@ -561,6 +561,9 @@
   .track-current .status-ico { color: var(--accent); width: 18px; text-align: center; }
 
   .empty { color: var(--muted); text-align: center; padding: 18px; }
+  .lib-search-empty { text-align: center; padding: 8px 0 4px; }
+  .lib-search-empty .empty { padding: 6px 0; }
+  .lib-search-empty button { padding: 10px 18px; font-size: 15px; }
 
   #toast {
     position: fixed; bottom: 104px; left: 50%; transform: translateX(-50%);
@@ -958,32 +961,6 @@
             <button id="btn-music-duck">Guardar</button>
           </div>
         </div>
-        <div class="stats-section">
-          <h3>⏳ Límite de cambios de volumen de música</h3>
-          <p class="hint" style="margin:0 0 12px">
-            Tiempo mínimo entre cambios del volumen de música, <b>compartido</b> entre la web y Discord,
-            para que no se solapen los ajustes de varias personas. Ej.: <b>2</b> = un cambio cada 2 s ·
-            <b>0</b> = sin límite.
-          </p>
-          <div class="add-row" style="max-width:380px; align-items:center">
-            <input type="number" id="music-vol-cooldown" step="0.5" min="0" max="30" value="2" style="max-width:110px">
-            <span style="font-weight:600">seg</span>
-            <button id="btn-music-vol-cooldown">Guardar</button>
-          </div>
-        </div>
-        <div class="stats-section" id="worker-conc-section">
-          <h3>🎚️ Concurrencia del worker de música</h3>
-          <p class="hint" style="margin:0 0 12px">
-            Máximo de extracciones de YouTube (yt-dlp) <b>simultáneas</b> en el worker; lo que exceda
-            hace cola. Protege la CPU del worker y evita el bloqueo anti-bot de YouTube ante ráfagas.
-            Más alto = más paralelismo y más riesgo de saturar; más bajo = más seguro y más lento. Recomendado: <b>3</b>.
-          </p>
-          <div class="add-row" style="max-width:380px; align-items:center">
-            <input type="number" id="worker-conc" step="1" min="1" max="16" value="3" style="max-width:110px">
-            <span style="font-weight:600">a la vez</span>
-            <button id="btn-worker-conc">Guardar</button>
-          </div>
-        </div>
       </div>
     </div>
 
@@ -1004,6 +981,7 @@
     <div class="subtabs ltabs">
       <button class="ltab active" data-ltab="songs">🎵 Canciones</button>
       <button class="ltab" data-ltab="playlists">🎶 Playlists</button>
+      <button class="ltab" id="ltab-vars" data-ltab="vars">⚙️ Variables generales</button>
     </div>
     <div class="lpage active" id="lpage-songs">
       <input type="text" id="library-search" class="sound-search" placeholder="🔍 Buscar canción en la biblioteca...">
@@ -1020,6 +998,84 @@
       </div>
       <p class="hint" style="margin:-4px 0 14px">Importar trae la playlist completa con su <b>nombre</b> y sus canciones.</p>
       <div id="playlists-list" class="playlists-list"></div>
+    </div>
+    <div class="lpage" id="lpage-vars">
+      <div class="stats-section">
+        <h3>⏳ Límite de cambios de volumen de música</h3>
+        <p class="hint" style="margin:0 0 12px">
+          Tiempo mínimo entre cambios del volumen de música, <b>compartido</b> entre la web y Discord,
+          para que no se solapen los ajustes de varias personas. Ej.: <b>2</b> = un cambio cada 2 s ·
+          <b>0</b> = sin límite.
+        </p>
+        <div class="add-row" style="max-width:380px; align-items:center">
+          <input type="number" id="music-vol-cooldown" step="0.5" min="0" max="30" value="2" style="max-width:110px">
+          <span style="font-weight:600">seg</span>
+          <button id="btn-music-vol-cooldown">Guardar</button>
+        </div>
+      </div>
+      <div class="stats-section" id="worker-conc-section">
+        <h3>🎚️ Concurrencia del worker de música</h3>
+        <p class="hint" style="margin:0 0 12px">
+          Máximo de extracciones de YouTube (yt-dlp) <b>simultáneas</b> en el worker; lo que exceda
+          hace cola. Protege la CPU del worker y evita el bloqueo anti-bot de YouTube ante ráfagas.
+          Más alto = más paralelismo y más riesgo de saturar; más bajo = más seguro y más lento. Recomendado: <b>3</b>.
+        </p>
+        <div class="add-row" style="max-width:380px; align-items:center">
+          <input type="number" id="worker-conc" step="1" min="1" max="16" value="3" style="max-width:110px">
+          <span style="font-weight:600">a la vez</span>
+          <button id="btn-worker-conc">Guardar</button>
+        </div>
+      </div>
+      <div class="stats-section" id="worker-cache-section">
+        <h3>💾 Tamaño máximo de la caché del worker</h3>
+        <p class="hint" style="margin:0 0 12px">
+          Espacio en disco del worker para guardar el audio de música. Al superarlo, se
+          <b>borra lo menos escuchado</b> (LRU). Más alto = menos re-descargas; el disco del worker
+          es de ~80 GB, deja holgura. Recomendado: <b>70</b>.
+        </p>
+        <div class="add-row" style="max-width:380px; align-items:center">
+          <input type="number" id="worker-cache-max" step="5" min="5" max="75" value="70" style="max-width:110px">
+          <span style="font-weight:600">GB</span>
+          <button id="btn-worker-cache-max">Guardar</button>
+        </div>
+      </div>
+      <div class="stats-section" id="music-bitrate-section">
+        <h3>🎧 Calidad de la música (bitrate)</h3>
+        <p class="hint" style="margin:0 0 12px">
+          Bitrate del audio Opus que produce el worker. Más alto = mejor calidad y más datos/disco.
+          Solo afecta a las canciones <b>nuevas</b>; lo ya cacheado conserva su calidad.
+          Típico: <b>128</b> (suficiente) · <b>160</b> (recomendado) · <b>192</b> (alta).
+        </p>
+        <div class="add-row" style="max-width:380px; align-items:center">
+          <input type="number" id="music-bitrate" step="16" min="64" max="256" value="160" style="max-width:110px">
+          <span style="font-weight:600">kbps</span>
+          <button id="btn-music-bitrate">Guardar</button>
+        </div>
+      </div>
+      <div class="stats-section">
+        <h3>📋 Tamaño máximo de la cola</h3>
+        <p class="hint" style="margin:0 0 12px">
+          Cuántas canciones se pueden tener <b>en espera</b> a la vez. Al llegar al tope, no se
+          aceptan más hasta que avance la cola. No afecta a lo ya encolado.
+        </p>
+        <div class="add-row" style="max-width:380px; align-items:center">
+          <input type="number" id="max-queue" step="10" min="1" max="500" value="100" style="max-width:110px">
+          <span style="font-weight:600">canciones</span>
+          <button id="btn-max-queue">Guardar</button>
+        </div>
+      </div>
+      <div class="stats-section">
+        <h3>🕑 Retención del historial</h3>
+        <p class="hint" style="margin:0 0 12px">
+          Cuántas canciones <b>ya reproducidas</b> se recuerdan (para volver a agregarlas con ↻).
+          Si lo bajas, se recorta de inmediato a las más recientes.
+        </p>
+        <div class="add-row" style="max-width:380px; align-items:center">
+          <input type="number" id="max-history" step="10" min="1" max="500" value="100" style="max-width:110px">
+          <span style="font-weight:600">canciones</span>
+          <button id="btn-max-history">Guardar</button>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -1355,7 +1411,7 @@ function renderUserChip() {
 function applyAdminUI() {
   const isAdmin = me && (me.roles || []).includes('admin')
   // La pestaña Caché y el selector de canal de voz son solo para administradores.
-  for (const id of ['tab-cache', 'page-cache', 'tab-users', 'page-users', 'tab-voice', 'page-voice', 'voice-panel', 'subtab-stats', 'subtab-manage', 'subtab-audit']) {
+  for (const id of ['tab-cache', 'page-cache', 'tab-users', 'page-users', 'tab-voice', 'page-voice', 'voice-panel', 'subtab-stats', 'subtab-manage', 'subtab-audit', 'ltab-vars', 'lpage-vars']) {
     const el = document.getElementById(id)
     if (!el) continue
     if (isAdmin) el.style.removeProperty('display')
@@ -1408,15 +1464,26 @@ document.querySelectorAll('.subtab').forEach(st => {
   }
 })
 
-// Tabs internos de Biblioteca (Canciones / Playlists)
+// Tabs internos de Biblioteca (Canciones / Playlists / Variables generales)
 document.querySelectorAll('.ltab').forEach(lt => {
   lt.onclick = () => {
     document.querySelectorAll('.ltab').forEach(t => t.classList.remove('active'))
     document.querySelectorAll('.lpage').forEach(p => p.classList.remove('active'))
     lt.classList.add('active')
     document.getElementById('lpage-' + lt.dataset.ltab).classList.add('active')
+    if (lt.dataset.ltab === 'vars') syncMusicVarsInputs()
   }
 })
+
+// Sincroniza los campos de Música › Variables generales con el estado actual.
+function syncMusicVarsInputs() {
+  syncMusicVolCooldownInput()
+  syncWorkerConcInput()
+  syncWorkerCacheMaxInput()
+  syncMusicBitrateInput()
+  syncMaxQueueInput()
+  syncMaxHistoryInput()
+}
 
 // Tabs internos de Gestión (Sonidos / Variables Generales)
 document.querySelectorAll('.mtab').forEach(mt => {
@@ -1425,7 +1492,7 @@ document.querySelectorAll('.mtab').forEach(mt => {
     document.querySelectorAll('.mpage').forEach(p => p.classList.remove('active'))
     mt.classList.add('active')
     document.getElementById('mpage-' + mt.dataset.mtab).classList.add('active')
-    if (mt.dataset.mtab === 'vars') { syncBaseVolumeInput(); syncTargetLufsInput(); syncMusicDuckInput(); syncMusicVolCooldownInput(); syncWorkerConcInput() }
+    if (mt.dataset.mtab === 'vars') { syncBaseVolumeInput(); syncTargetLufsInput(); syncMusicDuckInput() }
   }
 })
 
@@ -1511,8 +1578,12 @@ document.getElementById('btn-music-vol-cooldown').addEventListener('click', asyn
 
 // Concurrencia del worker de música (extracciones yt-dlp simultáneas).
 function syncWorkerConcInput() {
-  const sec = document.getElementById('worker-conc-section')
-  if (sec) sec.style.display = (state && state.workerEnabled) ? '' : 'none'
+  // Las secciones que dependen del worker se ocultan si no hay worker activo.
+  const on = state && state.workerEnabled
+  for (const id of ['worker-conc-section', 'worker-cache-section', 'music-bitrate-section']) {
+    const sec = document.getElementById(id)
+    if (sec) sec.style.display = on ? '' : 'none'
+  }
   const inp = document.getElementById('worker-conc')
   if (inp && state && state.workerMaxConcurrency != null && document.activeElement !== inp)
     inp.value = state.workerMaxConcurrency
@@ -1526,6 +1597,78 @@ document.getElementById('btn-worker-conc').addEventListener('click', async () =>
   try {
     const data = await api('/api/worker-concurrency', { value: n })
     if (data && data.ok) toast('Concurrencia guardada ✓')
+  } finally { btn.disabled = false; btn.textContent = orig }
+})
+
+// Tamaño máximo de la caché del worker (GB).
+function syncWorkerCacheMaxInput() {
+  const inp = document.getElementById('worker-cache-max')
+  if (inp && state && state.workerCacheMaxGb != null && document.activeElement !== inp)
+    inp.value = state.workerCacheMaxGb
+}
+document.getElementById('btn-worker-cache-max').addEventListener('click', async () => {
+  const inp = document.getElementById('worker-cache-max')
+  const n = Number(inp.value)
+  if (!Number.isFinite(n) || n < 5 || n > 75) { toast('Valor inválido (5 a 75)'); return }
+  const btn = document.getElementById('btn-worker-cache-max')
+  btn.disabled = true; const orig = btn.textContent; btn.textContent = 'Guardando...'
+  try {
+    const data = await api('/api/worker-cache-max', { gb: n })
+    if (data && data.ok) toast('Tamaño de caché guardado ✓')
+  } finally { btn.disabled = false; btn.textContent = orig }
+})
+
+// Calidad/bitrate de la música (kbps).
+function syncMusicBitrateInput() {
+  const inp = document.getElementById('music-bitrate')
+  if (inp && state && state.musicBitrateKbps != null && document.activeElement !== inp)
+    inp.value = state.musicBitrateKbps
+}
+document.getElementById('btn-music-bitrate').addEventListener('click', async () => {
+  const inp = document.getElementById('music-bitrate')
+  const n = Number(inp.value)
+  if (!Number.isInteger(n) || n < 64 || n > 256) { toast('Valor inválido (64 a 256)'); return }
+  const btn = document.getElementById('btn-music-bitrate')
+  btn.disabled = true; const orig = btn.textContent; btn.textContent = 'Guardando...'
+  try {
+    const data = await api('/api/music-bitrate', { kbps: n })
+    if (data && data.ok) toast('Calidad guardada ✓ (afecta canciones nuevas)')
+  } finally { btn.disabled = false; btn.textContent = orig }
+})
+
+// Tamaño máximo de la cola de música.
+function syncMaxQueueInput() {
+  const inp = document.getElementById('max-queue')
+  if (inp && state && state.maxQueue != null && document.activeElement !== inp)
+    inp.value = state.maxQueue
+}
+document.getElementById('btn-max-queue').addEventListener('click', async () => {
+  const inp = document.getElementById('max-queue')
+  const n = Number(inp.value)
+  if (!Number.isInteger(n) || n < 1 || n > 500) { toast('Valor inválido (1 a 500)'); return }
+  const btn = document.getElementById('btn-max-queue')
+  btn.disabled = true; const orig = btn.textContent; btn.textContent = 'Guardando...'
+  try {
+    const data = await api('/api/max-queue', { value: n })
+    if (data && data.ok) toast('Tamaño de cola guardado ✓')
+  } finally { btn.disabled = false; btn.textContent = orig }
+})
+
+// Retención del historial de reproducidas.
+function syncMaxHistoryInput() {
+  const inp = document.getElementById('max-history')
+  if (inp && state && state.maxHistory != null && document.activeElement !== inp)
+    inp.value = state.maxHistory
+}
+document.getElementById('btn-max-history').addEventListener('click', async () => {
+  const inp = document.getElementById('max-history')
+  const n = Number(inp.value)
+  if (!Number.isInteger(n) || n < 1 || n > 500) { toast('Valor inválido (1 a 500)'); return }
+  const btn = document.getElementById('btn-max-history')
+  btn.disabled = true; const orig = btn.textContent; btn.textContent = 'Guardando...'
+  try {
+    const data = await api('/api/max-history', { value: n })
+    if (data && data.ok) toast('Retención de historial guardada ✓')
   } finally { btn.disabled = false; btn.textContent = orig }
 })
 
@@ -2509,7 +2652,17 @@ function renderLibrary() {
   const list = filterSongs(musicSongs, q)
   box.className = 'song-grid'
   if (!list.length) {
-    box.innerHTML = `<p class="empty">${q ? 'Sin resultados' : 'No hay canciones todavía. Reproduce alguna y aparecerá aquí.'}</p>`
+    if (q) {
+      // Sin coincidencias en la biblioteca local: ofrecer buscar la canción
+      // (YouTube, etc.) y agregarla a la cola, igual que el campo de la cola.
+      box.className = ''
+      box.innerHTML = `<div class="lib-search-empty">
+        <p class="empty">No está en la biblioteca.</p>
+        <button id="lib-search-btn" onclick="searchAndQueue(this)">🔍 Buscar y agregar a la cola</button>
+      </div>`
+    } else {
+      box.innerHTML = `<p class="empty">No hay canciones todavía. Reproduce alguna y aparecerá aquí.</p>`
+    }
     return
   }
   box.innerHTML = list.map(s =>
@@ -2520,6 +2673,27 @@ function renderLibrary() {
 async function queueSong(id) {
   const data = await api('/api/music/play', { id })
   if (data && data.ok) toast('Agregada a la cola ✓')
+}
+
+// Buscar fuera de la biblioteca (YouTube, etc.) y agregar a la cola. Se usa el
+// texto crudo del buscador (no el normalizado) como término de búsqueda.
+async function searchAndQueue(btn) {
+  const term = document.getElementById('library-search').value.trim()
+  if (!term) return
+  const orig = btn.textContent
+  btn.disabled = true; btn.textContent = 'Buscando…'
+  try {
+    const data = await api('/api/play', { url: term })
+    if (data && data.ok) {
+      toast('Agregada a la cola ✓')
+      document.getElementById('library-search').value = ''
+      loadMusic()   // la canción nueva puede no estar aún en la biblioteca local
+    } else {
+      btn.disabled = false; btn.textContent = orig
+    }
+  } catch {
+    btn.disabled = false; btn.textContent = orig
+  }
 }
 
 document.getElementById('library-search').addEventListener('input', renderLibrary)

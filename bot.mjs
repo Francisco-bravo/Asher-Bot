@@ -72,8 +72,9 @@ const SID_COOKIE = (process.env.COOKIE_PREFIX || '') + 'sid'
 // coma en PANEL_ORIGIN; en dev cualquier localhost se permite automáticamente.
 const PANEL_ORIGINS = new Set((process.env.PANEL_ORIGIN || '').split(',').map(s => s.trim().replace(/\/$/, '')).filter(Boolean))
 const SOUND_EXTS = new Set(['.mp3', '.wav', '.ogg', '.m4a', '.flac', '.webm'])
-const MAX_QUEUE = 100
-const MAX_HISTORY = 100
+// Tope de la cola y retención del historial. Configurables en Variables Generales.
+let MAX_QUEUE = 100
+let MAX_HISTORY = 100
 
 // ── Worker de música (audio en dos nodos, Opción A(ii)) ────────────────────
 // Si MUSIC_WORKER_URL está definido, la EXTRACCIÓN/descarga pesada de YouTube se
@@ -145,6 +146,11 @@ let soundTargetLufs = TARGET_I
 // Tope de extracciones yt-dlp simultáneas en el worker (cola lo que exceda).
 // Protege la CPU del CX33 y el anti-bot de YouTube. Configurable en Variables Generales.
 let workerMaxConcurrency = 3
+// Tope de la caché de audio del worker en disco (GB). Configurable en Variables Generales.
+let workerCacheMaxGb = 70
+// Bitrate del Opus que produce el worker (kbps). Solo afecta descargas NUEVAS;
+// lo ya cacheado queda al bitrate viejo. Configurable en Variables Generales.
+let musicBitrateKbps = 160
 try {
   const s = JSON.parse(readFileSync(SETTINGS_FILE, 'utf8'))
   soundBaseVolume = s.soundBaseVolume ?? 1
@@ -153,16 +159,27 @@ try {
   if (s.musicVolumeCooldownMs != null) musicVolumeCooldownMs = s.musicVolumeCooldownMs
   if (s.soundTargetLufs != null) soundTargetLufs = s.soundTargetLufs
   if (s.workerMaxConcurrency != null) workerMaxConcurrency = s.workerMaxConcurrency
+  if (s.workerCacheMaxGb != null) workerCacheMaxGb = s.workerCacheMaxGb
+  if (s.musicBitrateKbps != null) musicBitrateKbps = s.musicBitrateKbps
+  if (s.maxQueue != null) MAX_QUEUE = s.maxQueue
+  if (s.maxHistory != null) MAX_HISTORY = s.maxHistory
 } catch {}
 soundTargetLufs = setTargetI(soundTargetLufs) // aplica el objetivo cargado
 function saveSettings() {
-  try { writeFileSync(SETTINGS_FILE, JSON.stringify({ soundBaseVolume, musicDuck, musicVolume, musicVolumeCooldownMs, soundTargetLufs, workerMaxConcurrency })) } catch {}
+  try { writeFileSync(SETTINGS_FILE, JSON.stringify({ soundBaseVolume, musicDuck, musicVolume, musicVolumeCooldownMs, soundTargetLufs, workerMaxConcurrency, workerCacheMaxGb, musicBitrateKbps, maxQueue: MAX_QUEUE, maxHistory: MAX_HISTORY })) } catch {}
 }
-// Empuja el límite de concurrencia al worker (best-effort; el worker arranca con
-// su default por env y el bot le impone el valor de Variables Generales).
+// Empuja al worker los ajustes que él aplica en caliente (best-effort; el worker
+// arranca con sus defaults por env y el bot le impone los valores de Variables
+// Generales): concurrencia, tope de caché en disco y bitrate de música.
 async function pushWorkerConfig() {
   if (!USE_WORKER) return
-  try { await workerReq('POST', '/config', null, { concurrency: String(workerMaxConcurrency) }) } catch {}
+  try {
+    await workerReq('POST', '/config', null, {
+      concurrency: String(workerMaxConcurrency),
+      maxGb: String(workerCacheMaxGb),
+      bitrate: String(musicBitrateKbps),
+    })
+  } catch {}
 }
 pushWorkerConfig() // al arrancar, sincroniza el worker con el ajuste guardado
 
@@ -1777,6 +1794,43 @@ function cmdWorkerConcurrency(n) {
   return true
 }
 
+// Tope de la caché de audio del worker en disco (5..75 GB). Lo aplica en vivo
+// (el worker expulsa lo menos usado si el nuevo tope queda por debajo del uso).
+function cmdWorkerCacheMax(gb) {
+  if (typeof gb !== 'number' || isNaN(gb)) return false
+  workerCacheMaxGb = Math.round(Math.min(75, Math.max(5, gb)))
+  saveSettings()
+  pushWorkerConfig()
+  return true
+}
+
+// Bitrate del Opus de música que produce el worker (64..256 kbps). Solo afecta
+// descargas nuevas; lo ya cacheado conserva su bitrate.
+function cmdMusicBitrate(k) {
+  if (typeof k !== 'number' || isNaN(k)) return false
+  musicBitrateKbps = Math.round(Math.min(256, Math.max(64, k)))
+  saveSettings()
+  pushWorkerConfig()
+  return true
+}
+
+// Tope de la cola de música (1..500). No afecta lo ya encolado.
+function cmdMaxQueue(n) {
+  if (typeof n !== 'number' || isNaN(n)) return false
+  MAX_QUEUE = Math.round(Math.min(500, Math.max(1, n)))
+  saveSettings()
+  return true
+}
+
+// Retención del historial de reproducidas (1..500). Si se reduce, recorta ya.
+function cmdMaxHistory(n) {
+  if (typeof n !== 'number' || isNaN(n)) return false
+  MAX_HISTORY = Math.round(Math.min(500, Math.max(1, n)))
+  while (history.length > MAX_HISTORY) history.shift()
+  saveSettings()
+  return true
+}
+
 // Atenuación de la música al sonar un efecto. `v` = factor 0..1 (volumen de la
 // música durante el efecto). Aplica en vivo (los mixers leen `musicDuck`).
 function cmdMusicDuck(v) {
@@ -1924,6 +1978,10 @@ function getState() {
     soundTargetLufs,
     workerEnabled: USE_WORKER,
     workerMaxConcurrency,
+    workerCacheMaxGb,
+    musicBitrateKbps,
+    maxQueue: MAX_QUEUE,
+    maxHistory: MAX_HISTORY,
   }
 }
 
@@ -2258,6 +2316,22 @@ http.createServer(async (req, res) => {
         case '/api/worker-concurrency': {
           if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)
           return sendJson({ ok: cmdWorkerConcurrency(body.value), workerMaxConcurrency })
+        }
+        case '/api/worker-cache-max': {
+          if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)
+          return sendJson({ ok: cmdWorkerCacheMax(body.gb), workerCacheMaxGb })
+        }
+        case '/api/music-bitrate': {
+          if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)
+          return sendJson({ ok: cmdMusicBitrate(body.kbps), musicBitrateKbps })
+        }
+        case '/api/max-queue': {
+          if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)
+          return sendJson({ ok: cmdMaxQueue(body.value), maxQueue: MAX_QUEUE })
+        }
+        case '/api/max-history': {
+          if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)
+          return sendJson({ ok: cmdMaxHistory(body.value), maxHistory: MAX_HISTORY })
         }
         case '/api/disconnect': {
           if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)

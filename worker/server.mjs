@@ -31,7 +31,8 @@ const FFMPEG = process.env.FFMPEG || 'ffmpeg'
 const NODE = process.execPath
 const DATA_DIR = process.env.DATA_DIR || '/data'
 // Tope de la caché de audio en disco (default 70 GB; deja holgura en el disco de 80 GB).
-const MAX_BYTES = +(process.env.CACHE_MAX_BYTES || 70 * 1024 ** 3)
+// Ajustable en caliente desde "Variables Generales" del panel (POST /config?maxGb=).
+let MAX_BYTES = +(process.env.CACHE_MAX_BYTES || 70 * 1024 ** 3)
 
 const AUDIO_DIR = join(DATA_DIR, 'audio')
 const ART_DIR = join(DATA_DIR, 'art')
@@ -83,6 +84,10 @@ function acquire() { if (active < MAX_CONC) { active++; return Promise.resolve()
 function release() { active = Math.max(0, active - 1); pump() }
 async function withSlot(fn) { await acquire(); try { return await fn() } finally { release() } }
 function setMaxConc(n) { MAX_CONC = Math.max(1, n | 0); pump() }
+
+// Bitrate del Opus de música (kbps). Ajustable en caliente (POST /config?bitrate=).
+// Solo afecta descargas NUEVAS; lo ya cacheado conserva su bitrate.
+let MUSIC_BITRATE = Math.min(256, Math.max(64, +(process.env.MUSIC_BITRATE || 160)))
 
 // Deduplicación de operaciones en vuelo: si llega la misma clave mientras se
 // procesa, se comparte la misma promesa en vez de lanzar otro yt-dlp.
@@ -164,11 +169,12 @@ function sendJson(res, code, obj) {
   res.end(b)
 }
 
-// Argumentos ffmpeg para producir Ogg/Opus 160k @48k estéreo (con seek opcional).
+// Argumentos ffmpeg para producir Ogg/Opus @48k estéreo (con seek opcional). El
+// bitrate es configurable en caliente (MUSIC_BITRATE, kbps).
 function opusArgs(input, seek) {
   const a = ['-loglevel', 'error']
   if (seek > 0) a.push('-ss', String(seek))
-  a.push('-i', input, '-vn', '-ar', '48000', '-ac', '2', '-c:a', 'libopus', '-b:a', '160k', '-f', 'ogg', 'pipe:1')
+  a.push('-i', input, '-vn', '-ar', '48000', '-ac', '2', '-c:a', 'libopus', '-b:a', `${MUSIC_BITRATE}k`, '-f', 'ogg', 'pipe:1')
   return a
 }
 
@@ -428,7 +434,7 @@ const server = http.createServer(async (req, res) => {
     if (p === '/import' && req.method === 'POST') {
       if (!needSrc()) return
       const { key } = await resolveKeyAndUrl(src)
-      const ff = spawn(FFMPEG, ['-loglevel', 'error', '-i', 'pipe:0', '-vn', '-ar', '48000', '-ac', '2', '-c:a', 'libopus', '-b:a', '160k', '-f', 'ogg', 'pipe:1'])
+      const ff = spawn(FFMPEG, ['-loglevel', 'error', '-i', 'pipe:0', '-vn', '-ar', '48000', '-ac', '2', '-c:a', 'libopus', '-b:a', `${MUSIC_BITRATE}k`, '-f', 'ogg', 'pipe:1'])
       const tmp = `${audioPath(key)}.${process.pid}.${Date.now()}.part`
       const ws = createWriteStream(tmp)
       let ffErr = '', failed = false
@@ -459,13 +465,22 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { keys })
     }
 
-    // Límite de concurrencia (ajustable en caliente desde "Variables Generales").
+    // Ajustes en caliente desde "Variables Generales": concurrencia, tope de caché
+    // en disco (GB) y bitrate de música (kbps). El bot los empuja al arrancar y al
+    // cambiarlos en el panel.
     if (p === '/config') {
       if (req.method === 'POST') {
         const c = parseInt(u.searchParams.get('concurrency') || '', 10)
         if (!isNaN(c)) setMaxConc(c)
+        const gb = parseFloat(u.searchParams.get('maxGb') || '')
+        if (!isNaN(gb) && gb > 0) { MAX_BYTES = Math.round(gb * 1024 ** 3); evictIfNeeded() }
+        const br = parseInt(u.searchParams.get('bitrate') || '', 10)
+        if (!isNaN(br) && br > 0) MUSIC_BITRATE = Math.min(256, Math.max(64, br))
       }
-      return sendJson(res, 200, { concurrency: MAX_CONC, active, queued: waiters.length })
+      return sendJson(res, 200, {
+        concurrency: MAX_CONC, active, queued: waiters.length,
+        maxGb: +(MAX_BYTES / 1024 ** 3).toFixed(1), bitrate: MUSIC_BITRATE,
+      })
     }
 
     res.writeHead(404); res.end('not found')
