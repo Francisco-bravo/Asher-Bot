@@ -1,13 +1,4 @@
-// Bot de música — versión para Oracle Cloud Always Free (VM ARM Ampere A1)
-// Recursos: hasta 4 núcleos ARM64 + 24 GB RAM, así que se restaura el
-// mezclador de sonidos completo (que en Wispbyte free se había quitado por
-// los 512 MB). Diferencias con la versión local de Windows:
-//  - Corre con Node.js; el servidor del panel usa node:http
-//  - Rutas relativas al proyecto y puerto desde variables de entorno
-//  - yt-dlp se descarga solo según la arquitectura (aarch64 / x86_64)
-//  - Panel web protegido con contraseña (PANEL_PASSWORD) vía HTTP Basic
-//  - Si existe cookies.txt se pasa a yt-dlp (mitiga el bloqueo de YouTube
-//    a IPs de datacenter)
+
 import {
   Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle,
   StringSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ChannelType
@@ -37,6 +28,7 @@ import * as rbac from './lib/rbac.mjs'
 import * as musicCache from './lib/music-cache.mjs'
 import * as art from './lib/art.mjs'
 import * as artsearch from './lib/artsearch.mjs'
+import { MixerStream, SoundMixer } from './lib/audio/mixer.mjs'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const IS_WIN = process.platform === 'win32'
@@ -283,218 +275,9 @@ const client = new Client({
 })
 
 // ── Mixer de audio ────────────────────────────────────────────────────────
-// Mezcla PCM s16le 48kHz estéreo: la música es la base y los sonidos del
-// soundboard se suman encima con la música atenuada a MUSIC_DUCK.
-const SILENCE = Buffer.alloc(19200) // 50ms de silencio
-const BYTES_PER_MS = 192 // PCM s16le 48kHz estéreo
-const LEAD_BYTES = 96000 // ~500ms de adelanto máximo sobre lo reproducido
-
-// Multiplica en sitio las muestras PCM s16le por `factor`, con recorte a ±32767.
-function applyGainInPlace(buf, factor) {
-  for (let i = 0; i + 1 < buf.length; i += 2) {
-    let v = (buf.readInt16LE(i) * factor) | 0
-    if (v > 32767) v = 32767
-    else if (v < -32768) v = -32768
-    buf.writeInt16LE(v, i)
-  }
-  return buf
-}
-
-class MixerStream extends Readable {
-  // getPlayedMs: cuántos ms lleva reproducidos el player. El mixer solo avanza
-  // LEAD_BYTES por delante de eso; sin este freno, el encoder opus consume la
-  // canción entera en segundos, el mixer "termina" y los sonidos del soundboard
-  // ya no tienen dónde mezclarse.
-  constructor(base, getPlayedMs = () => Infinity) {
-    super()
-    this.base = base
-    this.getPlayedMs = getPlayedMs
-    this.baseEnded = false
-    this.ended = false
-    this.pushedBytes = 0
-    this.leftover = null
-    this.silenceTimer = null
-    this.paceTimer = null
-    this.overlays = new Set()
-    base.on('end', () => { this.baseEnded = true; this._pump() })
-    base.on('error', () => { this.baseEnded = true; this._pump() })
-    base.on('readable', () => this._pump())
-  }
-
-  addOverlay(stream) {
-    // Buffer propio alimentado en modo flowing por los 'data' del proceso de
-    // ffmpeg del efecto; se va consumiendo al ritmo de la base.
-    const ov = { chunks: [], length: 0, ended: false }
-    stream.on('data', d => { ov.chunks.push(d); ov.length += d.length; this._pump() })
-    stream.on('end', () => { ov.ended = true; this._pump() })
-    stream.on('error', () => { ov.ended = true; this._pump() })
-    this.overlays.add(ov)
-    this._pump()
-    return ov
-  }
-
-  _takeFrom(ov, n) {
-    const parts = []
-    let need = n
-    while (need > 0 && ov.chunks.length > 0) {
-      const head = ov.chunks[0]
-      if (head.length <= need) { parts.push(head); ov.chunks.shift(); need -= head.length }
-      else { parts.push(head.subarray(0, need)); ov.chunks[0] = head.subarray(need); need = 0 }
-    }
-    ov.length -= n - need
-    return parts.length === 1 ? parts[0] : Buffer.concat(parts)
-  }
-
-  _read() { this._pump() }
-
-  _pump() {
-    if (this.destroyed || this.ended) return
-    while (true) {
-      // Freno de tiempo real: no adelantarse más de LEAD_BYTES a lo reproducido
-      if (this.pushedBytes >= this.getPlayedMs() * BYTES_PER_MS + LEAD_BYTES) {
-        if (!this.paceTimer) {
-          this.paceTimer = setTimeout(() => { this.paceTimer = null; this._pump() }, 50)
-        }
-        return
-      }
-      let chunk
-      if (this.leftover) { chunk = this.leftover; this.leftover = null }
-      else chunk = this.base.read()
-      if (chunk === null) {
-        if (!this.baseEnded) return // esperar más datos de la música
-        if (this.overlays.size === 0) { this.ended = true; this.push(null); return }
-        // La música terminó pero hay un sonido en curso: seguir con silencio,
-        // a ritmo de timer (no de la demanda del consumidor, que puede ser
-        // sincrónica e infinita).
-        this._scheduleSilence()
-        return
-      }
-      // Trocear chunks grandes: read() puede devolver mucho de golpe y el freno
-      // de pacing solo actúa entre chunks.
-      if (chunk.length > SILENCE.length) {
-        this.leftover = chunk.subarray(SILENCE.length)
-        chunk = chunk.subarray(0, SILENCE.length)
-      }
-      // Con sonidos encima → _mix (aplica ducking + volumen de música). Sin
-      // sonidos → solo el volumen de música (si no es 1; si es 1, pasa tal cual).
-      let out
-      if (this.overlays.size > 0) out = this._mix(chunk)
-      else if (musicVolume !== 1) out = applyGainInPlace(Buffer.from(chunk), musicVolume)
-      else out = chunk
-      this.pushedBytes += out.length
-      if (!this.push(out)) return
-    }
-  }
-
-  _scheduleSilence() {
-    if (this.silenceTimer) return
-    this.silenceTimer = setTimeout(() => {
-      this.silenceTimer = null
-      if (this.destroyed || this.ended) return
-      if (this.overlays.size === 0) { this.ended = true; this.push(null); return }
-      const out = this._mix(SILENCE)
-      this.pushedBytes += out.length
-      this.push(out)
-      this._scheduleSilence()
-    }, 45)
-  }
-
-  _mix(chunk) {
-    const out = Buffer.from(chunk)
-    // Música: atenuada por el ducking y escalada por el volumen de música.
-    applyGainInPlace(out, musicDuck * musicVolume)
-    for (const ov of [...this.overlays]) {
-      if (ov.ended && ov.length === 0) { this.overlays.delete(ov); continue }
-      const avail = Math.min(out.length, ov.length) & ~1
-      if (avail === 0) continue
-      const data = this._takeFrom(ov, avail)
-      for (let i = 0; i + 1 < data.length && i + 1 < out.length; i += 2) {
-        let v = out.readInt16LE(i) + ((data.readInt16LE(i) * soundBaseVolume) | 0)
-        if (v > 32767) v = 32767
-        else if (v < -32768) v = -32768
-        out.writeInt16LE(v, i)
-      }
-    }
-    return out
-  }
-}
-
-// Mixer del soundboard SIN música: base de SILENCIO sobre la que se mezclan N
-// sonidos a la vez (sin límite, sin "uno a la vez"). Paceado a tiempo real. Se
-// auto-cierra tras unos segundos sin sonidos y devuelve la conexión al player de
-// música. El volumen base (soundBaseVolume) se aplica al mezclar, en vivo.
-class SoundMixer extends Readable {
-  constructor() {
-    super()
-    this.overlays = new Set()
-    this.pushedBytes = 0
-    this.startMs = Date.now()
-    this.lastActive = Date.now()
-    this._closed = false
-    this.timer = null
-    this._schedule()
-  }
-  addOverlay(stream) {
-    const ov = { chunks: [], length: 0, ended: false }
-    stream.on('data', d => { ov.chunks.push(d); ov.length += d.length })
-    stream.on('end', () => { ov.ended = true })
-    stream.on('error', () => { ov.ended = true })
-    this.overlays.add(ov)
-    this.lastActive = Date.now()
-    return ov
-  }
-  _takeFrom(ov, n) {
-    const parts = []
-    let need = n
-    while (need > 0 && ov.chunks.length > 0) {
-      const head = ov.chunks[0]
-      if (head.length <= need) { parts.push(head); ov.chunks.shift(); need -= head.length }
-      else { parts.push(head.subarray(0, need)); ov.chunks[0] = head.subarray(need); need = 0 }
-    }
-    ov.length -= n - need
-    return parts.length === 1 ? parts[0] : Buffer.concat(parts)
-  }
-  _read() {}
-  _mix() {
-    const out = Buffer.alloc(SILENCE.length) // base de silencio
-    for (const ov of [...this.overlays]) {
-      if (ov.ended && ov.length === 0) { this.overlays.delete(ov); continue }
-      const avail = Math.min(out.length, ov.length) & ~1
-      if (avail === 0) continue
-      const data = this._takeFrom(ov, avail)
-      for (let i = 0; i + 1 < data.length; i += 2) {
-        let v = out.readInt16LE(i) + ((data.readInt16LE(i) * soundBaseVolume) | 0)
-        if (v > 32767) v = 32767
-        else if (v < -32768) v = -32768
-        out.writeInt16LE(v, i)
-      }
-    }
-    return out
-  }
-  _schedule() {
-    this.timer = setTimeout(() => {
-      if (this._closed) return
-      const now = Date.now()
-      const target = (now - this.startMs) * BYTES_PER_MS // realtime: nunca adelantarse
-      while (this.pushedBytes < target) {
-        const out = this._mix()
-        this.pushedBytes += out.length
-        this.push(out)
-      }
-      if (this.overlays.size > 0) this.lastActive = now
-      if (now - this.lastActive > 2000) { this.close(); return } // sin sonidos: cerrar
-      this._schedule()
-    }, 20)
-  }
-  close() {
-    if (this._closed) return
-    this._closed = true
-    if (this.timer) clearTimeout(this.timer)
-    try { this.push(null) } catch {}
-    if (soundMixer === this) soundMixer = null
-    if (connection) { try { connection.subscribe(musicPlayer) } catch {} }
-  }
-}
+// MixerStream/SoundMixer viven en lib/audio/mixer.mjs (PCM s16le 48kHz estéreo:
+// música de base + sonidos del soundboard encima con ducking). Los volúmenes se
+// leen en vivo vía los getters que se pasan al instanciar.
 let soundMixer = null
 
 let currentMixer = null
@@ -1224,7 +1007,11 @@ async function ensurePlaying() {
           console.warn('Reproducción: fallback a streaming directo:', err.message)
           stream = USE_WORKER ? startRemoteStream(current, seekOffset, null) : startStream(current, seekOffset)
         }
-        currentMixer = new MixerStream(stream, () => currentResource ? currentResource.playbackDuration : 0)
+        currentMixer = new MixerStream(stream, () => currentResource ? currentResource.playbackDuration : 0, {
+          getMusicVolume: () => musicVolume,
+          getMusicDuck: () => musicDuck,
+          getSoundBaseVolume: () => soundBaseVolume,
+        })
         currentResource = createAudioResource(currentMixer, { inputType: StreamType.Raw })
       }
       musicPlayer.play(currentResource)
@@ -1819,7 +1606,14 @@ async function playSoundCore(soundId, user = null, presetId = null) {
   if (!connection) throw new Error('El bot no está en un canal de voz')
 
   if (!soundMixer) {
-    soundMixer = new SoundMixer()
+    soundMixer = new SoundMixer({
+      getSoundBaseVolume: () => soundBaseVolume,
+      // Al cerrarse (sin sonidos un rato) devuelve la conexión al player de música.
+      onClose: (inst) => {
+        if (soundMixer === inst) soundMixer = null
+        if (connection) { try { connection.subscribe(musicPlayer) } catch {} }
+      },
+    })
     const res = createAudioResource(soundMixer, { inputType: StreamType.Raw })
     connection.subscribe(soundPlayer)
     soundPlayer.play(res)
