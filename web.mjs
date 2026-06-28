@@ -254,7 +254,9 @@ http.createServer(async (req, res) => {
       // exists/getStream son sync en local-store y async en s3-store; await unifica ambos.
       if (song.art_key && await store.exists(song.art_key)) {
         const ext = song.art_key.split('.').pop().toLowerCase()
-        res.writeHead(200, { 'Content-Type': ART_MIME[ext] || 'application/octet-stream', 'Cache-Control': 'public, max-age=60' })
+        // no-store: la carátula elegida puede cambiar; es un archivo local barato de
+        // re-servir. Así un refresco SIEMPRE muestra la actual (no la cacheada vieja).
+        res.writeHead(200, { 'Content-Type': ART_MIME[ext] || 'application/octet-stream', 'Cache-Control': 'no-store' })
         ;(await store.getStream(song.art_key)).pipe(res)
         return
       }
@@ -263,7 +265,9 @@ http.createServer(async (req, res) => {
         try {
           const r = await workerReq('GET', '/art', song.source_url)
           if (r.ok && r.body) {
-            res.writeHead(200, { 'Content-Type': r.headers.get('content-type') || 'image/jpeg', 'Cache-Control': 'public, max-age=86400' })
+            // Miniatura del worker (fallback transitorio hasta que el bot resuelva
+            // art_key): caché corto para que no quede "pegada" la vieja por un día.
+            res.writeHead(200, { 'Content-Type': r.headers.get('content-type') || 'image/jpeg', 'Cache-Control': 'public, max-age=300' })
             Readable.fromWeb(r.body).pipe(res)
             return
           }
