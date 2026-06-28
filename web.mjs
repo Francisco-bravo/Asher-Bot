@@ -8,6 +8,7 @@ import { randomBytes, createHash } from 'node:crypto'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Readable } from 'node:stream'
+import { readFileSync, writeFileSync, rmSync } from 'node:fs'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 try { process.loadEnvFile(join(ROOT, '.env')) } catch { /* las vars pueden venir del entorno */ }
@@ -23,6 +24,8 @@ const music = await import('./lib/music-cache.mjs')
 const artStore = await import('./lib/art.mjs')
 const artsearch = await import('./lib/artsearch.mjs')
 const { getStore } = await import('./lib/storage/index.mjs')
+const loudness = await import('./lib/loudness.mjs')
+const { paths } = await import('./lib/config.mjs')
 
 const PORT = Number(process.env.WEB_PORT || 8770)
 const ART_MIME = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif' }
@@ -121,6 +124,34 @@ function readBody(req, limit = MAX_UPLOAD) {
 const send = (res, status, data) => {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' })
   res.end(JSON.stringify(data))
+}
+
+// Tope de duración (segundos) para subir sonidos. Lo configura el admin desde el
+// panel (Variables Generales) y lo guarda bot.mjs en settings.json (FS compartido,
+// mismo ROOT). Se lee en cada subida para tomar el valor vigente. Default 40 s.
+const SETTINGS_FILE = join(ROOT, 'settings.json')
+function maxSoundSeconds() {
+  try {
+    const v = JSON.parse(readFileSync(SETTINGS_FILE, 'utf8')).maxSoundSeconds
+    if (Number.isFinite(v) && v > 0) return v
+  } catch { /* sin archivo aún o ilegible → default */ }
+  return 40
+}
+
+// Mide la duración del audio subido escribiéndolo a un temporal y sondeándolo con
+// ffmpeg. Devuelve { ok, durationMs }. Si no se pudo medir, NO bloquea (ok=true,
+// durationMs=null) para no rechazar formatos raros por un fallo de sondeo.
+async function checkSoundDuration(buffer, ext) {
+  const tmp = join(paths.tmp, `up_${randomBytes(8).toString('hex')}.${ext}`)
+  try {
+    writeFileSync(tmp, buffer)
+    const durationMs = await loudness.probeDurationMs(tmp)
+    if (durationMs == null) return { ok: true, durationMs: null }
+    const maxMs = maxSoundSeconds() * 1000
+    return { ok: durationMs <= maxMs, durationMs, maxSeconds: maxSoundSeconds() }
+  } finally {
+    try { rmSync(tmp, { force: true }) } catch { /* ignore */ }
+  }
 }
 
 function currentUser(req) {
@@ -361,7 +392,9 @@ http.createServer(async (req, res) => {
       if (folders.isPrivatePath(folder, folders.meta())) visibility = 'private'
       const buffer = await readBody(req)
       if (!buffer.length) return send(res, 400, { error: 'Cuerpo vacío' })
-      const s = await sounds.upload({ ownerUserId: user.id, label, folder, ext, buffer, visibility })
+      const dur = await checkSoundDuration(buffer, ext)
+      if (!dur.ok) return send(res, 400, { error: `El sonido dura ${(dur.durationMs / 1000).toFixed(1)} s; el máximo es ${dur.maxSeconds} s. Recórtalo antes de subirlo.` })
+      const s = await sounds.upload({ ownerUserId: user.id, label, folder, ext, buffer, durationMs: dur.durationMs, visibility })
       return send(res, 201, { id: s.id, label: s.label, folder: s.folder, visibility: s.visibility })
     }
 
@@ -444,6 +477,8 @@ http.createServer(async (req, res) => {
       if (!SOUND_EXTS.has(ext)) return send(res, 400, { error: `Extensión no permitida: ${ext}` })
       const buffer = await readBody(req)
       if (!buffer.length) return send(res, 400, { error: 'Cuerpo vacío' })
+      const dur = await checkSoundDuration(buffer, ext)
+      if (!dur.ok) return send(res, 400, { error: `El sonido dura ${(dur.durationMs / 1000).toFixed(1)} s; el máximo es ${dur.maxSeconds} s.` })
       const s = await sounds.replaceAudio(id, ext, buffer)
       return send(res, 200, { ok: true, id: s.id })
     }

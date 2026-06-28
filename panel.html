@@ -936,6 +936,18 @@
           </div>
         </div>
         <div class="stats-section">
+          <h3>⏱️ Duración máxima de los sonidos al subir</h3>
+          <p class="hint" style="margin:0 0 12px">
+            Tope de duración para <b>subir</b> un sonido al soundboard. Si el archivo dura más, se
+            rechaza y se pide recortarlo. No afecta a los sonidos ya subidos. Recomendado: <b>40</b>.
+          </p>
+          <div class="add-row" style="max-width:380px; align-items:center">
+            <input type="number" id="max-sound-seconds" step="1" min="1" max="300" value="40" style="max-width:110px">
+            <span style="font-weight:600">seg</span>
+            <button id="btn-max-sound-seconds">Guardar</button>
+          </div>
+        </div>
+        <div class="stats-section">
           <h3>📏 Objetivo de sonoridad (loudness)</h3>
           <p class="hint" style="margin:0 0 12px">
             A qué nivel se <b>igualan</b> todos los sonidos. Sube el volumen general <b>sin saturar</b>
@@ -1492,7 +1504,7 @@ document.querySelectorAll('.mtab').forEach(mt => {
     document.querySelectorAll('.mpage').forEach(p => p.classList.remove('active'))
     mt.classList.add('active')
     document.getElementById('mpage-' + mt.dataset.mtab).classList.add('active')
-    if (mt.dataset.mtab === 'vars') { syncBaseVolumeInput(); syncTargetLufsInput(); syncMusicDuckInput() }
+    if (mt.dataset.mtab === 'vars') { syncBaseVolumeInput(); syncMaxSoundSecondsInput(); syncTargetLufsInput(); syncMusicDuckInput() }
   }
 })
 
@@ -1510,6 +1522,23 @@ document.getElementById('btn-base-volume').addEventListener('click', async () =>
   try {
     const data = await api('/api/sound/base-volume', { volume: v })
     if (data && data.ok) toast('Volumen base guardado ✓') // api() ya avisa si falla
+  } finally { btn.disabled = false; btn.textContent = orig }
+})
+
+// Duración máxima al subir sonidos (seg). La aplica web.mjs al subir.
+function syncMaxSoundSecondsInput() {
+  const inp = document.getElementById('max-sound-seconds')
+  if (inp && state && state.maxSoundSeconds != null && document.activeElement !== inp) inp.value = state.maxSoundSeconds
+}
+document.getElementById('btn-max-sound-seconds').addEventListener('click', async () => {
+  const inp = document.getElementById('max-sound-seconds')
+  const n = Number(inp.value)
+  if (!Number.isInteger(n) || n < 1 || n > 300) { toast('Valor inválido (1 a 300)'); return }
+  const btn = document.getElementById('btn-max-sound-seconds')
+  btn.disabled = true; const orig = btn.textContent; btn.textContent = 'Guardando...'
+  try {
+    const data = await api('/api/sound/max-seconds', { seconds: n })
+    if (data && data.ok) toast('Duración máxima guardada ✓')
   } finally { btn.disabled = false; btn.textContent = orig }
 })
 

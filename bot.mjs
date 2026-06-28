@@ -131,6 +131,9 @@ async function workerPlaylist(src) {
 // se aplica encima de la igualación por loudness, a todos por igual. Es el único
 // volumen de sonidos: ya no hay slider por-usuario (todos suenan igual, normalizados).
 let soundBaseVolume = 1
+// Duración máxima (segundos) de un sonido al subirlo. Lo aplica web.mjs al subir
+// (lee este valor de settings.json). Configurable en Variables Generales.
+let maxSoundSeconds = 40
 // Atenuación de la música mientras suena un efecto (ducking): factor 0..1 con el
 // que se multiplica la música. 0.35 = la música baja al 35% (una bajada del 65%).
 let musicDuck = 0.35
@@ -154,6 +157,7 @@ let musicBitrateKbps = 160
 try {
   const s = JSON.parse(readFileSync(SETTINGS_FILE, 'utf8'))
   soundBaseVolume = s.soundBaseVolume ?? 1
+  if (s.maxSoundSeconds != null) maxSoundSeconds = s.maxSoundSeconds
   musicDuck = s.musicDuck ?? 0.35
   if (s.musicVolume != null) musicVolume = s.musicVolume
   if (s.musicVolumeCooldownMs != null) musicVolumeCooldownMs = s.musicVolumeCooldownMs
@@ -166,7 +170,7 @@ try {
 } catch {}
 soundTargetLufs = setTargetI(soundTargetLufs) // aplica el objetivo cargado
 function saveSettings() {
-  try { writeFileSync(SETTINGS_FILE, JSON.stringify({ soundBaseVolume, musicDuck, musicVolume, musicVolumeCooldownMs, soundTargetLufs, workerMaxConcurrency, workerCacheMaxGb, musicBitrateKbps, maxQueue: MAX_QUEUE, maxHistory: MAX_HISTORY })) } catch {}
+  try { writeFileSync(SETTINGS_FILE, JSON.stringify({ soundBaseVolume, maxSoundSeconds, musicDuck, musicVolume, musicVolumeCooldownMs, soundTargetLufs, workerMaxConcurrency, workerCacheMaxGb, musicBitrateKbps, maxQueue: MAX_QUEUE, maxHistory: MAX_HISTORY })) } catch {}
 }
 // Empuja al worker los ajustes que él aplica en caliente (best-effort; el worker
 // arranca con sus defaults por env y el bot le impone los valores de Variables
@@ -1747,6 +1751,15 @@ function cmdSoundBaseVolume(v) {
   return true
 }
 
+// Duración máxima (segundos) de un sonido al subirlo (1..300). La aplica web.mjs;
+// el bot solo guarda el valor (lo lee web.mjs de settings.json).
+function cmdMaxSoundSeconds(n) {
+  if (typeof n !== 'number' || isNaN(n)) return false
+  maxSoundSeconds = Math.round(Math.min(300, Math.max(1, n)))
+  saveSettings()
+  return true
+}
+
 // Objetivo de loudness (LUFS): cambia a cuánto se igualan los sonidos. Al cambiarlo
 // hay que re-medir todos (la ganancia es por archivo); se dispara en segundo plano.
 function cmdSoundTargetLufs(v) {
@@ -1972,6 +1985,7 @@ function getState() {
     voiceChannel: currentChannelName,
     playingSounds: playingSounds(),
     soundBaseVolume,
+    maxSoundSeconds,
     musicDuck,
     musicVolume,
     musicVolumeCooldownMs,
@@ -2300,6 +2314,10 @@ http.createServer(async (req, res) => {
         case '/api/sound/base-volume': {
           if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)
           return sendJson({ ok: cmdSoundBaseVolume(body.volume), soundBaseVolume })
+        }
+        case '/api/sound/max-seconds': {
+          if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)
+          return sendJson({ ok: cmdMaxSoundSeconds(body.seconds), maxSoundSeconds })
         }
         case '/api/sound/music-duck': {
           if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)
