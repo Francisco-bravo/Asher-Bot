@@ -1619,21 +1619,23 @@ document.addEventListener('keydown', (e) => {
 
 // Carátula del now-playing. Se setea una vez por canción; si aún no está lista
 // (se baja en segundo plano al reproducir), reintenta a los pocos segundos.
-let npArtId = null
+let npArtKey = null
 function updateNpArt() {
   // La barra (np-art) y la vista expandida (npv-art-img) muestran la misma carátula.
   const imgs = [document.getElementById('np-art'), document.getElementById('npv-art-img')].filter(Boolean)
   const id = state && state.current && state.current.songId
-  if (!id) { imgs.forEach(img => { img.removeAttribute('src'); img.style.display = 'none' }); npArtId = null; return }
-  if (id === npArtId) return
-  npArtId = id
-  const src = webUrl('/art/' + id)
+  if (!id) { imgs.forEach(img => { img.removeAttribute('src'); img.style.display = 'none' }); npArtKey = null; return }
+  // La clave incluye el artBust: si cambia la carátula de la MISMA canción, se refresca.
+  const key = id + ':' + (artBust[id] || 0)
+  if (key === npArtKey) return
+  npArtKey = key
+  const src = artUrl(id)
   imgs.forEach(img => {
     img.style.display = ''
     img.onload = () => { img.style.display = '' }
     img.onerror = () => {
       img.style.display = 'none'
-      setTimeout(() => { if (npArtId === id) img.src = webUrl('/art/' + id + '?t=' + Date.now()) }, 4000)
+      setTimeout(() => { if (npArtKey === key) img.src = artUrl(id) + (src.includes('?') ? '&' : '?') + 't=' + Date.now() }, 4000)
     }
     img.src = src
   })
@@ -1694,7 +1696,7 @@ function render() {
   // aún no está listo (404), no aparezca el icono de imagen rota; 🎵 si no hay id.
   function artThumb(songId) {
     if (!songId) return '<span class="q-art q-art-ph">🎵</span>'
-    return `<span class="q-art" style="background-image:url('${esc(webUrl('/art/' + songId))}')"></span>`
+    return `<span class="q-art" style="background-image:url('${esc(artUrl(songId))}')"></span>`
   }
 
   // No reconstruir la lista mientras se está arrastrando un elemento
@@ -2479,7 +2481,7 @@ async function loadMusic() {
 function songCardHTML(s, cardAction, btnAction, icon = '➕', title = 'Agregar') {
   // Siempre se intenta la carátula vía /art/:id; si no hay (404) onerror la quita.
   // En modo worker la carátula no está en art_key sino que la sirve el worker.
-  const art = `<span class="song-art"><img src="${esc(webUrl('/art/' + s.id))}" alt="" onerror="this.remove()"></span>`
+  const art = `<span class="song-art"><img src="${esc(artUrl(s.id))}" alt="" onerror="this.remove()"></span>`
   const artist = [s.artist ? esc(s.artist) : null, s.duration_ms ? fmt(s.duration_ms / 1000) : null].filter(Boolean).join(' · ')
   return `<div class="song-card" onclick="${cardAction}">
     ${art}
@@ -2564,11 +2566,11 @@ function renderPlaylists() {
 function playlistCoverHTML(coverIds) {
   const ids = (coverIds || []).slice(0, 4)
   if (ids.length >= 4) {
-    const imgs = ids.map(id => `<img src="${esc(webUrl('/art/' + id))}" alt="" onerror="this.style.visibility='hidden'">`).join('')
+    const imgs = ids.map(id => `<img src="${esc(artUrl(id))}" alt="" onerror="this.style.visibility='hidden'">`).join('')
     return `<div class="pl-cover mosaic has">${imgs}</div>`
   }
   if (ids.length >= 1) {
-    return `<div class="pl-cover single has"><img src="${esc(webUrl('/art/' + ids[0]))}" alt="" onerror="this.closest('.pl-cover').classList.remove('has')"></div>`
+    return `<div class="pl-cover single has"><img src="${esc(artUrl(ids[0]))}" alt="" onerror="this.closest('.pl-cover').classList.remove('has')"></div>`
   }
   return `<div class="pl-cover"></div>`
 }
@@ -2869,10 +2871,9 @@ function renderMusicList(songs) {
       isAdmin ? `<button onclick="togglePermanent(${s.id},${s.permanent ? 0 : 1})">${s.permanent ? 'Quitar 📌' : 'Hacer 📌'}</button>` : '',
       isAdmin ? `<button class="danger" onclick="deleteSong(${s.id})">🗑 Eliminar</button>` : '',
     ].join('')
-    const bust = artBust[s.id] ? ('?v=' + artBust[s.id]) : ''
     const cover = `<div class="song-cover">
       <span class="song-cover-ph">🎵</span>
-      <img src="${esc(webUrl('/art/' + s.id) + bust)}" alt="" onerror="this.style.display='none'">
+      <img src="${esc(artUrl(s.id))}" alt="" onerror="this.style.display='none'">
       ${isAdmin ? `<button class="cover-edit" title="Buscar carátula (iTunes/Deezer/…)" onclick="openArtModal(${s.id})">✏️</button>` : ''}
     </div>`
     return `<div class="song-card song-card-flex">
@@ -2938,7 +2939,10 @@ async function playSong(id) {
 }
 
 // Cache-busting de las carátulas tras actualizarlas (el navegador cachea /art/:id).
+// artBust[id] cambia al fijar una carátula nueva; artUrl() lo añade a TODAS las
+// vistas (ahora-suena, cola, biblioteca, caché) para que el cambio se vea en todas.
 const artBust = {}
+function artUrl(id) { return webUrl('/art/' + id) + (artBust[id] ? ('?v=' + artBust[id]) : '') }
 // Botón ✏️: abre un modal que busca la carátula en TODAS las fuentes para elegir.
 let artModalId = null, artModalOpts = []
 function openArtModal(id) {
