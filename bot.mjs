@@ -259,6 +259,17 @@ let remoteAbort = null   // AbortController del fetch al worker de música (si U
 let soundIdSeq = 0
 const activeSounds = new Map() // id -> { file, proc, ov?, mixer?, direct? }
 
+// ── Passthrough de Opus (ahorro de CPU) ─────────────────────────────────────
+// Cuando solo hay música y el servidor NO usó el soundboard hace poco, se manda
+// el Ogg/Opus del worker TAL CUAL a Discord (sin decodificar a PCM ni
+// re-codificar): ni ffmpeg ni encoder. Si un servidor tiene actividad reciente
+// de soundboard se queda en mezcla PCM → cero cortes (prioridad soundboard). El
+// único re-sync ocurre al disparar un sonido tras un periodo largo de silencio.
+let opusDirect = false   // la canción actual suena en passthrough (sin mixer PCM)
+let lastSoundAt = 0      // timestamp del último uso del soundboard
+let pendingSounds = []   // sonidos a soltar cuando el mixer PCM esté listo tras un switch
+const SOUND_PCM_WINDOW_MS = 5 * 60 * 1000 // sin sonidos por este tiempo → volver a Opus-directo
+
 const musicPlayer = createAudioPlayer()
 const soundPlayer = createAudioPlayer()
 
@@ -557,6 +568,24 @@ function startStreamAndCache(item, seekSec, song) {
   })
   activeProcs = [yt, ff]
   return ff.stdout
+}
+
+// Passthrough: trae el Ogg/Opus del worker y lo entrega TAL CUAL a Discord, sin
+// ffmpeg ni re-encode. Espera a confirmar que el worker pudo extraer (res.ok):
+// si devuelve error (p.ej. video geo-restringido a la región de Santiago),
+// lanza y el llamador cae al camino PCM (que tiene fallback local). Devuelve un
+// AudioResource OggOpus listo para reproducir.
+async function startRemoteOpusResource(item, seekSec) {
+  killBgYtdlp() // por si había trabajo de fondo local
+  const ac = new AbortController()
+  remoteAbort = ac
+  const res = await fetch(workerAudioUrl(item.url, seekSec), { headers: workerHeaders(), signal: ac.signal })
+  if (!res.ok || !res.body) { try { ac.abort() } catch {}; throw new Error(`worker HTTP ${res.status}`) }
+  const ogg = Readable.fromWeb(res.body)
+  ogg.on('error', () => {})
+  ogg.on('end', () => { remoteAbort = null })
+  activeProcs = [] // sin ffmpeg en passthrough; el corte se hace abortando el fetch
+  return createAudioResource(ogg, { inputType: StreamType.OggOpus })
 }
 
 // Opción A(ii): reproduce desde el worker remoto. El CX33 corre yt-dlp+ffmpeg y
@@ -1139,46 +1168,71 @@ async function ensurePlaying() {
       // PRIORIDAD: arrancar la reproducción cuanto antes, con UN solo yt-dlp.
       // No se resuelve ni se baja carátula/metadata aquí (eso lo hace el proceso
       // de inactividad). Solo se usa el archivo si ya está COMPLETO en caché.
-      let stream
-      try {
-        const raw = current.url
-        const isUrl = /^https?:\/\//i.test(raw)
-        let song = isUrl ? musicCache.findByUrl(raw) : null
-        // Si el fondo está pre-cacheando JUSTO esta canción, espera a que termine
-        // (segundos de descarga) en vez de matarla y re-extraer (~10s). Gapless.
-        if (song && bgSongId === song.id && bgPromise) {
-          try { await bgPromise } catch {}
-          song = musicCache.findByUrl(raw) // refresca el estado tras el pre-cacheo
-        }
-        if (song && (musicCache.hasLocal(song) || song.persisted)) {
-          // Cacheada completa → archivo (instantáneo, con seek). Sin yt-dlp.
-          const filePath = await musicCache.getLocalAudio(song, dest => downloadToFile(raw, dest))
-          stream = startFileStream(filePath, seekOffset)
-        } else if (isUrl) {
-          // URL no cacheada: stream + tee a caché en la MISMA descarga (1 yt-dlp).
-          const s = song || musicCache.upsertSong({ sourceUrl: raw, title: current.title })
+      opusDirect = false
+      currentMixer = null
+      currentResource = null
+      // Passthrough de Opus: solo con worker, fuente URL y SIN actividad reciente
+      // de soundboard (si se usan sonidos seguimos en PCM para mezclarlos sin
+      // cortes). Si el worker no puede extraer (geo-restricción), se cae al PCM.
+      const wantOpusDirect = USE_WORKER && /^https?:\/\//i.test(current.url) &&
+        (Date.now() - lastSoundAt > SOUND_PCM_WINDOW_MS)
+      if (wantOpusDirect) {
+        try {
+          const raw = current.url
+          const s = musicCache.findByUrl(raw) || musicCache.upsertSong({ sourceUrl: raw, title: current.title })
           current.songId = s.id
-          stream = USE_WORKER
-            ? startRemoteStream({ ...current, url: raw }, seekOffset, s)
-            : startStreamAndCache({ ...current, url: raw }, seekOffset, s)
-        } else {
-          // Término de búsqueda: stream directo (yt-dlp resuelve y reproduce en una
-          // sola pasada). El cacheo/resolución lo hará el proceso de inactividad.
-          stream = USE_WORKER
-            ? startRemoteStream(current, seekOffset, null)
-            : startStream(current, seekOffset)
+          currentResource = await startRemoteOpusResource({ ...current, url: raw }, seekOffset)
+          opusDirect = true
+          console.log('  ↳ passthrough Opus (sin decodificar)')
+        } catch (e) {
+          console.warn('Opus-directo no disponible, uso PCM:', e.message)
+          opusDirect = false
+          currentResource = null
         }
-      } catch (err) {
-        console.warn('Reproducción: fallback a streaming directo:', err.message)
-        stream = USE_WORKER ? startRemoteStream(current, seekOffset, null) : startStream(current, seekOffset)
       }
-      currentMixer = new MixerStream(stream, () => currentResource ? currentResource.playbackDuration : 0)
-      currentResource = createAudioResource(currentMixer, { inputType: StreamType.Raw })
+      if (!opusDirect) {
+        let stream
+        try {
+          const raw = current.url
+          const isUrl = /^https?:\/\//i.test(raw)
+          let song = isUrl ? musicCache.findByUrl(raw) : null
+          // Si el fondo está pre-cacheando JUSTO esta canción, espera a que termine
+          // (segundos de descarga) en vez de matarla y re-extraer (~10s). Gapless.
+          if (song && bgSongId === song.id && bgPromise) {
+            try { await bgPromise } catch {}
+            song = musicCache.findByUrl(raw) // refresca el estado tras el pre-cacheo
+          }
+          if (song && (musicCache.hasLocal(song) || song.persisted)) {
+            // Cacheada completa → archivo (instantáneo, con seek). Sin yt-dlp.
+            const filePath = await musicCache.getLocalAudio(song, dest => downloadToFile(raw, dest))
+            stream = startFileStream(filePath, seekOffset)
+          } else if (isUrl) {
+            // URL no cacheada: stream + tee a caché en la MISMA descarga (1 yt-dlp).
+            const s = song || musicCache.upsertSong({ sourceUrl: raw, title: current.title })
+            current.songId = s.id
+            stream = USE_WORKER
+              ? startRemoteStream({ ...current, url: raw }, seekOffset, s)
+              : startStreamAndCache({ ...current, url: raw }, seekOffset, s)
+          } else {
+            // Término de búsqueda: stream directo (yt-dlp resuelve y reproduce en una
+            // sola pasada). El cacheo/resolución lo hará el proceso de inactividad.
+            stream = USE_WORKER
+              ? startRemoteStream(current, seekOffset, null)
+              : startStream(current, seekOffset)
+          }
+        } catch (err) {
+          console.warn('Reproducción: fallback a streaming directo:', err.message)
+          stream = USE_WORKER ? startRemoteStream(current, seekOffset, null) : startStream(current, seekOffset)
+        }
+        currentMixer = new MixerStream(stream, () => currentResource ? currentResource.playbackDuration : 0)
+        currentResource = createAudioResource(currentMixer, { inputType: StreamType.Raw })
+      }
       musicPlayer.play(currentResource)
       updatePanel()
       // Cuando el audio EMPIEZA a sonar (pasó la extracción inicial), se habilita el
       // enriquecido en paralelo (metadata + carátula) aunque el stream siga bajando.
-      musicPlayer.once(AudioPlayerStatus.Playing, () => { currentPlaying = true; backgroundWork() })
+      // Además se sueltan los sonidos que esperaban el switch a PCM (si los hubo).
+      musicPlayer.once(AudioPlayerStatus.Playing, () => { currentPlaying = true; flushPendingSounds(); backgroundWork() })
 
       const err = await waitIdle(musicPlayer)
       const reachedPlaying = currentPlaying // ¿llegó a sonar antes de quedar idle?
@@ -1186,6 +1240,7 @@ async function ensurePlaying() {
       killStreamProcs()
       currentResource = null
       currentMixer = null
+      opusDirect = false
       if (err) {
         console.error('Error reproduciendo:', err.message)
         await notifyError(current, err)
@@ -1219,6 +1274,7 @@ async function ensurePlaying() {
     playing = false
     currentResource = null
     currentMixer = null
+    opusDirect = false
     // El bot NO se desconecta solo al quedar inactivo: permanece en el canal
     // hasta que alguien use el botón Desconectar.
     updatePanel()
@@ -1413,6 +1469,7 @@ function cmdStop() {
   // detenido en el canal hasta que alguien reproduzca o agregue una canción.
   if (!current) return false
   transition = 'stop'
+  pendingSounds = [] // si había sonidos esperando un switch, se descartan
   musicPlayer.stop()
   return true
 }
@@ -1708,13 +1765,42 @@ function spawnSoundFfmpeg(filePath, gainDb = 0) {
 }
 
 async function playSound(soundId, user = null) {
+  lastSoundAt = Date.now() // marca actividad de soundboard → mantiene el modo PCM
+  // Si la música va en passthrough Opus, no hay mixer donde superponer: se cambia
+  // a PCM reiniciando la canción actual desde su posición y el sonido se suelta
+  // cuando el mixer esté listo (un único re-sync; solo ocurre tras 5 min sin
+  // sonidos, por eso el soundboard en uso nunca se corta).
+  if (opusDirect && current) {
+    const id = ++soundIdSeq
+    pendingSounds.push({ id, soundId: Number(soundId), user })
+    seekTarget = elapsed()
+    transition = 'seek'
+    opusDirect = false
+    musicPlayer.stop() // rompe waitIdle → ensurePlaying reconstruye en PCM
+    return id
+  }
+  return playSoundCore(soundId, user)
+}
+
+// Suelta los sonidos que esperaban el switch de Opus-directo a PCM. Se llama
+// cuando la música ya suena en PCM (el mixer existe).
+function flushPendingSounds() {
+  if (!pendingSounds.length) return
+  const list = pendingSounds; pendingSounds = []
+  for (const p of list) {
+    Promise.resolve(playSoundCore(p.soundId, p.user, p.id))
+      .catch(e => console.warn('sonido pendiente:', e.message))
+  }
+}
+
+async function playSoundCore(soundId, user = null, presetId = null) {
   const sound = soundLib.getById(Number(soundId))
   if (!sound) throw new Error('Sonido no encontrado')
   const filePath = soundLib.localPath(sound)
   if (!existsSync(filePath)) throw new Error('Archivo del sonido no disponible')
   const key = String(sound.id) // identificador estable que usa el panel
   const gain = effectiveGain(sound) // normalización de volumen por sonido
-  const id = ++soundIdSeq
+  const id = presetId ?? ++soundIdSeq
   playHistory.record({ kind: 'sound', refId: sound.id, userId: user ? user.id : null })
   // Datos para la notificación "quién reproduce qué" del panel (dura lo que suene).
   const meta = { label: sound.label, user, startedAt: Date.now(), durationMs: sound.duration_ms || null }
