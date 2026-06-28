@@ -33,6 +33,10 @@ import {
   USE_WORKER, workerHeaders, workerAudioUrl, workerMeta, workerEnsure,
   workerKeep, workerPlaylist, pushWorkerConfig as wcPushWorkerConfig,
 } from './lib/worker-client.mjs'
+import {
+  initYtdlp, trackBg, untrackBg, killBgYtdlp, ytdlpArgs,
+  ensureYtDlp, ytdlpPrint, ytdlpResolveMetaLocal, ytdlpFlatPlaylistLocal,
+} from './lib/audio/ytdlp.mjs'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const IS_WIN = process.platform === 'win32'
@@ -49,6 +53,7 @@ const YTDLP_ASSET = IS_WIN ? null
 const YTDLP = process.env.YTDLP_PATH || join(ROOT, IS_WIN ? 'yt-dlp.exe' : 'yt-dlp')
 const YTDLP_URL = `https://github.com/yt-dlp/yt-dlp/releases/latest/download/${YTDLP_ASSET}`
 const COOKIES = join(ROOT, 'cookies.txt')
+initYtdlp({ YTDLP, COOKIES, IS_WIN, YTDLP_ASSET, YTDLP_URL }) // inyecta rutas al módulo yt-dlp
 const SOUNDS_DIR = join(ROOT, 'sounds')
 const PANEL_HTML = join(ROOT, 'panel.html')
 const SETTINGS_FILE = join(ROOT, 'settings.json')
@@ -136,39 +141,6 @@ pushWorkerConfig() // al arrancar, sincroniza el worker con el ajuste guardado
 
 if (!existsSync(SOUNDS_DIR)) mkdirSync(SOUNDS_DIR, { recursive: true })
 
-// ── yt-dlp: descarga automática en Linux ──────────────────────────────────
-async function ensureYtDlp() {
-  if (existsSync(YTDLP)) return
-  if (IS_WIN) throw new Error(`No se encontró ${YTDLP}`)
-  console.log(`Descargando yt-dlp (${YTDLP_ASSET})...`)
-  const res = await fetch(YTDLP_URL, { redirect: 'follow' })
-  if (!res.ok) throw new Error(`No se pudo descargar yt-dlp: HTTP ${res.status}`)
-  await pipeline(Readable.fromWeb(res.body), createWriteStream(YTDLP))
-  chmodSync(YTDLP, 0o755)
-  console.log('yt-dlp listo.')
-}
-
-function ytdlpArgs(extra) {
-  // Runtimes JS para el desafío de YouTube: Bun (primario) y Node (respaldo).
-  // Se quitó Deno de la VM porque, si está presente, yt-dlp lo prefiere siempre.
-  // Sin --no-cache-dir para que yt-dlp cachee el solve y repetir un tema sea rápido.
-  const args = ['--no-playlist', '--quiet',
-    '--js-runtimes', 'bun:/usr/local/bin/bun',
-    '--js-runtimes', 'node:/usr/bin/node']
-  if (existsSync(COOKIES)) args.push('--cookies', COOKIES)
-  return args.concat(extra)
-}
-
-// Como ytdlpArgs pero SIN --no-playlist y con --flat-playlist: para listar las
-// entradas de una playlist (rápido, sin resolver cada video) al importarla.
-function ytdlpPlaylistArgs(extra) {
-  const args = ['--flat-playlist', '--quiet',
-    '--js-runtimes', 'bun:/usr/local/bin/bun',
-    '--js-runtimes', 'node:/usr/bin/node']
-  if (existsSync(COOKIES)) args.push('--cookies', COOKIES)
-  return args.concat(extra)
-}
-
 // ── Estado ────────────────────────────────────────────────────────────────
 // item: { url, title, duration, voiceChannelId, guildId, textChannelId }
 const queue = []
@@ -188,7 +160,7 @@ let currentPlaying = false     // la canción actual YA está sonando (pasó la 
                                // inicial) → se permite enriquecer en paralelo al stream
 const metaBackfillTried = new Set() // ids de canciones ya intentadas en el backfill de metadata
 const artBackfillTried = new Set()  // ids ya intentadas en el backfill de carátula
-let bgProc = null              // proceso yt-dlp de fondo en curso (para poder matarlo)
+// El proceso yt-dlp de fondo lo trackea lib/audio/ytdlp.mjs (trackBg/killBgYtdlp).
 let bgSongId = null            // id de la canción que el fondo está pre-cacheando
 let bgPromise = null           // promesa del pre-cacheo en curso (para esperarlo si toca)
 const BG_WORK_INTERVAL = 10000 // cada 10s intenta enriquecer/cachear de fondo
@@ -471,12 +443,12 @@ function fetchMetaLocal(item) {
     const proc = spawn(YTDLP, ytdlpArgs([
       '--skip-download', '--print', '%(title)s\n%(duration)s\n%(uploader)s', item.url
     ]))
-    bgProc = proc
+    trackBg(proc)
     let out = ''
     proc.stdout.on('data', d => out += d)
-    proc.on('error', () => { if (bgProc === proc) bgProc = null; resolve() })
+    proc.on('error', () => { untrackBg(proc); resolve() })
     proc.on('close', () => {
-      if (bgProc === proc) bgProc = null
+      untrackBg(proc)
       const [title, dur, uploader] = out.trim().split('\n')
       if (title) item.title = title
       const d = parseFloat(dur)
@@ -503,20 +475,8 @@ function waitIdle(player) {
 }
 
 // ── Caché de música (lib/music-cache) ──────────────────────────────────────
-// Lee un único campo de metadatos con yt-dlp (resuelve búsquedas a URL real).
-function ytdlpPrint(url, field) {
-  return new Promise(resolve => {
-    const proc = spawn(YTDLP, ytdlpArgs(['--skip-download', '--print', `%(${field})s`, url]))
-    bgProc = proc
-    let out = ''
-    proc.stdout.on('data', d => out += d)
-    proc.on('error', () => { if (bgProc === proc) bgProc = null; resolve(null) })
-    proc.on('close', () => { if (bgProc === proc) bgProc = null; resolve(out.trim() || null) })
-  })
-}
-
 // Resuelve fuente real + título + duración en UNA sola llamada (resuelve también
-// términos de búsqueda ytsearch1:). Para crear canciones de playlist con metadata.
+// términos de búsqueda ytsearch1:). Worker si está, si no yt-dlp local.
 async function ytdlpResolveMeta(url) {
   if (USE_WORKER) {
     try {
@@ -525,20 +485,6 @@ async function ytdlpResolveMeta(url) {
     } catch { /* fallback local */ }
   }
   return ytdlpResolveMetaLocal(url)
-}
-function ytdlpResolveMetaLocal(url) {
-  return new Promise(resolve => {
-    const proc = spawn(YTDLP, ytdlpArgs(['--skip-download', '--print', '%(webpage_url)s\t%(title)s\t%(duration)s', url]))
-    bgProc = proc
-    let out = ''
-    proc.stdout.on('data', d => out += d)
-    proc.on('error', () => { if (bgProc === proc) bgProc = null; resolve(null) })
-    proc.on('close', () => {
-      if (bgProc === proc) bgProc = null
-      const [sourceUrl, title, dur] = (out.trim().split('\n')[0] || '').split('\t')
-      resolve(sourceUrl ? { sourceUrl, title: title || null, duration: parseFloat(dur) } : null)
-    })
-  })
 }
 
 // Lista las entradas (url + título) de una playlist sin resolver cada video.
@@ -550,46 +496,9 @@ async function ytdlpFlatPlaylist(url) {
   }
   return ytdlpFlatPlaylistLocal(url)
 }
-// Traduce un error de yt-dlp de playlist a un mensaje claro (fallback local; el
-// worker tiene su propia copia de esta lógica).
-function classifyPlaylistError(text) {
-  const t = (text || '').toLowerCase()
-  if (/private|privada/.test(t)) return 'La playlist es PRIVADA. Cámbiala a "Pública" o "No listada" en YouTube y reintenta.'
-  if (/does not exist|unavailable|deleted|removed|not found|no longer|404/.test(t)) return 'La playlist no existe o fue eliminada. Verifica que el enlace sea correcto.'
-  if (/sign in|log in|confirm you|members-only|cookies|age/.test(t)) return 'La playlist requiere iniciar sesión (es privada o solo para miembros).'
-  return 'No se pudo acceder a la playlist. Asegúrate de que el enlace sea correcto y de que la playlist sea pública o "no listada".'
-}
-function ytdlpFlatPlaylistLocal(url) {
-  return new Promise((resolve, reject) => {
-    const proc = spawn(YTDLP, ytdlpPlaylistArgs(['--print', '%(url)s\t%(title)s\t%(duration)s\t%(playlist_title)s\t%(thumbnail)s', url]))
-    bgProc = proc
-    let out = '', err = ''
-    proc.stdout.on('data', d => out += d)
-    proc.stderr.on('data', d => err += d)
-    proc.on('error', e => { if (bgProc === proc) bgProc = null; reject(e) })
-    proc.on('close', code => {
-      if (bgProc === proc) bgProc = null
-      if (code !== 0 && !out.trim()) { const e = new Error(classifyPlaylistError(err)); e.playlistError = true; return reject(e) }
-      const entries = out.trim().split('\n').filter(Boolean).map(line => {
-        const [u, title, dur, plTitle, thumb] = line.split('\t')
-        return {
-          url: u,
-          title: (title && title !== 'NA') ? title : u,
-          duration: parseFloat(dur),
-          playlistTitle: (plTitle && plTitle !== 'NA') ? plTitle : null,
-          thumbnail: (thumb && thumb !== 'NA' && /^https?:\/\//i.test(thumb)) ? thumb : null,
-        }
-      }).filter(e => e.url && /^https?:\/\//i.test(e.url))
-      resolve(entries)
-    })
-  })
-}
 
-// Mata el yt-dlp de fondo en curso (si lo hay). Se llama al arrancar una
-// reproducción para garantizar que nunca corran dos yt-dlp a la vez.
-function killBgYtdlp() {
-  if (bgProc) { try { bgProc.kill() } catch {} bgProc = null }
-}
+// (ytdlpPrint, ytdlpResolveMetaLocal, ytdlpFlatPlaylistLocal, classifyPlaylistError
+//  y killBgYtdlp viven en lib/audio/ytdlp.mjs.)
 
 // URL canónica para indexar la caché: las URLs directas se usan tal cual; las
 // búsquedas (ytsearch1: de nombre/Spotify/Apple) se resuelven al video real.
@@ -616,12 +525,12 @@ function downloadToFile(url, destPath) {
   if (USE_WORKER) return downloadViaWorker(url, destPath)
   return new Promise((resolve, reject) => {
     const proc = spawn(YTDLP, ytdlpArgs(['-f', 'bestaudio/best', '-o', `${destPath}.%(ext)s`, url]))
-    bgProc = proc
+    trackBg(proc)
     let err = ''
     proc.stderr.on('data', d => err += d)
-    proc.on('error', e => { if (bgProc === proc) bgProc = null; reject(e) })
+    proc.on('error', e => { untrackBg(proc); reject(e) })
     proc.on('close', code => {
-      if (bgProc === proc) bgProc = null
+      untrackBg(proc)
       if (code !== 0) return reject(new Error(`yt-dlp salió con código ${code}: ${err.trim()}`))
       const dir = dirname(destPath)
       const prefix = basename(destPath) + '.'
