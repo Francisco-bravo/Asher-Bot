@@ -29,6 +29,10 @@ import * as musicCache from './lib/music-cache.mjs'
 import * as art from './lib/art.mjs'
 import * as artsearch from './lib/artsearch.mjs'
 import { MixerStream, SoundMixer } from './lib/audio/mixer.mjs'
+import {
+  USE_WORKER, workerHeaders, workerAudioUrl, workerMeta, workerEnsure,
+  workerKeep, workerPlaylist, pushWorkerConfig as wcPushWorkerConfig,
+} from './lib/worker-client.mjs'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const IS_WIN = process.platform === 'win32'
@@ -73,51 +77,7 @@ let MAX_HISTORY = 100
 // hace en el worker remoto (CX33, Alemania) que devuelve Opus por HTTP; aquí solo
 // se decodifica ese Opus → PCM para el mixer (CPU trivial). Sin la env, el bot
 // usa yt-dlp local exactamente como antes. Los sonidos SIEMPRE son locales.
-const MUSIC_WORKER_URL = (process.env.MUSIC_WORKER_URL || '').replace(/\/$/, '')
-const MUSIC_WORKER_TOKEN = process.env.MUSIC_WORKER_TOKEN || ''
-const USE_WORKER = !!MUSIC_WORKER_URL
-function workerAudioUrl(src, seekSec) {
-  const u = new URL(MUSIC_WORKER_URL + '/audio')
-  u.searchParams.set('url', src)
-  if (seekSec > 0) u.searchParams.set('seek', String(seekSec))
-  return u
-}
-
-// Cliente del worker: metadata/carátula/caché/playlist los hace el CX33 (que
-// además GUARDA el audio/carátula en su disco). Santiago no usa yt-dlp salvo
-// que estas llamadas fallen (fallback local, ver más abajo).
-function workerHeaders() { return { Authorization: `Bearer ${MUSIC_WORKER_TOKEN}` } }
-async function workerReq(method, path, src, extra = {}) {
-  const u = new URL(MUSIC_WORKER_URL + path)
-  if (src) u.searchParams.set('url', src)
-  for (const [k, v] of Object.entries(extra)) u.searchParams.set(k, v)
-  const res = await fetch(u, { method, headers: workerHeaders() })
-  if (!res.ok) throw new Error(`worker ${path} HTTP ${res.status}`)
-  return res
-}
-// Devuelve { url, title, duration(seg), uploader, thumbnail, ext } o lanza.
-async function workerMeta(src) { return (await workerReq('GET', '/meta', src)).json() }
-// Pre-descarga al disco del worker (forzar caché / gapless). No trae bytes a Santiago.
-async function workerEnsure(src) { await workerReq('POST', '/ensure', src) }
-// Marca/desmarca una canción como no-evictable en el worker (permanente).
-async function workerKeep(src, keep) { try { await workerReq('POST', '/keep', src, { keep: keep ? '1' : '0' }) } catch {} }
-// Borra audio+carátula+meta del disco del worker.
-async function workerDelete(src) { try { await workerReq('DELETE', '/cache', src) } catch {} }
-// Expande una playlist por link en el worker. Un 422 = error REAL de la playlist
-// (privada/eliminada): se propaga con mensaje claro y SIN fallback local (que daría
-// el mismo error). Otros fallos (worker caído) sí permiten fallback.
-async function workerPlaylist(src) {
-  const u = new URL(MUSIC_WORKER_URL + '/playlist')
-  u.searchParams.set('url', src)
-  const res = await fetch(u, { headers: workerHeaders() })
-  if (res.status === 422) {
-    let msg = 'No se pudo acceder a la playlist'
-    try { msg = (await res.json()).error || msg } catch {}
-    const err = new Error(msg); err.playlistError = true; throw err
-  }
-  if (!res.ok) throw new Error(`worker /playlist HTTP ${res.status}`)
-  return res.json()
-}
+// El cliente HTTP del worker vive en lib/worker-client.mjs (ver imports).
 
 // Volumen BASE de los sonidos: multiplicador global (1 = normal, 2 = el doble),
 // se aplica encima de la igualación por loudness, a todos por igual. Es el único
@@ -164,19 +124,14 @@ soundTargetLufs = setTargetI(soundTargetLufs) // aplica el objetivo cargado
 function saveSettings() {
   try { writeFileSync(SETTINGS_FILE, JSON.stringify({ soundBaseVolume, maxSoundSeconds, musicDuck, musicVolume, musicVolumeCooldownMs, soundTargetLufs, workerMaxConcurrency, workerCacheMaxGb, musicBitrateKbps, maxQueue: MAX_QUEUE, maxHistory: MAX_HISTORY })) } catch {}
 }
-// Empuja al worker los ajustes que él aplica en caliente (best-effort; el worker
-// arranca con sus defaults por env y el bot le impone los valores de Variables
-// Generales): concurrencia, tope de caché en disco y bitrate de música.
-async function pushWorkerConfig() {
-  if (!USE_WORKER) return
-  try {
-    await workerReq('POST', '/config', null, {
-      concurrency: String(workerMaxConcurrency),
-      maxGb: String(workerCacheMaxGb),
-      bitrate: String(musicBitrateKbps),
-    })
-  } catch {}
-}
+// Empuja al worker los ajustes de Variables Generales que aplica en caliente
+// (concurrencia, tope de caché en disco, bitrate). El cliente está en
+// lib/worker-client.mjs; aquí solo se le pasan los valores actuales.
+const pushWorkerConfig = () => wcPushWorkerConfig({
+  concurrency: workerMaxConcurrency,
+  maxGb: workerCacheMaxGb,
+  bitrate: musicBitrateKbps,
+})
 pushWorkerConfig() // al arrancar, sincroniza el worker con el ajuste guardado
 
 if (!existsSync(SOUNDS_DIR)) mkdirSync(SOUNDS_DIR, { recursive: true })
@@ -648,9 +603,7 @@ async function resolveSource(item) {
 
 // Pre-cacheo vía worker remoto: baja el Opus por HTTP y lo guarda en destPath.
 async function downloadViaWorker(url, destPath) {
-  const res = await fetch(workerAudioUrl(url, 0), {
-    headers: { Authorization: `Bearer ${MUSIC_WORKER_TOKEN}` },
-  })
+  const res = await fetch(workerAudioUrl(url, 0), { headers: workerHeaders() })
   if (!res.ok || !res.body) throw new Error(`worker HTTP ${res.status}`)
   await pipeline(Readable.fromWeb(res.body), createWriteStream(destPath))
 }
