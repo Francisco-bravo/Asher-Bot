@@ -96,7 +96,8 @@ let maxSoundSeconds = 40
 // que se multiplica la música. 0.35 = la música baja al 35% (una bajada del 65%).
 let musicDuck = 0.35
 // Volumen de la música (multiplicador 0..2; 1 = original). Se aplica en vivo al
-// mezclar. Editable desde la web (slider) y desde Discord (botones +/-).
+// mezclar. Es POR SERVIDOR (S.musicVolume); este global es solo el valor por
+// defecto con que nace cada sesión (se carga/guarda en settings.json).
 let musicVolume = 1
 // Enfriamiento GLOBAL (ms) entre cambios de volumen de música (web + Discord), para
 // que no se solapen ajustes de varias personas. Configurable en Variables Generales.
@@ -188,6 +189,7 @@ class GuildSession {
     this.currentDirectId = null
     this.directResource = null
     this.lastMusicVolumeAt = 0      // último cambio de volumen (cooldown)
+    this.musicVolume = musicVolume  // volumen de música POR SERVIDOR (sembrado del default global)
     this.panelUpdateQueued = false
     this.musicPlayer = createAudioPlayer()
     this.soundPlayer = createAudioPlayer()
@@ -909,7 +911,7 @@ async function ensurePlaying(S = activeSession()) {
           stream = USE_WORKER ? startRemoteStream(S.current, S.seekOffset, null) : startStream(S.current, S.seekOffset)
         }
         S.currentMixer = new MixerStream(stream, () => S.currentResource ? S.currentResource.playbackDuration : 0, {
-          getMusicVolume: () => musicVolume,
+          getMusicVolume: () => S.musicVolume,
           getMusicDuck: () => musicDuck,
           getSoundBaseVolume: () => soundBaseVolume,
         })
@@ -1211,7 +1213,7 @@ function panelPayload(S = activeSession()) {
     .setColor(0x5865f2)
     .setTitle(PANEL_TITLE)
     .setDescription(lines.join('\n'))
-  const volFooter = `Volumen música: ${Math.round(musicVolume * 100)}%`
+  const volFooter = `Volumen música: ${Math.round(S.musicVolume * 100)}%`
   embed.setFooter({ text: (S.currentChannelName ? `🔊 ${S.currentChannelName} · ` : '') + volFooter })
   const row1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('mp_prev').setEmoji('⏮').setStyle(ButtonStyle.Secondary),
@@ -1368,12 +1370,12 @@ async function onInteraction(interaction) {
   }
 
   if (id === 'mp_voldown' || id === 'mp_volup') {
-    const left = musicVolumeCooldownLeft()
+    const left = musicVolumeCooldownLeft(S)
     if (left > 0) {
       await interaction.reply({ content: `⏳ Espera ${Math.ceil(left / 1000)}s para volver a cambiar el volumen.`, flags: 64 }).catch(() => {})
       return
     }
-    cmdMusicVolume(musicVolume + (id === 'mp_volup' ? 0.1 : -0.1))
+    cmdMusicVolume(S.musicVolume + (id === 'mp_volup' ? 0.1 : -0.1), S)
   }
   else if (id === 'mp_prev') cmdPrevious()
   else if (id === 'mp_toggle') { if (!cmdPause()) cmdResume() }
@@ -1552,19 +1554,17 @@ function cmdSoundTargetLufs(v) {
   return true
 }
 
-// Volumen de la música (multiplicador 0..2; 1 = original). Aplica en vivo (el
-// mixer lee `musicVolume`). Throttle GLOBAL (web + Discord comparten este estado):
-// como máximo 1 cambio cada `musicVolumeCooldownMs` para que no se solapen los
-// ajustes de varias personas (configurable; 0 = sin límite).
+// Volumen de la música POR SERVIDOR (multiplicador 0..2; 1 = original). Aplica en
+// vivo (el mixer de cada sesión lee S.musicVolume). El enfriamiento es por servidor
+// (S.lastMusicVolumeAt) con la ventana global musicVolumeCooldownMs (0 = sin límite).
 function musicVolumeCooldownLeft(S = activeSession()) {
   return Math.max(0, musicVolumeCooldownMs - (Date.now() - S.lastMusicVolumeAt))
 }
 function cmdMusicVolume(v, S = activeSession()) {
   if (typeof v !== 'number' || isNaN(v)) return false
-  if (musicVolumeCooldownLeft() > 0) return false // limitado: aún en enfriamiento
+  if (musicVolumeCooldownLeft(S) > 0) return false // limitado: aún en enfriamiento
   S.lastMusicVolumeAt = Date.now()
-  musicVolume = Math.round(Math.min(2, Math.max(0, v)) * 100) / 100
-  saveSettings()
+  S.musicVolume = Math.round(Math.min(2, Math.max(0, v)) * 100) / 100
   return true
 }
 
@@ -1768,7 +1768,7 @@ function getState(S = activeSession()) {
     soundBaseVolume,
     maxSoundSeconds,
     musicDuck,
-    musicVolume,
+    musicVolume: S.musicVolume,
     musicVolumeCooldownMs,
     soundTargetLufs,
     workerEnabled: USE_WORKER,
@@ -2104,10 +2104,10 @@ async function onHttp(req, res) {
           return sendJson({ ok: cmdSeek(to) })
         }
         case '/api/music-volume': {
-          const left = musicVolumeCooldownLeft()
-          if (left > 0) return sendJson({ error: `Espera ${Math.ceil(left / 1000)}s para volver a cambiar el volumen`, retryMs: left, musicVolume }, 429)
-          const v = body.to !== undefined ? body.to : musicVolume + (body.delta || 0)
-          return sendJson({ ok: cmdMusicVolume(v), musicVolume })
+          const left = musicVolumeCooldownLeft(S)
+          if (left > 0) return sendJson({ error: `Espera ${Math.ceil(left / 1000)}s para volver a cambiar el volumen`, retryMs: left, musicVolume: S.musicVolume }, 429)
+          const v = body.to !== undefined ? body.to : S.musicVolume + (body.delta || 0)
+          return sendJson({ ok: cmdMusicVolume(v, S), musicVolume: S.musicVolume })
         }
         case '/api/queue/remove': {
           const i = body.index
