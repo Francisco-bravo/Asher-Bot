@@ -81,6 +81,35 @@
   .sp-card .sp-ph { background: var(--accent); color: #fff; font-size: 1.7rem; line-height: 64px; font-weight: 700; }
   .sp-name { font-weight: 600; }
   .sp-status { color: var(--muted); font-size: .82rem; margin-top: 6px; }
+  /* Menú desplegable del usuario */
+  .user-chip { cursor: pointer; }
+  .user-menu { position: absolute; right: 0; top: calc(100% + 8px); background: var(--panel); border: var(--border); border-radius: 10px; box-shadow: var(--shadow); padding: 6px; z-index: 950; min-width: 180px; }
+  .user-menu button { width: 100%; text-align: left; padding: 9px 12px; border: none; border-radius: 7px; background: transparent; color: var(--text); cursor: pointer; font-size: .9rem; }
+  .user-menu button:hover { background: var(--panel2); }
+  /* Pantalla de Administración */
+  .admin-screen { position: fixed; inset: 0; background: var(--bg); z-index: 900; overflow: hidden; display: flex; flex-direction: column; }
+  .admin-head { display: flex; align-items: center; gap: 14px; padding: 16px 22px; border-bottom: var(--border); }
+  .admin-head h1 { font-size: 1.3rem; margin: 0; }
+  .admin-back { padding: 8px 14px; border: var(--border); border-radius: 9px; background: var(--panel2); color: var(--text); cursor: pointer; font-weight: 600; }
+  .admin-back:hover { background: var(--panel3); }
+  .admin-body { flex: 1; display: flex; min-height: 0; }
+  .admin-menu { width: 240px; flex-shrink: 0; border-right: var(--border); padding: 14px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+  .admin-menu-item { text-align: left; padding: 10px 14px; border: none; border-radius: 9px; background: transparent; color: var(--text); cursor: pointer; font-size: .92rem; }
+  .admin-menu-item:hover { background: var(--panel2); }
+  .admin-menu-item.active { background: var(--accent); color: #fff; font-weight: 600; }
+  .admin-acc-head { width: 100%; text-align: left; padding: 10px 14px; border: none; border-radius: 9px; background: transparent; color: var(--text); cursor: pointer; font-size: .92rem; font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
+  .admin-acc-head:hover { background: var(--panel2); }
+  .admin-acc-items { display: flex; flex-direction: column; gap: 4px; padding-left: 12px; margin-top: 2px; overflow: hidden; }
+  .admin-acc.collapsed .admin-acc-items { display: none; }
+  .admin-acc.collapsed .admin-acc-arr { transform: rotate(-90deg); }
+  .admin-acc-arr { transition: transform .12s; font-size: .8rem; }
+  .admin-content { flex: 1; overflow-y: auto; padding: 22px; min-width: 0; }
+  .admin-sec { display: none; }
+  .admin-sec.active { display: block; }
+  @media (max-width: 720px) {
+    .admin-body { flex-direction: column; }
+    .admin-menu { width: 100%; flex-direction: row; flex-wrap: wrap; border-right: none; border-bottom: var(--border); }
+  }
   /* Usuario logueado (arriba a la derecha) */
   .user-chip {
     display: none; align-items: center; gap: 9px;
@@ -863,6 +892,33 @@
     <div class="sp-grid" id="sp-grid"></div>
   </div>
 </div>
+<!-- Pantalla de Administración (transversal): Variables Generales (acordeón:
+     Soundboard / Música), Caché y Usuarios. Los módulos se reubican aquí por JS. -->
+<div id="admin-screen" class="admin-screen" style="display:none">
+  <div class="admin-head">
+    <button class="admin-back" id="admin-back" title="Volver al panel">← Volver</button>
+    <h1>⚙️ Administración</h1>
+  </div>
+  <div class="admin-body">
+    <nav class="admin-menu">
+      <div class="admin-acc">
+        <button class="admin-acc-head" id="admin-acc-vars">⚙️ Variables Generales <span class="admin-acc-arr">▾</span></button>
+        <div class="admin-acc-items" id="admin-acc-items">
+          <button class="admin-menu-item active" data-asec="vars-sound">🔊 Soundboard</button>
+          <button class="admin-menu-item" data-asec="vars-music">🎵 Música</button>
+        </div>
+      </div>
+      <button class="admin-menu-item" data-asec="cache">💾 Caché</button>
+      <button class="admin-menu-item" data-asec="users">👥 Usuarios</button>
+    </nav>
+    <div class="admin-content">
+      <div class="admin-sec active" id="admin-sec-vars-sound"></div>
+      <div class="admin-sec" id="admin-sec-vars-music"></div>
+      <div class="admin-sec" id="admin-sec-cache"></div>
+      <div class="admin-sec" id="admin-sec-users"></div>
+    </div>
+  </div>
+</div>
 <div class="container">
   <div class="topbar">
     <div class="brand">
@@ -878,7 +934,12 @@
       <div class="status-pill">
         <span class="dot" id="conn-dot"></span><span id="conn-text">Desconectado del canal de voz</span>
       </div>
-      <div class="user-chip" id="user-chip" title="Sesión iniciada"></div>
+      <div class="user-wrap" style="position:relative">
+        <div class="user-chip" id="user-chip" title="Sesión iniciada"></div>
+        <div class="user-menu" id="user-menu" style="display:none">
+          <button id="user-menu-admin">⚙️ Administración</button>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -1471,8 +1532,9 @@ function renderUserChip() {
 // solo se muestran a administradores.
 function applyAdminUI() {
   const isAdmin = me && (me.roles || []).includes('admin')
-  // La pestaña Caché y el selector de canal de voz son solo para administradores.
-  for (const id of ['tab-cache', 'page-cache', 'tab-users', 'page-users', 'tab-voice', 'page-voice', 'voice-panel', 'subtab-stats', 'subtab-manage', 'subtab-audit', 'ltab-vars', 'lpage-vars']) {
+  // Caché/Usuarios/Variables se movieron a la pantalla Administración (gateada por
+  // el menú del usuario). Aquí solo quedan los accesos que siguen en pestañas.
+  for (const id of ['tab-voice', 'page-voice', 'voice-panel', 'subtab-stats', 'subtab-manage', 'subtab-audit']) {
     const el = document.getElementById(id)
     if (!el) continue
     if (isAdmin) el.style.removeProperty('display')
@@ -3914,6 +3976,54 @@ async function bootGuildSelection() {
   if (guilds.length >= 2) renderServerPicker(guilds)
   else if (guilds.length === 1) { selectedGuildId = guilds[0].id; localStorage.setItem('selectedGuildId', selectedGuildId) }
 }
+
+// Pantalla de Administración: reubica Variables Generales (Soundboard/Música),
+// Caché y Usuarios a un menú lateral; se abre desde el menú del usuario (admins).
+function setupAdminScreen() {
+  // Se quita la clase de layout (page/mpage/lpage) para que los switchers de
+  // pestañas/subpestañas no les quiten 'active' y las oculten dentro de Administración.
+  for (const [from, to, cls] of [
+    ['mpage-vars', 'admin-sec-vars-sound', 'mpage'],
+    ['lpage-vars', 'admin-sec-vars-music', 'lpage'],
+    ['page-cache', 'admin-sec-cache', 'page'],
+    ['page-users', 'admin-sec-users', 'page'],
+  ]) {
+    const node = document.getElementById(from), dest = document.getElementById(to)
+    if (node && dest) { node.classList.remove(cls, 'active'); node.style.removeProperty('display'); dest.appendChild(node) }
+  }
+  // Ocultar los accesos viejos (ahora viven en Administración).
+  for (const id of ['tab-cache', 'tab-users', 'ltab-vars']) {
+    const el = document.getElementById(id); if (el) el.style.setProperty('display', 'none', 'important')
+  }
+  const mtabVars = document.querySelector('.mtab[data-mtab="vars"]')
+  if (mtabVars) mtabVars.style.setProperty('display', 'none', 'important')
+
+  document.querySelectorAll('.admin-menu-item').forEach(btn => btn.addEventListener('click', () => {
+    document.querySelectorAll('.admin-menu-item').forEach(b => b.classList.remove('active'))
+    btn.classList.add('active')
+    document.querySelectorAll('.admin-sec').forEach(s => s.classList.remove('active'))
+    document.getElementById('admin-sec-' + btn.dataset.asec).classList.add('active')
+  }))
+  document.getElementById('admin-acc-vars').addEventListener('click', () =>
+    document.querySelector('.admin-acc').classList.toggle('collapsed'))
+  document.getElementById('admin-back').addEventListener('click', () =>
+    document.getElementById('admin-screen').style.display = 'none')
+
+  const chip = document.getElementById('user-chip')
+  const menu = document.getElementById('user-menu')
+  chip.addEventListener('click', (e) => {
+    e.stopPropagation()
+    if (!(me && ((me.roles || []).includes('admin') || me.isSuper))) return // solo admins
+    menu.style.display = menu.style.display === 'none' ? 'block' : 'none'
+  })
+  document.addEventListener('click', () => { menu.style.display = 'none' })
+  document.getElementById('user-menu-admin').addEventListener('click', () => {
+    menu.style.display = 'none'
+    document.getElementById('admin-screen').style.display = 'flex'
+    loadMusic(); loadUsers()   // refrescar contenido al abrir
+  })
+}
+setupAdminScreen()
 
 refresh()
 loadMe()
