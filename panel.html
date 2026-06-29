@@ -1321,6 +1321,10 @@
           <input type="number" id="edit-gain" step="0.5" min="-15" max="15" value="0">
           <small id="edit-gain-hint" class="hint" style="margin-top:4px"></small>
         </label>
+        <label id="edit-transversal-row" style="display:none; flex-direction:row; align-items:center; gap:8px">
+          <input type="checkbox" id="edit-transversal" style="width:auto">
+          <span>🌐 Transversal (visible en <b>todos</b> los servidores)</span>
+        </label>
         <div class="modal-actions">
           <button type="button" class="cancel" id="edit-cancel">Cancelar</button>
           <button type="submit" id="edit-submit">Guardar</button>
@@ -1418,6 +1422,7 @@ function botUrl(path) { return BOT_BASE + path }
 // Servidor (guild) que controla el panel. Se manda en cada petición; el bot
 // resuelve la sesión de ese servidor (o la activa si no se especifica).
 let selectedGuildId = localStorage.getItem('selectedGuildId') || null
+let isMultiServer = false // hay 2+ servidores accesibles (lo fija loadGuilds)
 async function botFetch(path, opts = {}) {
   const headers = { ...(opts.headers || {}) }
   if (selectedGuildId) headers['X-Guild-Id'] = selectedGuildId
@@ -2418,14 +2423,18 @@ document.getElementById('mgmt-grid').addEventListener('click', async (e) => {
     const s = allSounds(mgmtData).find(x => x.id === id)
     const vis = s ? s.visibility : 'global'
     const off = s ? (s.gainOffset || 0) : 0
+    const transv = s ? ((s.guild_id ?? s.guildId) == null) : true
     openEditModal({
       title: 'Editar sonido',
       desc: 'El nombre, la visibilidad y el volumen del sonido <b>para todos</b>.',
       label: 'Nombre del sonido', value: label, visibility: vis,
       gain: { offset: off, measured: s ? s.gainDb : null },
+      transversal: isMultiServer ? transv : undefined,
       save: async (value, extra) => {
-        if (value !== label || extra.visibility !== vis || extra.offsetDb !== off)
-          await mgmtAction('POST', '/api/sound-admin/rename', { soundId: id, label: value, visibility: extra.visibility, offsetDb: extra.offsetDb }, card)
+        const payload = { soundId: id, label: value, visibility: extra.visibility, offsetDb: extra.offsetDb }
+        if (extra.transversal !== undefined) payload.transversal = extra.transversal
+        if (value !== label || extra.visibility !== vis || extra.offsetDb !== off || (extra.transversal !== undefined && extra.transversal !== transv))
+          await mgmtAction('POST', '/api/sound-admin/rename', payload, card)
       },
     })
   } else if (act === 'preview') {
@@ -3629,7 +3638,7 @@ let editOnSave = null, editAllowEmpty = false
 // y `save(value, { visibility })` recibe la elegida; si no, queda oculto.
 // `gain`: si se pasa un objeto { offset, measured }, muestra el ajuste manual de
 // volumen y `save(value, { ..., offsetDb })` recibe el valor en dB.
-function openEditModal({ title, desc = '', label = 'Nombre', value = '', allowEmpty = false, visibility, gain, save }) {
+function openEditModal({ title, desc = '', label = 'Nombre', value = '', allowEmpty = false, visibility, gain, transversal, save }) {
   document.getElementById('edit-title').textContent = title
   const d = document.getElementById('edit-desc')
   d.innerHTML = desc; d.style.display = desc ? 'block' : 'none'
@@ -3650,6 +3659,11 @@ function openEditModal({ title, desc = '', label = 'Nombre', value = '', allowEm
     document.getElementById('edit-gain-hint').textContent =
       (m == null ? 'Aún sin medir automáticamente.' : 'Medido automático: ' + m + ' dB.') + ' Este ajuste se suma.'
   } else { gainRow.style.display = 'none' }
+  const transRow = document.getElementById('edit-transversal-row')
+  if (transversal !== undefined) {
+    transRow.style.display = 'flex'
+    document.getElementById('edit-transversal').checked = !!transversal
+  } else { transRow.style.display = 'none' }
   editOnSave = save; editAllowEmpty = allowEmpty
   document.getElementById('edit-modal').style.display = 'flex'
   input.focus(); input.select()
@@ -3673,6 +3687,8 @@ document.getElementById('edit-form').addEventListener('submit', async (e) => {
     extra.visibility = document.getElementById('edit-visibility').value
   if (document.getElementById('edit-gain-row').style.display !== 'none')
     extra.offsetDb = Number(document.getElementById('edit-gain').value) || 0
+  if (document.getElementById('edit-transversal-row').style.display !== 'none')
+    extra.transversal = document.getElementById('edit-transversal').checked
   const btn = document.getElementById('edit-submit')
   const cancel = document.getElementById('edit-cancel')
   const input = document.getElementById('edit-input')
@@ -3793,6 +3809,7 @@ async function loadGuilds() {
   if (!data || !Array.isArray(data.guilds)) return
   const sel = document.getElementById('guild-select')
   const btnOther = document.getElementById('btn-other-servers')
+  isMultiServer = data.guilds.length >= 2
   if (data.guilds.length <= 1) {
     sel.style.display = 'none'
     if (btnOther) btnOther.style.display = 'none'

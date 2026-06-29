@@ -471,6 +471,12 @@ http.createServer(async (req, res) => {
         sounds.renameSound(sid, body.label)
         if (body.visibility === 'global' || body.visibility === 'private') sounds.setVisibility(sid, body.visibility)
         if (body.offsetDb !== undefined) sounds.setGainOffset(sid, Number(body.offsetDb) || 0)
+        // Transversal: visible en TODOS los servidores (guild_id NULL). Al quitarlo,
+        // queda ligado al servidor activo. Solo admin (gateo de arriba).
+        if (body.transversal !== undefined) {
+          const gid = req.headers['x-guild-id'] || url.searchParams.get('g') || null
+          sounds.setGuild(sid, body.transversal ? null : gid)
+        }
         return send(res, 200, { ok: true, sound: sounds.getById(sid) })
       } catch (e) { return send(res, 400, { error: e.message }) }
     }
