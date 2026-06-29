@@ -141,56 +141,67 @@ pushWorkerConfig() // al arrancar, sincroniza el worker con el ajuste guardado
 
 if (!existsSync(SOUNDS_DIR)) mkdirSync(SOUNDS_DIR, { recursive: true })
 
-// ── Estado ────────────────────────────────────────────────────────────────
-// item: { url, title, duration, voiceChannelId, guildId, textChannelId }
-const queue = []
-const history = []
-let current = null
-let currentResource = null
+// ── Estado por servidor (GuildSession) ──────────────────────────────────────
+// item de la cola: { url, title, duration, voiceChannelId, guildId, textChannelId }
+// TODO el estado de reproducción vive en una instancia por servidor de Discord.
+// (Migración multiservidor: por ahora se usa una sola sesión `S`; el enrutado
+//  por guildId se añade después. Ver lib/audio/* para mixer/worker/yt-dlp.)
 // Trabajo de fondo (metadata/carátula/pre-cacheo): corre SOLO cuando no hay un
 // stream de reproducción descargando → JAMÁS dos yt-dlp a la vez (regla estricta).
-// Cuando arranca una reproducción se mata el yt-dlp de fondo en curso.
 // Gapless: al cerrar el yt-dlp de la canción actual (descarga terminada) se
-// dispara el pre-cacheo a DISCO de la siguiente; cuando la actual termina de
-// sonar, la siguiente ya está en disco y arranca sin la extracción de ~10s.
-let prefetching = false        // el trabajo de fondo está activo
-let streamDownloading = false  // hay un yt-dlp de reproducción descargando (incluye la
-                               // extracción inicial)
-let currentPlaying = false     // la canción actual YA está sonando (pasó la extracción
-                               // inicial) → se permite enriquecer en paralelo al stream
+// dispara el pre-cacheo a DISCO de la siguiente; al terminar de sonar, ya está.
+class GuildSession {
+  constructor(guildId = null) {
+    this.guildId = guildId
+    this.queue = []
+    this.history = []
+    this.current = null
+    this.currentResource = null
+    this.prefetching = false        // el trabajo de fondo está activo
+    this.streamDownloading = false  // hay un yt-dlp de reproducción descargando (con extracción)
+    this.currentPlaying = false     // la canción actual YA suena (pasó la extracción inicial)
+    this.bgSongId = null            // id de la canción que el fondo está pre-cacheando
+    this.bgPromise = null           // promesa del pre-cacheo en curso (para esperarlo si toca)
+    this.playFailReason = null      // motivo si la canción actual no se pudo reproducir
+    this.seekOffset = 0             // segundos ya descartados por seek en el stream actual
+    this.seekTarget = 0             // desde dónde arrancar el próximo stream
+    this.transition = 'next'        // al quedar idle: next | previous | seek | stop
+    this.playing = false
+    this.connection = null
+    this.currentChannelId = null
+    this.currentChannelName = null
+    this.soundActive = 0
+    this.activeProcs = []
+    this.remoteAbort = null         // AbortController del fetch al worker (si USE_WORKER)
+    this.soundIdSeq = 0
+    this.activeSounds = new Map()   // id -> { file, proc, ov?, mixer?, direct? }
+    // Passthrough de Opus: música sola → Ogg/Opus del worker tal cual (sin ffmpeg
+    // ni encoder). Si hubo soundboard en los últimos SOUND_PCM_WINDOW_MS, se queda
+    // en mezcla PCM → cero cortes (prioridad soundboard).
+    this.opusDirect = false         // la canción actual suena en passthrough (sin mixer)
+    this.lastSoundAt = 0            // timestamp del último uso del soundboard
+    this.pendingSounds = []         // sonidos a soltar cuando el mixer PCM esté listo tras un switch
+    this.soundMixer = null
+    this.currentMixer = null
+    this.panelMsg = null            // mensaje del panel de control en el chat de Discord
+    this.currentDirectId = null
+    this.directResource = null
+    this.lastMusicVolumeAt = 0      // último cambio de volumen (cooldown)
+    this.panelUpdateQueued = false
+    this.musicPlayer = createAudioPlayer()
+    this.soundPlayer = createAudioPlayer()
+  }
+}
+
 const metaBackfillTried = new Set() // ids de canciones ya intentadas en el backfill de metadata
 const artBackfillTried = new Set()  // ids ya intentadas en el backfill de carátula
-// El proceso yt-dlp de fondo lo trackea lib/audio/ytdlp.mjs (trackBg/killBgYtdlp).
-let bgSongId = null            // id de la canción que el fondo está pre-cacheando
-let bgPromise = null           // promesa del pre-cacheo en curso (para esperarlo si toca)
 const BG_WORK_INTERVAL = 10000 // cada 10s intenta enriquecer/cachear de fondo
-let playFailReason = null // si la canción actual no se pudo reproducir, el motivo (para avisar)
-let seekOffset = 0      // segundos ya descartados por seek en el stream actual
-let seekTarget = 0      // desde dónde arrancar el próximo stream
-let transition = 'next' // qué hacer cuando el player quede idle: next | previous | seek | stop
-let playing = false
-let connection = null
-let currentChannelId = null
-let currentChannelName = null
-let soundActive = 0
-let activeProcs = []
-let remoteAbort = null   // AbortController del fetch al worker de música (si USE_WORKER)
-let soundIdSeq = 0
-const activeSounds = new Map() // id -> { file, proc, ov?, mixer?, direct? }
-
-// ── Passthrough de Opus (ahorro de CPU) ─────────────────────────────────────
-// Cuando solo hay música y el servidor NO usó el soundboard hace poco, se manda
-// el Ogg/Opus del worker TAL CUAL a Discord (sin decodificar a PCM ni
-// re-codificar): ni ffmpeg ni encoder. Si un servidor tiene actividad reciente
-// de soundboard se queda en mezcla PCM → cero cortes (prioridad soundboard). El
-// único re-sync ocurre al disparar un sonido tras un periodo largo de silencio.
-let opusDirect = false   // la canción actual suena en passthrough (sin mixer PCM)
-let lastSoundAt = 0      // timestamp del último uso del soundboard
-let pendingSounds = []   // sonidos a soltar cuando el mixer PCM esté listo tras un switch
 const SOUND_PCM_WINDOW_MS = 5 * 60 * 1000 // sin sonidos por este tiempo → volver a Opus-directo
 
-const musicPlayer = createAudioPlayer()
-const soundPlayer = createAudioPlayer()
+// Sesión única por ahora (multiservidor: se reemplaza por un Map<guildId, ...>).
+const S = new GuildSession()
+const musicPlayer = S.musicPlayer
+const soundPlayer = S.soundPlayer
 
 const client = new Client({
   intents: [
@@ -205,12 +216,10 @@ const client = new Client({
 // MixerStream/SoundMixer viven en lib/audio/mixer.mjs (PCM s16le 48kHz estéreo:
 // música de base + sonidos del soundboard encima con ducking). Los volúmenes se
 // leen en vivo vía los getters que se pasan al instanciar.
-let soundMixer = null
-
-let currentMixer = null
+// S.soundMixer y S.currentMixer son campos de S (GuildSession).
 
 // ── Streaming ─────────────────────────────────────────────────────────────
-// Prioridad: cuando hay un stream de reproducción, marca streamDownloading para
+// Prioridad: cuando hay un stream de reproducción, marca S.streamDownloading para
 // que el cacheador/carátula/metadata NO lancen otro yt-dlp en paralelo (la VM
 // tiene 2 vCPU y el solve de YouTube se starva si compiten).
 function startStream(item, seekSec) {
@@ -220,7 +229,7 @@ function startStream(item, seekSec) {
   if (seekSec > 0) args.push('-ss', String(seekSec))
   args.push('-vn', '-ar', '48000', '-ac', '2', '-f', 's16le', 'pipe:1')
   const ff = spawn(FFMPEG, args)
-  streamDownloading = true
+  S.streamDownloading = true
   yt.stdout.pipe(ff.stdin)
   yt.stdout.on('error', () => {})
   ff.stdin.on('error', () => {})
@@ -228,8 +237,8 @@ function startStream(item, seekSec) {
   ff.on('error', err => console.error('ffmpeg:', err.message))
   ff.stderr.on('data', d => process.stderr.write(d))
   // Al cerrar (descarga terminada) ya hay CPU libre: pre-cachea la siguiente.
-  yt.on('close', () => { streamDownloading = false; backgroundWork() })
-  activeProcs = [yt, ff]
+  yt.on('close', () => { S.streamDownloading = false; backgroundWork() })
+  S.activeProcs = [yt, ff]
   return ff.stdout
 }
 
@@ -249,7 +258,7 @@ function startStreamAndCache(item, seekSec, song) {
   const partPath = `${cp}.${process.pid}.${Date.now()}.part`
   let cacheFile = null
   try { cacheFile = createWriteStream(partPath) } catch { cacheFile = null }
-  streamDownloading = true // ocupa el yt-dlp: el trabajo de fondo cede hasta que termine
+  S.streamDownloading = true // ocupa el yt-dlp: el trabajo de fondo cede hasta que termine
 
   yt.stdout.pipe(ff.stdin)
   if (cacheFile) { yt.stdout.pipe(cacheFile); cacheFile.on('error', () => { cacheFile = null }) }
@@ -259,7 +268,7 @@ function startStreamAndCache(item, seekSec, song) {
   ff.on('error', err => console.error('ffmpeg:', err.message))
   ff.stderr.on('data', d => process.stderr.write(d))
   yt.on('close', async code => {
-    streamDownloading = false
+    S.streamDownloading = false
     if (cacheFile) { try { cacheFile.end() } catch {} }
     const ok = code === 0 && cacheFile && existsSync(partPath)
     if (ok) {
@@ -276,7 +285,7 @@ function startStreamAndCache(item, seekSec, song) {
     }
     backgroundWork() // descarga terminada → pre-cachea la siguiente (gapless)
   })
-  activeProcs = [yt, ff]
+  S.activeProcs = [yt, ff]
   return ff.stdout
 }
 
@@ -288,13 +297,13 @@ function startStreamAndCache(item, seekSec, song) {
 async function startRemoteOpusResource(item, seekSec) {
   killBgYtdlp() // por si había trabajo de fondo local
   const ac = new AbortController()
-  remoteAbort = ac
+  S.remoteAbort = ac
   const res = await fetch(workerAudioUrl(item.url, seekSec), { headers: workerHeaders(), signal: ac.signal })
   if (!res.ok || !res.body) { try { ac.abort() } catch {}; throw new Error(`worker HTTP ${res.status}`) }
   const ogg = Readable.fromWeb(res.body)
   ogg.on('error', () => {})
-  ogg.on('end', () => { remoteAbort = null })
-  activeProcs = [] // sin ffmpeg en passthrough; el corte se hace abortando el fetch
+  ogg.on('end', () => { S.remoteAbort = null })
+  S.activeProcs = [] // sin ffmpeg en passthrough; el corte se hace abortando el fetch
   return createAudioResource(ogg, { inputType: StreamType.OggOpus })
 }
 
@@ -304,18 +313,18 @@ async function startRemoteOpusResource(item, seekSec) {
 // misma bajada. Devuelve la salida PCM de inmediato; el fetch se resuelve aparte.
 function startRemoteStream(item, seekSec, song) {
   killBgYtdlp() // por si había trabajo de fondo local
-  streamDownloading = true
+  S.streamDownloading = true
   const args = ['-loglevel', 'error', '-i', 'pipe:0', '-vn', '-ar', '48000', '-ac', '2', '-f', 's16le', 'pipe:1']
   const ff = spawn(FFMPEG, args)
   ff.on('error', err => console.error('ffmpeg(worker):', err.message))
   ff.stderr.on('data', d => process.stderr.write(d))
   ff.stdin.on('error', () => {})
-  activeProcs = [ff]
+  S.activeProcs = [ff]
 
   // El audio se almacena en el DISCO DEL WORKER (no se guarda copia local en
   // Santiago). Aquí solo se contabiliza la reproducción (play_count/historial).
   const ac = new AbortController()
-  remoteAbort = ac
+  S.remoteAbort = ac
   ;(async () => {
     try {
       const res = await fetch(workerAudioUrl(item.url, seekSec), {
@@ -327,12 +336,12 @@ function startRemoteStream(item, seekSec, song) {
       web.on('error', () => {})
       web.pipe(ff.stdin)
       web.on('end', () => {
-        streamDownloading = false
+        S.streamDownloading = false
         if (song && seekSec === 0) { try { musicCache.recordPlay(song) } catch {} }
         backgroundWork()
       })
     } catch (e) {
-      if (ac.signal.aborted) { streamDownloading = false; try { ff.stdin.end() } catch {}; return }
+      if (ac.signal.aborted) { S.streamDownloading = false; try { ff.stdin.end() } catch {}; return }
       // El worker (Alemania) no pudo extraer. Causa típica: video GEO-RESTRINGIDO a
       // la región de Santiago (disponible en Chile, no en Alemania). Fallback: se
       // extrae LOCALMENTE en Santiago y se alimenta el MISMO ffmpeg decodificador.
@@ -346,7 +355,7 @@ function startRemoteStream(item, seekSec, song) {
 // Fallback de reproducción: extrae con yt-dlp LOCAL (Santiago) y lo pipea al ffmpeg
 // `ff` que ya decodifica a PCM (es agnóstico al formato de entrada). Resuelve los
 // videos geo-restringidos a Chile que el worker alemán no puede bajar. Si también
-// falla acá, se marca playFailReason para avisar. (El seek no se reaplica en el
+// falla acá, se marca S.playFailReason para avisar. (El seek no se reaplica en el
 // fallback: arranca desde 0; es un caso de borde poco frecuente.)
 function startLocalFallback(ff, item, song, seekSec) {
   try {
@@ -362,24 +371,24 @@ function startLocalFallback(ff, item, song, seekSec) {
       try { cacheFile = createWriteStream(partPath) } catch { cacheFile = null }
     }
     const yt = spawn(YTDLP, ytdlpArgs(['--no-playlist', '-f', 'bestaudio/best', '-o', '-', item.url]))
-    activeProcs.push(yt)
+    S.activeProcs.push(yt)
     yt.stdout.pipe(ff.stdin)
     if (cacheFile) { yt.stdout.pipe(cacheFile); cacheFile.on('error', () => { cacheFile = null }) }
     yt.stdout.on('error', () => {})
     let ytErr = ''
     yt.stderr.on('data', d => { if (ytErr.length < 2000) ytErr += d })
     yt.on('error', err => {
-      streamDownloading = false
+      S.streamDownloading = false
       console.error('fallback yt-dlp:', err.message)
-      playFailReason = 'no se pudo obtener el audio'
+      S.playFailReason = 'no se pudo obtener el audio'
       if (cacheFile) cacheFile.end(() => { try { rmSync(partPath, { force: true }) } catch {} })
       try { ff.stdin.end() } catch {}
     })
     yt.on('close', code => {
-      streamDownloading = false
+      S.streamDownloading = false
       if (code && code !== 0) {
         console.error('fallback yt-dlp exit', code, ytErr.slice(0, 300))
-        playFailReason = 'no disponible'
+        S.playFailReason = 'no disponible'
         if (cacheFile) cacheFile.end(() => { try { rmSync(partPath, { force: true }) } catch {} })
       } else if (cacheFile) {
         cacheFile.end(() => {
@@ -395,16 +404,16 @@ function startLocalFallback(ff, item, song, seekSec) {
       backgroundWork()
     })
   } catch (e) {
-    streamDownloading = false
-    playFailReason = 'no se pudo obtener el audio'
+    S.streamDownloading = false
+    S.playFailReason = 'no se pudo obtener el audio'
     try { ff.stdin.end() } catch {}
   }
 }
 
 function killStreamProcs() {
-  if (remoteAbort) { try { remoteAbort.abort() } catch {} ; remoteAbort = null }
-  for (const p of activeProcs) { try { p.kill() } catch {} }
-  activeProcs = []
+  if (S.remoteAbort) { try { S.remoteAbort.abort() } catch {} ; S.remoteAbort = null }
+  for (const p of S.activeProcs) { try { p.kill() } catch {} }
+  S.activeProcs = []
 }
 
 async function fetchMeta(item) {
@@ -461,8 +470,8 @@ function fetchMetaLocal(item) {
 }
 
 function elapsed() {
-  if (!currentResource) return 0
-  return seekOffset + currentResource.playbackDuration / 1000
+  if (!S.currentResource) return 0
+  return S.seekOffset + S.currentResource.playbackDuration / 1000
 }
 
 function waitIdle(player) {
@@ -662,24 +671,24 @@ async function cacheToDisk(item) {
   if (!song) song = musicCache.findByUrl(sourceUrl) || musicCache.upsertSong({ sourceUrl, title: item.title })
   item.songId = song.id
   // Modo worker: pre-cachea en el disco del WORKER → su próxima /audio es HIT
-  // (instantáneo, gapless). El play puede esperar bgPromise si va a sonar esta.
+  // (instantáneo, gapless). El play puede esperar S.bgPromise si va a sonar esta.
   if (USE_WORKER) {
-    bgSongId = song.id
-    bgPromise = workerEnsure(sourceUrl)
-    try { await bgPromise; console.log(`Pre-cacheada en el worker (gapless): canción ${song.id}`); return true }
+    S.bgSongId = song.id
+    S.bgPromise = workerEnsure(sourceUrl)
+    try { await S.bgPromise; console.log(`Pre-cacheada en el worker (gapless): canción ${song.id}`); return true }
     catch { return false }
-    finally { if (bgSongId === song.id) { bgSongId = null; bgPromise = null } }
+    finally { if (S.bgSongId === song.id) { S.bgSongId = null; S.bgPromise = null } }
   }
   if (musicCache.hasLocal(song) || song.persisted) return false // ya lista
-  // bgPromise = SOLO la descarga del audio (lo que la reproducción necesita
+  // S.bgPromise = SOLO la descarga del audio (lo que la reproducción necesita
   // esperar para arrancar gapless); la carátula va después, sin bloquear el play.
-  bgSongId = song.id
-  bgPromise = musicCache.ensureCached(song, dest => downloadToFile(sourceUrl, dest))
+  S.bgSongId = song.id
+  S.bgPromise = musicCache.ensureCached(song, dest => downloadToFile(sourceUrl, dest))
   try {
-    await bgPromise
+    await S.bgPromise
     console.log(`Pre-cacheada a disco (gapless): canción ${song.id}`)
   } finally {
-    if (bgSongId === song.id) { bgSongId = null; bgPromise = null }
+    if (S.bgSongId === song.id) { S.bgSongId = null; S.bgPromise = null }
   }
   await ensureSongArt(song, sourceUrl) // carátula serial (dentro del candado), ya no la espera el play
   return true
@@ -687,7 +696,7 @@ async function cacheToDisk(item) {
 
 // Trabajo de fondo. UNA tarea por llamada, en este orden de prioridad:
 //   PRIORIDAD 0: la descarga del stream que va a sonar — no se toca; el enriquecido
-//      NO corre durante la extracción inicial (currentPlaying=false) para no frenar
+//      NO corre durante la extracción inicial (S.currentPlaying=false) para no frenar
 //      el arranque, y al arrancar una reproducción se mata el yt-dlp de fondo.
 //   1) METADATA + CARÁTULA de la actual y de la cola — corre mientras la canción
 //      SUENA, aunque el stream siga descargando (se acepta un 2º yt-dlp: el audio
@@ -696,18 +705,18 @@ async function cacheToDisk(item) {
 //      descargando (para no correr dos descargas sostenidas a la vez).
 // Se encadena cada 1.5s mientras haya trabajo.
 async function backgroundWork() {
-  if (prefetching) return
-  prefetching = true
+  if (S.prefetching) return
+  S.prefetching = true
   let didWork = false
   try {
     // 1) Enriquecer (metadata + carátula) mientras la canción ya suena.
-    if (currentPlaying) {
-      if (await enrich(current)) didWork = true
-      else for (const item of queue) { if (await enrich(item)) { didWork = true; break } }
+    if (S.currentPlaying) {
+      if (await enrich(S.current)) didWork = true
+      else for (const item of S.queue) { if (await enrich(item)) { didWork = true; break } }
     }
     // 2) Pre-cachear a disco la cola (la siguiente primero), solo sin stream activo.
-    if (!didWork && !streamDownloading) for (const item of queue) {
-      if (streamDownloading) break
+    if (!didWork && !S.streamDownloading) for (const item of S.queue) {
+      if (S.streamDownloading) break
       if (await cacheToDisk(item)) { didWork = true; break }
     }
     // 3) Backfill (lo más bajo): completa metadata y/o carátula de UNA canción de
@@ -732,7 +741,7 @@ async function backgroundWork() {
       }
     }
   } catch { /* reintenta en el próximo tick */ } finally {
-    prefetching = false
+    S.prefetching = false
   }
   if (didWork) setTimeout(() => backgroundWork(), 1500)
 }
@@ -747,183 +756,183 @@ function startFileStream(filePath, seekSec) {
   const ff = spawn(FFMPEG, args)
   ff.on('error', err => console.error('ffmpeg:', err.message))
   ff.stderr.on('data', d => process.stderr.write(d))
-  activeProcs = [ff]
+  S.activeProcs = [ff]
   return ff.stdout
 }
 
 // ── Conexión de voz ───────────────────────────────────────────────────────
 async function ensureConnection(voiceChannelId, guildId) {
-  if (connection && currentChannelId === voiceChannelId) return
-  if (connection) {
-    connection.destroy()
-    connection = null
+  if (S.connection && S.currentChannelId === voiceChannelId) return
+  if (S.connection) {
+    S.connection.destroy()
+    S.connection = null
     await new Promise(r => setTimeout(r, 500))
   }
   const vc = await client.channels.fetch(voiceChannelId)
-  connection = joinVoiceChannel({
+  S.connection = joinVoiceChannel({
     channelId: voiceChannelId,
     guildId,
     adapterCreator: vc.guild.voiceAdapterCreator,
   })
   await new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error('Timeout conectando al canal de voz')), 20000)
-    const onReady = () => { clearTimeout(timeout); connection.off('error', onErr); resolve() }
-    const onErr = (err) => { clearTimeout(timeout); connection.off(VoiceConnectionStatus.Ready, onReady); reject(err) }
-    connection.once(VoiceConnectionStatus.Ready, onReady)
-    connection.once('error', onErr)
+    const onReady = () => { clearTimeout(timeout); S.connection.off('error', onErr); resolve() }
+    const onErr = (err) => { clearTimeout(timeout); S.connection.off(VoiceConnectionStatus.Ready, onReady); reject(err) }
+    S.connection.once(VoiceConnectionStatus.Ready, onReady)
+    S.connection.once('error', onErr)
   })
-  connection.subscribe(musicPlayer)
-  currentChannelId = voiceChannelId
-  currentChannelName = vc.name
+  S.connection.subscribe(musicPlayer)
+  S.currentChannelId = voiceChannelId
+  S.currentChannelName = vc.name
 }
 
 function destroyConnection() {
-  if (connection) {
-    try { connection.destroy() } catch {}
-    connection = null
-    currentChannelId = null
-    currentChannelName = null
+  if (S.connection) {
+    try { S.connection.destroy() } catch {}
+    S.connection = null
+    S.currentChannelId = null
+    S.currentChannelName = null
   }
 }
 
 // ── Motor de reproducción ─────────────────────────────────────────────────
 async function ensurePlaying() {
-  if (playing) return
-  playing = true
+  if (S.playing) return
+  S.playing = true
   try {
     while (true) {
-      if (!current) {
-        if (queue.length === 0) break
-        current = queue.shift()
+      if (!S.current) {
+        if (S.queue.length === 0) break
+        S.current = S.queue.shift()
       }
       try {
-        await ensureConnection(current.voiceChannelId, current.guildId)
+        await ensureConnection(S.current.voiceChannelId, S.current.guildId)
       } catch (err) {
         console.error('Error de conexión:', err.message)
-        await notifyError(current, err)
-        current = null
+        await notifyError(S.current, err)
+        S.current = null
         continue
       }
 
-      seekOffset = seekTarget
-      seekTarget = 0
-      currentPlaying = false // aún en extracción/carga: no enriquecer hasta que suene
-      playFailReason = null  // se setea si el stream del worker falla (video no disponible)
-      console.log(`Reproduciendo: ${current.title || current.url}${seekOffset ? ` (desde ${seekOffset}s)` : ''}`)
+      S.seekOffset = S.seekTarget
+      S.seekTarget = 0
+      S.currentPlaying = false // aún en extracción/carga: no enriquecer hasta que suene
+      S.playFailReason = null  // se setea si el stream del worker falla (video no disponible)
+      console.log(`Reproduciendo: ${S.current.title || S.current.url}${S.seekOffset ? ` (desde ${S.seekOffset}s)` : ''}`)
       // PRIORIDAD: arrancar la reproducción cuanto antes, con UN solo yt-dlp.
       // No se resuelve ni se baja carátula/metadata aquí (eso lo hace el proceso
       // de inactividad). Solo se usa el archivo si ya está COMPLETO en caché.
-      opusDirect = false
-      currentMixer = null
-      currentResource = null
+      S.opusDirect = false
+      S.currentMixer = null
+      S.currentResource = null
       // Passthrough de Opus: solo con worker, fuente URL y SIN actividad reciente
       // de soundboard (si se usan sonidos seguimos en PCM para mezclarlos sin
       // cortes). Si el worker no puede extraer (geo-restricción), se cae al PCM.
-      const wantOpusDirect = USE_WORKER && /^https?:\/\//i.test(current.url) &&
-        (Date.now() - lastSoundAt > SOUND_PCM_WINDOW_MS)
+      const wantOpusDirect = USE_WORKER && /^https?:\/\//i.test(S.current.url) &&
+        (Date.now() - S.lastSoundAt > SOUND_PCM_WINDOW_MS)
       if (wantOpusDirect) {
         try {
-          const raw = current.url
-          const s = musicCache.findByUrl(raw) || musicCache.upsertSong({ sourceUrl: raw, title: current.title })
-          current.songId = s.id
-          currentResource = await startRemoteOpusResource({ ...current, url: raw }, seekOffset)
-          opusDirect = true
+          const raw = S.current.url
+          const s = musicCache.findByUrl(raw) || musicCache.upsertSong({ sourceUrl: raw, title: S.current.title })
+          S.current.songId = s.id
+          S.currentResource = await startRemoteOpusResource({ ...current, url: raw }, S.seekOffset)
+          S.opusDirect = true
           console.log('  ↳ passthrough Opus (sin decodificar)')
         } catch (e) {
           console.warn('Opus-directo no disponible, uso PCM:', e.message)
-          opusDirect = false
-          currentResource = null
+          S.opusDirect = false
+          S.currentResource = null
         }
       }
-      if (!opusDirect) {
+      if (!S.opusDirect) {
         let stream
         try {
-          const raw = current.url
+          const raw = S.current.url
           const isUrl = /^https?:\/\//i.test(raw)
           let song = isUrl ? musicCache.findByUrl(raw) : null
           // Si el fondo está pre-cacheando JUSTO esta canción, espera a que termine
           // (segundos de descarga) en vez de matarla y re-extraer (~10s). Gapless.
-          if (song && bgSongId === song.id && bgPromise) {
-            try { await bgPromise } catch {}
+          if (song && S.bgSongId === song.id && S.bgPromise) {
+            try { await S.bgPromise } catch {}
             song = musicCache.findByUrl(raw) // refresca el estado tras el pre-cacheo
           }
           if (song && (musicCache.hasLocal(song) || song.persisted)) {
             // Cacheada completa → archivo (instantáneo, con seek). Sin yt-dlp.
             const filePath = await musicCache.getLocalAudio(song, dest => downloadToFile(raw, dest))
-            stream = startFileStream(filePath, seekOffset)
+            stream = startFileStream(filePath, S.seekOffset)
           } else if (isUrl) {
             // URL no cacheada: stream + tee a caché en la MISMA descarga (1 yt-dlp).
-            const s = song || musicCache.upsertSong({ sourceUrl: raw, title: current.title })
-            current.songId = s.id
+            const s = song || musicCache.upsertSong({ sourceUrl: raw, title: S.current.title })
+            S.current.songId = s.id
             stream = USE_WORKER
-              ? startRemoteStream({ ...current, url: raw }, seekOffset, s)
-              : startStreamAndCache({ ...current, url: raw }, seekOffset, s)
+              ? startRemoteStream({ ...current, url: raw }, S.seekOffset, s)
+              : startStreamAndCache({ ...current, url: raw }, S.seekOffset, s)
           } else {
             // Término de búsqueda: stream directo (yt-dlp resuelve y reproduce en una
             // sola pasada). El cacheo/resolución lo hará el proceso de inactividad.
             stream = USE_WORKER
-              ? startRemoteStream(current, seekOffset, null)
-              : startStream(current, seekOffset)
+              ? startRemoteStream(S.current, S.seekOffset, null)
+              : startStream(S.current, S.seekOffset)
           }
         } catch (err) {
           console.warn('Reproducción: fallback a streaming directo:', err.message)
-          stream = USE_WORKER ? startRemoteStream(current, seekOffset, null) : startStream(current, seekOffset)
+          stream = USE_WORKER ? startRemoteStream(S.current, S.seekOffset, null) : startStream(S.current, S.seekOffset)
         }
-        currentMixer = new MixerStream(stream, () => currentResource ? currentResource.playbackDuration : 0, {
+        S.currentMixer = new MixerStream(stream, () => S.currentResource ? S.currentResource.playbackDuration : 0, {
           getMusicVolume: () => musicVolume,
           getMusicDuck: () => musicDuck,
           getSoundBaseVolume: () => soundBaseVolume,
         })
-        currentResource = createAudioResource(currentMixer, { inputType: StreamType.Raw })
+        S.currentResource = createAudioResource(S.currentMixer, { inputType: StreamType.Raw })
       }
-      musicPlayer.play(currentResource)
+      musicPlayer.play(S.currentResource)
       updatePanel()
       // Cuando el audio EMPIEZA a sonar (pasó la extracción inicial), se habilita el
       // enriquecido en paralelo (metadata + carátula) aunque el stream siga bajando.
       // Además se sueltan los sonidos que esperaban el switch a PCM (si los hubo).
-      musicPlayer.once(AudioPlayerStatus.Playing, () => { currentPlaying = true; flushPendingSounds(); backgroundWork() })
+      musicPlayer.once(AudioPlayerStatus.Playing, () => { S.currentPlaying = true; flushPendingSounds(); backgroundWork() })
 
       const err = await waitIdle(musicPlayer)
-      const reachedPlaying = currentPlaying // ¿llegó a sonar antes de quedar idle?
-      currentPlaying = false // terminó: no enriquecer esta canción ya
+      const reachedPlaying = S.currentPlaying // ¿llegó a sonar antes de quedar idle?
+      S.currentPlaying = false // terminó: no enriquecer esta canción ya
       killStreamProcs()
-      currentResource = null
-      currentMixer = null
-      opusDirect = false
+      S.currentResource = null
+      S.currentMixer = null
+      S.opusDirect = false
       if (err) {
         console.error('Error reproduciendo:', err.message)
-        await notifyError(current, err)
-      } else if (playFailReason && !reachedPlaying) {
+        await notifyError(S.current, err)
+      } else if (S.playFailReason && !reachedPlaying) {
         // El stream del worker falló y la canción nunca llegó a sonar → avisar y omitir.
-        await notifyUnavailable(current, playFailReason)
+        await notifyUnavailable(S.current, S.playFailReason)
       }
-      playFailReason = null
+      S.playFailReason = null
 
-      const t = transition
-      transition = 'next'
+      const t = S.transition
+      S.transition = 'next'
       if (t === 'next') {
-        history.push(current)
-        if (history.length > MAX_HISTORY) history.shift()
-        current = null
+        S.history.push(S.current)
+        if (S.history.length > MAX_HISTORY) S.history.shift()
+        S.current = null
       } else if (t === 'previous') {
-        queue.unshift(current)
-        current = history.pop() ?? queue.shift()
+        S.queue.unshift(S.current)
+        S.current = S.history.pop() ?? S.queue.shift()
       } else if (t === 'seek') {
-        // current se mantiene, seekTarget ya viene seteado
+        // S.current se mantiene, S.seekTarget ya viene seteado
       } else if (t === 'stop') {
         // Stop: la canción se trata como terminada (pasa a reproducidas), pero
         // NO se avanza a la siguiente. El bot queda detenido sin desconectarse.
-        history.push(current)
-        if (history.length > MAX_HISTORY) history.shift()
-        current = null
+        S.history.push(S.current)
+        if (S.history.length > MAX_HISTORY) S.history.shift()
+        S.current = null
         break
       }
     }
   } finally {
-    playing = false
-    currentResource = null
-    currentMixer = null
-    opusDirect = false
+    S.playing = false
+    S.currentResource = null
+    S.currentMixer = null
+    S.opusDirect = false
     // El bot NO se desconecta solo al quedar inactivo: permanece en el canal
     // hasta que alguien use el botón Desconectar.
     updatePanel()
@@ -1055,35 +1064,35 @@ function requesterFromMember(member) {
 }
 
 function addToQueue(url, voiceChannelId, guildId, textChannelId, title, addedBy = null) {
-  if (queue.length >= MAX_QUEUE) throw new Error(`La cola está llena (máximo ${MAX_QUEUE})`)
+  if (S.queue.length >= MAX_QUEUE) throw new Error(`La cola está llena (máximo ${MAX_QUEUE})`)
   const item = { url, title: title || url, duration: null, voiceChannelId, guildId, textChannelId, addedBy }
   // La metadata (título/duración) NO se pide aquí para no lanzar otro yt-dlp que
   // compita con el arranque del stream; la rellena backgroundWork cuando ya suena.
-  queue.push(item)
-  const startsNow = !current && queue.length === 1
+  S.queue.push(item)
+  const startsNow = !S.current && S.queue.length === 1
   ensurePlaying()
   updatePanel()
   // No se dispara backgroundWork aquí: si esta canción arranca ahora, su stream
-  // marcará streamDownloading y backgroundWork se gatea solo. El intervalo, el
+  // marcará S.streamDownloading y backgroundWork se gatea solo. El intervalo, el
   // cierre del yt-dlp y el evento Playing ya cubren el enriquecido/pre-cacheo.
-  return { startsNow, position: queue.length }
+  return { startsNow, position: S.queue.length }
 }
 
 function cmdSkip() {
-  if (!current) return false
-  transition = 'next'
+  if (!S.current) return false
+  S.transition = 'next'
   musicPlayer.stop()
   return true
 }
 
 function cmdPrevious() {
-  if (current) {
-    transition = 'previous'
+  if (S.current) {
+    S.transition = 'previous'
     musicPlayer.stop()
     return true
   }
-  if (history.length > 0) {
-    current = history.pop()
+  if (S.history.length > 0) {
+    S.current = S.history.pop()
     ensurePlaying()
     return true
   }
@@ -1091,9 +1100,9 @@ function cmdPrevious() {
 }
 
 function cmdSeek(toSeconds) {
-  if (!current) return false
-  seekTarget = Math.max(0, toSeconds)
-  transition = 'seek'
+  if (!S.current) return false
+  S.seekTarget = Math.max(0, toSeconds)
+  S.transition = 'seek'
   musicPlayer.stop()
   return true
 }
@@ -1116,15 +1125,15 @@ function cmdStop() {
   // Detiene la canción actual como si hubiera terminado (pasa a reproducidas);
   // NO inicia la siguiente, NO borra la cola y NO se desconecta. El bot queda
   // detenido en el canal hasta que alguien reproduzca o agregue una canción.
-  if (!current) return false
-  transition = 'stop'
-  pendingSounds = [] // si había sonidos esperando un switch, se descartan
+  if (!S.current) return false
+  S.transition = 'stop'
+  S.pendingSounds = [] // si había sonidos esperando un switch, se descartan
   musicPlayer.stop()
   return true
 }
 
 // ── Panel de control en el chat de Discord ────────────────────────────────
-let panelMsg = null
+// S.panelMsg es campo de S (GuildSession).
 
 const fmtDur = s => { s = Math.floor(s); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}` }
 
@@ -1146,34 +1155,34 @@ function parseTime(str) {
 }
 
 function progressBar() {
-  if (!current || !current.duration) return null
-  const pos = Math.min(elapsed(), current.duration)
+  if (!S.current || !S.current.duration) return null
+  const pos = Math.min(elapsed(), S.current.duration)
   const n = 14
-  const idx = Math.min(n - 1, Math.floor(pos / current.duration * n))
-  return '▬'.repeat(idx) + '🔘' + '▬'.repeat(n - 1 - idx) + `  ${fmtDur(pos)} / ${fmtDur(current.duration)}`
+  const idx = Math.min(n - 1, Math.floor(pos / S.current.duration * n))
+  return '▬'.repeat(idx) + '🔘' + '▬'.repeat(n - 1 - idx) + `  ${fmtDur(pos)} / ${fmtDur(S.current.duration)}`
 }
 
 function panelPayload() {
   const paused = musicPlayer.state.status === AudioPlayerStatus.Paused
   const lines = []
-  if (current) {
-    lines.push(`${paused ? '⏸' : '▶'} **${current.title}**`)
+  if (S.current) {
+    lines.push(`${paused ? '⏸' : '▶'} **${S.current.title}**`)
     const bar = progressBar()
     if (bar) lines.push(bar)
   } else {
     lines.push('Nada reproduciéndose')
   }
-  if (queue.length > 0) {
+  if (S.queue.length > 0) {
     lines.push('', '**Cola:**')
-    queue.slice(0, 5).forEach((it, i) => lines.push(`${i + 1}. ${it.title}${it.duration ? ` (${fmtDur(it.duration)})` : ''}`))
-    if (queue.length > 5) lines.push(`… y ${queue.length - 5} más`)
+    S.queue.slice(0, 5).forEach((it, i) => lines.push(`${i + 1}. ${it.title}${it.duration ? ` (${fmtDur(it.duration)})` : ''}`))
+    if (S.queue.length > 5) lines.push(`… y ${S.queue.length - 5} más`)
   }
   const embed = new EmbedBuilder()
     .setColor(0x5865f2)
     .setTitle(PANEL_TITLE)
     .setDescription(lines.join('\n'))
   const volFooter = `Volumen música: ${Math.round(musicVolume * 100)}%`
-  embed.setFooter({ text: (currentChannelName ? `🔊 ${currentChannelName} · ` : '') + volFooter })
+  embed.setFooter({ text: (S.currentChannelName ? `🔊 ${S.currentChannelName} · ` : '') + volFooter })
   const row1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('mp_prev').setEmoji('⏮').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('mp_voldown').setEmoji('🔉').setStyle(ButtonStyle.Secondary),
@@ -1187,10 +1196,10 @@ function panelPayload() {
   )
   const rows = [row1, row2]
   // Menú "Saltar a...": posiciones espaciadas según la duración (máx 25 opciones)
-  if (current && current.duration) {
-    const step = seekStep(current.duration)
+  if (S.current && S.current.duration) {
+    const step = seekStep(S.current.duration)
     const opts = []
-    for (let t = 0; t < current.duration && opts.length < 25; t += step) {
+    for (let t = 0; t < S.current.duration && opts.length < 25; t += step) {
       opts.push({ label: fmtDur(t), value: String(t) })
     }
     rows.push(new ActionRowBuilder().addComponents(
@@ -1205,7 +1214,7 @@ const PANEL_TITLE = '🎵 Panel de música'
 async function sendPanel(textChannelId) {
   try {
     const ch = await client.channels.fetch(textChannelId)
-    if (panelMsg) { try { await panelMsg.delete() } catch {} ; panelMsg = null }
+    if (S.panelMsg) { try { await S.panelMsg.delete() } catch {} ; S.panelMsg = null }
     // Borrar también paneles de sesiones anteriores del bot (la referencia en
     // memoria se pierde al reiniciar): buscar en los últimos mensajes del canal
     try {
@@ -1216,26 +1225,25 @@ async function sendPanel(textChannelId) {
         }
       }
     } catch {}
-    panelMsg = await ch.send({ ...panelPayload(), flags: 4096 }) // 4096 = @silent, sin notificación
+    S.panelMsg = await ch.send({ ...panelPayload(), flags: 4096 }) // 4096 = @silent, sin notificación
   } catch (err) { console.error('panel:', err.message) }
 }
 
-let panelUpdateQueued = false
 function updatePanel() {
-  if (!panelMsg || panelUpdateQueued) return
+  if (!S.panelMsg || S.panelUpdateQueued) return
   // Agrupar actualizaciones seguidas en una sola edición (evita rate limits)
-  panelUpdateQueued = true
+  S.panelUpdateQueued = true
   setTimeout(async () => {
-    panelUpdateQueued = false
-    if (!panelMsg) return
-    try { await panelMsg.edit(panelPayload()) } catch {}
+    S.panelUpdateQueued = false
+    if (!S.panelMsg) return
+    try { await S.panelMsg.edit(panelPayload()) } catch {}
   }, 300)
 }
 
 // Refrescar la barra de progreso mientras suena algo (10s mantiene las
 // ediciones muy por debajo del rate limit de Discord)
 setInterval(() => {
-  if (panelMsg && current && musicPlayer.state.status === AudioPlayerStatus.Playing) updatePanel()
+  if (S.panelMsg && S.current && musicPlayer.state.status === AudioPlayerStatus.Playing) updatePanel()
 }, 10000)
 
 client.on('interactionCreate', async (interaction) => {
@@ -1247,7 +1255,7 @@ client.on('interactionCreate', async (interaction) => {
       return
     }
     if (!memberCanControl(member)) {
-      await interaction.reply({ content: `El bot ya está en **${currentChannelName}**. Únete a ese canal para usar \`/p\`.`, flags: 64 })
+      await interaction.reply({ content: `El bot ya está en **${S.currentChannelName}**. Únete a ese canal para usar \`/p\`.`, flags: 64 })
       return
     }
     await interaction.deferReply({ flags: 64 })
@@ -1309,7 +1317,7 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   if (id === 'mp_goto') {
-    if (!current) {
+    if (!S.current) {
       await interaction.reply({ content: 'No hay nada reproduciéndose.', flags: 64 }).catch(() => {})
       return
     }
@@ -1383,18 +1391,17 @@ function soundTree() {
 // el soundPlayer. play() reemplaza al anterior SIN emitir Idle, así que la
 // limpieza se hace aquí y se invoca tanto desde el listener persistente de Idle
 // como al reemplazar un sonido por otro.
-let currentDirectId = null
-let directResource = null
+// S.currentDirectId y S.directResource son campos de S (GuildSession).
 
 function finishDirectSound() {
-  if (currentDirectId === null) return
-  const e = activeSounds.get(currentDirectId)
-  activeSounds.delete(currentDirectId)
-  currentDirectId = null
-  directResource = null
+  if (S.currentDirectId === null) return
+  const e = S.activeSounds.get(S.currentDirectId)
+  S.activeSounds.delete(S.currentDirectId)
+  S.currentDirectId = null
+  S.directResource = null
   if (e) { try { e.proc.kill() } catch {} }
-  soundActive = 0
-  if (connection) connection.subscribe(musicPlayer)
+  S.soundActive = 0
+  if (S.connection) S.connection.subscribe(musicPlayer)
 }
 
 soundPlayer.on(AudioPlayerStatus.Idle, finishDirectSound)
@@ -1414,17 +1421,17 @@ function spawnSoundFfmpeg(filePath, gainDb = 0) {
 }
 
 async function playSound(soundId, user = null) {
-  lastSoundAt = Date.now() // marca actividad de soundboard → mantiene el modo PCM
+  S.lastSoundAt = Date.now() // marca actividad de soundboard → mantiene el modo PCM
   // Si la música va en passthrough Opus, no hay mixer donde superponer: se cambia
   // a PCM reiniciando la canción actual desde su posición y el sonido se suelta
   // cuando el mixer esté listo (un único re-sync; solo ocurre tras 5 min sin
   // sonidos, por eso el soundboard en uso nunca se corta).
-  if (opusDirect && current) {
-    const id = ++soundIdSeq
-    pendingSounds.push({ id, soundId: Number(soundId), user })
-    seekTarget = elapsed()
-    transition = 'seek'
-    opusDirect = false
+  if (S.opusDirect && S.current) {
+    const id = ++S.soundIdSeq
+    S.pendingSounds.push({ id, soundId: Number(soundId), user })
+    S.seekTarget = elapsed()
+    S.transition = 'seek'
+    S.opusDirect = false
     musicPlayer.stop() // rompe waitIdle → ensurePlaying reconstruye en PCM
     return id
   }
@@ -1434,8 +1441,8 @@ async function playSound(soundId, user = null) {
 // Suelta los sonidos que esperaban el switch de Opus-directo a PCM. Se llama
 // cuando la música ya suena en PCM (el mixer existe).
 function flushPendingSounds() {
-  if (!pendingSounds.length) return
-  const list = pendingSounds; pendingSounds = []
+  if (!S.pendingSounds.length) return
+  const list = S.pendingSounds; S.pendingSounds = []
   for (const p of list) {
     Promise.resolve(playSoundCore(p.soundId, p.user, p.id))
       .catch(e => console.warn('sonido pendiente:', e.message))
@@ -1449,40 +1456,40 @@ async function playSoundCore(soundId, user = null, presetId = null) {
   if (!existsSync(filePath)) throw new Error('Archivo del sonido no disponible')
   const key = String(sound.id) // identificador estable que usa el panel
   const gain = effectiveGain(sound) // normalización de volumen por sonido
-  const id = presetId ?? ++soundIdSeq
+  const id = presetId ?? ++S.soundIdSeq
   playHistory.record({ kind: 'sound', refId: sound.id, userId: user ? user.id : null })
   // Datos para la notificación "quién reproduce qué" del panel (dura lo que suene).
   const meta = { label: sound.label, user, startedAt: Date.now(), durationMs: sound.duration_ms || null }
 
   // Con música sonando: mezclar el sonido encima, música atenuada
-  if (currentMixer && musicPlayer.state.status === AudioPlayerStatus.Playing) {
+  if (S.currentMixer && musicPlayer.state.status === AudioPlayerStatus.Playing) {
     const ff = spawnSoundFfmpeg(filePath, gain)
-    activeProcs.push(ff)
-    const ov = currentMixer.addOverlay(ff.stdout)
-    activeSounds.set(id, { file: key, proc: ff, ov, mixer: currentMixer, ...meta })
+    S.activeProcs.push(ff)
+    const ov = S.currentMixer.addOverlay(ff.stdout)
+    S.activeSounds.set(id, { file: key, proc: ff, ov, mixer: S.currentMixer, ...meta })
     return id
   }
 
   // Sin música: mezclar sobre un SoundMixer dedicado para que suenen VARIOS a la
   // vez (sin límite). Requiere que el bot YA esté en un canal; no se conecta solo.
-  if (!connection) throw new Error('El bot no está en un canal de voz')
+  if (!S.connection) throw new Error('El bot no está en un canal de voz')
 
-  if (!soundMixer) {
-    soundMixer = new SoundMixer({
+  if (!S.soundMixer) {
+    S.soundMixer = new SoundMixer({
       getSoundBaseVolume: () => soundBaseVolume,
       // Al cerrarse (sin sonidos un rato) devuelve la conexión al player de música.
       onClose: (inst) => {
-        if (soundMixer === inst) soundMixer = null
-        if (connection) { try { connection.subscribe(musicPlayer) } catch {} }
+        if (S.soundMixer === inst) S.soundMixer = null
+        if (S.connection) { try { S.connection.subscribe(musicPlayer) } catch {} }
       },
     })
-    const res = createAudioResource(soundMixer, { inputType: StreamType.Raw })
-    connection.subscribe(soundPlayer)
+    const res = createAudioResource(S.soundMixer, { inputType: StreamType.Raw })
+    S.connection.subscribe(soundPlayer)
     soundPlayer.play(res)
   }
   const ff = spawnSoundFfmpeg(filePath, gain)
-  const ov = soundMixer.addOverlay(ff.stdout)
-  activeSounds.set(id, { file: key, proc: ff, ov, mixer: soundMixer, ...meta })
+  const ov = S.soundMixer.addOverlay(ff.stdout)
+  S.activeSounds.set(id, { file: key, proc: ff, ov, mixer: S.soundMixer, ...meta })
   return id
 }
 
@@ -1519,14 +1526,13 @@ function cmdSoundTargetLufs(v) {
 // mixer lee `musicVolume`). Throttle GLOBAL (web + Discord comparten este estado):
 // como máximo 1 cambio cada `musicVolumeCooldownMs` para que no se solapen los
 // ajustes de varias personas (configurable; 0 = sin límite).
-let lastMusicVolumeAt = 0
 function musicVolumeCooldownLeft() {
-  return Math.max(0, musicVolumeCooldownMs - (Date.now() - lastMusicVolumeAt))
+  return Math.max(0, musicVolumeCooldownMs - (Date.now() - S.lastMusicVolumeAt))
 }
 function cmdMusicVolume(v) {
   if (typeof v !== 'number' || isNaN(v)) return false
   if (musicVolumeCooldownLeft() > 0) return false // limitado: aún en enfriamiento
-  lastMusicVolumeAt = Date.now()
+  S.lastMusicVolumeAt = Date.now()
   musicVolume = Math.round(Math.min(2, Math.max(0, v)) * 100) / 100
   saveSettings()
   return true
@@ -1581,7 +1587,7 @@ function cmdMaxQueue(n) {
 function cmdMaxHistory(n) {
   if (typeof n !== 'number' || isNaN(n)) return false
   MAX_HISTORY = Math.round(Math.min(500, Math.max(1, n)))
-  while (history.length > MAX_HISTORY) history.shift()
+  while (S.history.length > MAX_HISTORY) S.history.shift()
   saveSettings()
   return true
 }
@@ -1598,11 +1604,11 @@ function cmdMusicDuck(v) {
 // Sonidos que siguen reproduciéndose; limpia de paso las entradas terminadas
 function playingSounds() {
   const out = []
-  for (const [id, e] of activeSounds) {
-    if (e.ov && e.mixer && (e.mixer === currentMixer || e.mixer === soundMixer) && e.mixer.overlays.has(e.ov)) {
+  for (const [id, e] of S.activeSounds) {
+    if (e.ov && e.mixer && (e.mixer === S.currentMixer || e.mixer === S.soundMixer) && e.mixer.overlays.has(e.ov)) {
       out.push({ id, file: e.file, label: e.label, user: e.user || null, startedAt: e.startedAt, durationMs: e.durationMs })
     } else {
-      activeSounds.delete(id)
+      S.activeSounds.delete(id)
     }
   }
   return out
@@ -1614,13 +1620,13 @@ function cmdStopSound(id) {
     for (const sid of [...activeSounds.keys()]) stopped = cmdStopSound(sid) || stopped
     return stopped
   }
-  const e = activeSounds.get(id)
+  const e = S.activeSounds.get(id)
   if (!e) return false
   try { e.proc.kill() } catch {}
   if (e.ov) {
     e.ov.ended = true; e.ov.chunks = []; e.ov.length = 0
     if (e.mixer) e.mixer.overlays.delete(e.ov)
-    activeSounds.delete(id)
+    S.activeSounds.delete(id)
   }
   if (e.direct) soundPlayer.stop() // el listener de Idle (finishDirectSound) limpia la entrada
   return true
@@ -1641,7 +1647,7 @@ client.on('messageCreate', async (message) => {
       return
     }
     if (!memberCanControl(member)) {
-      await message.reply(`El bot ya está en **${currentChannelName}**. Únete a ese canal para usar \`!p\`.`)
+      await message.reply(`El bot ya está en **${S.currentChannelName}**. Únete a ese canal para usar \`!p\`.`)
       return
     }
 
@@ -1669,7 +1675,7 @@ client.on('messageCreate', async (message) => {
   // Controles de reproducción por texto: solo quien esté en el canal de voz del
   // bot (admins exentos).
   if (['!skip', '!prev', '!pause', '!resume', '!stop'].includes(content) && !memberCanControl(message.member)) {
-    await message.reply(`Debes estar en el canal de voz del bot${currentChannelName ? ` (**${currentChannelName}**)` : ''} para controlar la música.`)
+    await message.reply(`Debes estar en el canal de voz del bot${S.currentChannelName ? ` (**${S.currentChannelName}**)` : ''} para controlar la música.`)
     return
   }
 
@@ -1700,13 +1706,13 @@ client.on('messageCreate', async (message) => {
   }
 
   if (content === '!queue') {
-    if (!current && queue.length === 0) {
+    if (!S.current && S.queue.length === 0) {
       await message.reply('La cola está vacía.')
       return
     }
     const lines = []
-    if (current) lines.push(`**Ahora:** ${current.title}`)
-    queue.forEach((item, i) => lines.push(`${i + 1}. ${item.title}`))
+    if (S.current) lines.push(`**Ahora:** ${S.current.title}`)
+    S.queue.forEach((item, i) => lines.push(`${i + 1}. ${item.title}`))
     await message.reply(lines.join('\n'))
     return
   }
@@ -1715,16 +1721,16 @@ client.on('messageCreate', async (message) => {
 // ── Servidor HTTP del panel ───────────────────────────────────────────────
 function getState() {
   return {
-    current: current ? { url: current.url, title: current.title, duration: current.duration, songId: current.songId ?? null } : null,
+    current: S.current ? { url: S.current.url, title: S.current.title, duration: S.current.duration, songId: S.current.songId ?? null } : null,
     elapsed: elapsed(),
     paused: musicPlayer.state.status === AudioPlayerStatus.Paused,
-    queue: queue.map(i => ({ url: i.url, title: i.title, duration: i.duration, songId: i.songId ?? null, addedBy: i.addedBy || null })),
+    queue: S.queue.map(i => ({ url: i.url, title: i.title, duration: i.duration, songId: i.songId ?? null, addedBy: i.addedBy || null })),
     // Reproducidas recientes (en memoria), de más antigua a más reciente,
     // para mostrarlas en gris en la cola sin que desaparezcan.
-    played: history.slice(-20).map(i => ({ url: i.url, title: i.title, duration: i.duration, songId: i.songId ?? null, addedBy: i.addedBy || null })),
-    historyCount: history.length,
-    connected: !!connection,
-    voiceChannel: currentChannelName,
+    played: S.history.slice(-20).map(i => ({ url: i.url, title: i.title, duration: i.duration, songId: i.songId ?? null, addedBy: i.addedBy || null })),
+    historyCount: S.history.length,
+    connected: !!S.connection,
+    voiceChannel: S.currentChannelName,
     playingSounds: playingSounds(),
     soundBaseVolume,
     maxSoundSeconds,
@@ -1764,11 +1770,11 @@ function isPanelAdmin(req) {
 
 // ¿El usuario (por su Discord id) está ahora mismo en el canal de voz del bot?
 function isInBotVoiceChannel(userId) {
-  if (!connection || !currentChannelId || !userId) return false
-  const guild = client.guilds.cache.get(connection.joinConfig.guildId)
+  if (!S.connection || !S.currentChannelId || !userId) return false
+  const guild = client.guilds.cache.get(S.connection.joinConfig.guildId)
   if (!guild) return false
   const vs = guild.voiceStates.cache.get(String(userId))
-  return !!(vs && vs.channelId === currentChannelId)
+  return !!(vs && vs.channelId === S.currentChannelId)
 }
 
 // ¿El usuario del panel puede controlar la música/sonidos? Solo si es admin
@@ -1791,8 +1797,8 @@ function memberCanControl(member) {
   if (!member) return false
   const u = auth.getUserByDiscordId(member.id)
   if (u && rbac.isAdmin(u.id)) return true
-  if (!connection || !currentChannelId) return true
-  return member.voice?.channelId === currentChannelId
+  if (!S.connection || !S.currentChannelId) return true
+  return member.voice?.channelId === S.currentChannelId
 }
 
 // Fallback legado: HTTP Basic con PANEL_PASSWORD (solo si está configurada).
@@ -1821,8 +1827,8 @@ function readBody(req) {
 // Canal de voz objetivo SOLO si el bot ya está en un canal. No se mete solo a
 // ningún canal: las acciones del panel exigen que el bot ya esté conectado.
 function currentVoiceTarget() {
-  if (current) return { vcId: current.voiceChannelId, gId: current.guildId }
-  if (connection) return { vcId: currentChannelId, gId: connection.joinConfig.guildId }
+  if (S.current) return { vcId: S.current.voiceChannelId, gId: S.current.guildId }
+  if (S.connection) return { vcId: S.currentChannelId, gId: S.connection.joinConfig.guildId }
   return null
 }
 
@@ -1847,7 +1853,7 @@ function listVoiceChannels() {
       }
       channels.push({
         id: ch.id, name: ch.name, position: ch.rawPosition ?? 0,
-        members, botHere: currentChannelId === ch.id,
+        members, botHere: S.currentChannelId === ch.id,
       })
     }
     channels.sort((a, b) => a.position - b.position)
@@ -2018,27 +2024,27 @@ http.createServer(async (req, res) => {
         }
         case '/api/queue/remove': {
           const i = body.index
-          if (i === undefined || i < 0 || i >= queue.length) return sendJson({ error: 'Índice inválido' }, 400)
-          queue.splice(i, 1)
+          if (i === undefined || i < 0 || i >= S.queue.length) return sendJson({ error: 'Índice inválido' }, 400)
+          S.queue.splice(i, 1)
           updatePanel()
           return sendJson({ ok: true })
         }
         case '/api/queue/reorder': {
           const { from, to } = body
           if (from === undefined || to === undefined ||
-              from < 0 || from >= queue.length || to < 0 || to >= queue.length)
+              from < 0 || from >= S.queue.length || to < 0 || to >= S.queue.length)
             return sendJson({ error: 'Movimiento inválido' }, 400)
-          const [it] = queue.splice(from, 1)
-          queue.splice(to, 0, it)
+          const [it] = S.queue.splice(from, 1)
+          S.queue.splice(to, 0, it)
           updatePanel()
           return sendJson({ ok: true })
         }
         case '/api/queue/move': {
           const { index, dir } = body
           const j = index + dir
-          if (index === undefined || j < 0 || j >= queue.length || index < 0 || index >= queue.length)
+          if (index === undefined || j < 0 || j >= S.queue.length || index < 0 || index >= S.queue.length)
             return sendJson({ error: 'Movimiento inválido' }, 400)
-          ;[queue[index], queue[j]] = [queue[j], queue[index]]
+          ;[S.queue[index], S.queue[j]] = [S.queue[j], S.queue[index]]
           updatePanel()
           return sendJson({ ok: true })
         }
@@ -2096,7 +2102,7 @@ http.createServer(async (req, res) => {
         case '/api/disconnect': {
           if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)
           cmdStop()
-          queue.length = 0   // al desconectar sí se vacía la cola (reset completo)
+          S.queue.length = 0   // al desconectar sí se vacía la cola (reset completo)
           destroyConnection()
           return sendJson({ ok: true })
         }
