@@ -1905,6 +1905,22 @@ const MUSIC_CONTROL_PATHS = new Set([
   '/api/sound', '/api/sound/stop',
 ])
 
+// Guilds del bot a los que un usuario de Discord pertenece. Se comprueba por REST
+// (guild.members.fetch) porque el OAuth solo pide scope `identify`. Cacheado 60s
+// por usuario para no llamar a la API de Discord en cada /api/guilds.
+const _memberCache = new Map() // discordId -> { at, ids: Set<guildId> }
+async function userGuildIds(discordId) {
+  if (!discordId) return new Set()
+  const c = _memberCache.get(discordId)
+  if (c && Date.now() - c.at < 60000) return c.ids
+  const ids = new Set()
+  await Promise.all([...client.guilds.cache.values()].map(async g => {
+    try { await g.members.fetch({ user: discordId, force: false }); ids.add(g.id) } catch { /* no es miembro */ }
+  }))
+  _memberCache.set(discordId, { at: Date.now(), ids })
+  return ids
+}
+
 // Sesión que controla esta petición del panel: el guild elegido (header
 // X-Guild-Id o query ?g=) si el bot está en él; si no, la sesión activa.
 function sessionForReq(req) {
@@ -1976,9 +1992,15 @@ async function onHttp(req, res) {
         return sendJson(st)
       }
       if (path === '/api/guilds') {
-        // Servidores donde está el bot, con su estado, para el selector del panel.
+        // Servidores del bot a los que ESTE usuario tiene acceso (es miembro), con
+        // su estado, para el selector/pantalla de elección. Los admin globales ven
+        // todos. La membresía se verifica por REST con caché (userGuildIds).
+        const pu = panelUser(req)
+        const admin = pu ? rbac.isAdmin(pu.id) : false
+        const allowed = admin ? null : await userGuildIds(pu && pu.discord_id)
         const out = []
         for (const g of client.guilds.cache.values()) {
+          if (allowed && !allowed.has(g.id)) continue
           const s = sessions.get(g.id)
           out.push({
             id: g.id,

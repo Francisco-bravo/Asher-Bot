@@ -67,6 +67,20 @@
     padding: 9px 14px; border-radius: 999px; font-size: .85rem; cursor: pointer;
     box-shadow: var(--shadow); max-width: 200px;
   }
+  /* Pantalla de elección de servidor (al entrar, si hay 2+ servidores) */
+  .server-picker-overlay { position: fixed; inset: 0; background: var(--bg); z-index: 1000; display: none; overflow-y: auto; padding: 48px 20px; }
+  .server-picker-overlay.show { display: block; }
+  .sp-inner { max-width: 760px; margin: 0 auto; }
+  .sp-inner .brand-logo { width: 56px; height: 56px; display: block; margin: 0 auto 18px; }
+  .sp-title { text-align: center; font-size: 1.6rem; font-weight: 700; margin-bottom: 6px; }
+  .sp-sub { text-align: center; color: var(--muted); margin-bottom: 28px; }
+  .sp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 16px; }
+  .sp-card { background: var(--panel); border: var(--border); border-radius: 14px; padding: 22px 18px; cursor: pointer; text-align: center; box-shadow: var(--shadow); transition: transform .1s ease, border-color .1s ease; }
+  .sp-card:hover { transform: translateY(-2px); border-color: var(--accent); }
+  .sp-card img, .sp-card .sp-ph { width: 64px; height: 64px; border-radius: 50%; margin: 0 auto 12px; display: block; object-fit: cover; }
+  .sp-card .sp-ph { background: var(--accent); color: #fff; font-size: 1.7rem; line-height: 64px; font-weight: 700; }
+  .sp-name { font-weight: 600; }
+  .sp-status { color: var(--muted); font-size: .82rem; margin-top: 6px; }
   /* Usuario logueado (arriba a la derecha) */
   .user-chip {
     display: none; align-items: center; gap: 9px;
@@ -835,6 +849,14 @@
 </style>
 </head>
 <body>
+<div id="server-picker" class="server-picker-overlay">
+  <div class="sp-inner">
+    <img class="brand-logo" src="Asher_logo.jpg" alt="Asher">
+    <div class="sp-title">Elige un servidor</div>
+    <div class="sp-sub">Tienes acceso a varios servidores con el bot. ¿Cuál quieres controlar?</div>
+    <div class="sp-grid" id="sp-grid"></div>
+  </div>
+</div>
 <div class="container">
   <div class="topbar">
     <div class="brand">
@@ -3777,13 +3799,42 @@ async function loadGuilds() {
   sel.style.display = ''
 }
 document.getElementById('guild-select').addEventListener('change', (e) => {
-  selectedGuildId = e.target.value
-  localStorage.setItem('selectedGuildId', selectedGuildId)
-  refresh(); loadSounds(); loadVoiceChannels()
+  chooseServer(e.target.value)
 })
+
+// Pantalla de elección al entrar: aparece solo si el usuario tiene acceso a 2+
+// servidores donde está el bot. Con 1, se elige solo; con 0, se deja el fallback.
+function renderServerPicker(guilds) {
+  const grid = document.getElementById('sp-grid')
+  grid.innerHTML = guilds.map(g => {
+    const img = g.icon
+      ? `<img src="${esc(g.icon)}" alt="">`
+      : `<div class="sp-ph">${esc((g.name || '?').slice(0, 1).toUpperCase())}</div>`
+    const status = g.connected ? '🔊 En un canal de voz' : (g.playing ? '▶ Reproduciendo' : 'Inactivo')
+    return `<div class="sp-card" data-id="${g.id}">${img}<div class="sp-name">${esc(g.name)}</div><div class="sp-status">${status}</div></div>`
+  }).join('')
+  grid.querySelectorAll('.sp-card').forEach(c => c.addEventListener('click', () => chooseServer(c.dataset.id)))
+  document.getElementById('server-picker').classList.add('show')
+}
+function chooseServer(id) {
+  if (!id) return
+  selectedGuildId = id
+  localStorage.setItem('selectedGuildId', id)
+  document.getElementById('server-picker').classList.remove('show')
+  const sel = document.getElementById('guild-select'); if (sel) sel.value = id
+  refresh(); loadSounds(); loadVoiceChannels()
+}
+async function bootGuildSelection() {
+  let data
+  try { const r = await botFetch('/api/guilds'); data = await r.json() } catch { return }
+  const guilds = (data && data.guilds) || []
+  if (guilds.length >= 2) renderServerPicker(guilds)
+  else if (guilds.length === 1) { selectedGuildId = guilds[0].id; localStorage.setItem('selectedGuildId', selectedGuildId) }
+}
 
 refresh()
 loadMe()
+bootGuildSelection()
 loadGuilds()
 loadSounds()
 loadVoiceChannels()
