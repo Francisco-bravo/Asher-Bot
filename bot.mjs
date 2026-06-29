@@ -212,6 +212,10 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildVoiceStates,
+    // PRIVILEGIADO: hay que activar "Server Members Intent" en el Developer Portal
+    // de CADA app o el bot no inicia ("Used disallowed intents"). Garantiza que los
+    // miembros (nombres/avatars en voz) estén siempre cacheados.
+    GatewayIntentBits.GuildMembers,
   ]
 })
 
