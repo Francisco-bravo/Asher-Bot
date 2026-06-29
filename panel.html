@@ -674,7 +674,10 @@
   /* Modal (subir canción permanente) */
   .modal-overlay {
     position: fixed; inset: 0; background: rgba(0,0,0,.6);
-    display: flex; align-items: center; justify-content: center; z-index: 20; padding: 16px;
+    /* Por encima de TODAS las capas (admin-screen 900, server-picker 1000,
+       user-menu 950) para que cualquier modal se vea aunque esté abierta la
+       pantalla de Administración. */
+    display: flex; align-items: center; justify-content: center; z-index: 1100; padding: 16px;
   }
   .modal {
     background: var(--panel2); border: var(--border); border-radius: 16px; padding: 24px;
@@ -1394,8 +1397,14 @@
 
   <div class="modal-overlay" id="art-modal" style="display:none">
     <div class="modal" style="max-width:680px">
-      <h2>🖼️ Buscar carátula</h2>
+      <h2>✏️ Editar canción</h2>
       <p class="modal-folder" id="art-modal-song"></p>
+      <label style="display:block;font-weight:600;margin-bottom:6px">Nombre</label>
+      <div class="add-row" style="align-items:center;margin-bottom:18px">
+        <input type="text" id="art-modal-title" placeholder="Título de la canción" style="flex:1" onkeydown="if(event.key==='Enter')saveSongTitle()">
+        <button id="art-modal-save-title" onclick="saveSongTitle()">Guardar nombre</button>
+      </div>
+      <label style="display:block;font-weight:600;margin-bottom:6px">Carátula</label>
       <div class="add-row" style="align-items:center;margin-bottom:12px">
         <input type="text" id="art-modal-query" placeholder="Artista y canción" style="flex:1" onkeydown="if(event.key==='Enter')doArtSearch()">
         <button id="art-modal-search" onclick="doArtSearch()">Buscar</button>
@@ -3354,14 +3363,13 @@ function renderMusicList(songs) {
     const actions = [
       `<button onclick="playSong(${s.id})">▶ Reproducir</button>`,
       (loc === 'none' && !isUpload) ? `<button onclick="forceCacheId(${s.id})">⬇️ Forzar caché</button>` : '',
-      (isAdmin && !isUpload) ? `<button onclick="renameSong(${s.id})">✏️ Renombrar</button>` : '',
       isAdmin ? `<button onclick="togglePermanent(${s.id},${s.permanent ? 0 : 1})">${s.permanent ? 'Quitar 📌' : 'Hacer 📌'}</button>` : '',
       isAdmin ? `<button class="danger" onclick="deleteSong(${s.id})">🗑 Eliminar</button>` : '',
     ].join('')
     const cover = `<div class="song-cover">
       <span class="song-cover-ph">🎵</span>
       <img src="${esc(artUrl(s.id))}" alt="" onerror="this.style.display='none'">
-      ${isAdmin ? `<button class="cover-edit" title="Buscar carátula (iTunes/Deezer/…)" onclick="openArtModal(${s.id})">✏️</button>` : ''}
+      ${isAdmin ? `<button class="cover-edit" title="Editar nombre y carátula" onclick="openArtModal(${s.id})">✏️</button>` : ''}
     </div>`
     return `<div class="song-card song-card-flex">
       ${cover}
@@ -3402,22 +3410,24 @@ function forceCacheId(id) {
   forceCacheUrl()
 }
 
-async function renameSong(id) {
-  const s = musicSongs.find(x => x.id === id)
-  openEditModal({
-    title: 'Renombrar canción', label: 'Título de la canción', value: (s && s.title) || '',
-    save: async (title) => {
-      if (s && title === s.title) return
-      try {
-        const res = await webFetch('/api/music/' + id + '/rename', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title }),
-        })
-        if (!res.ok) { const d = await res.json().catch(() => null); toast(d && d.error ? d.error : 'Error'); return }
-        toast('Renombrada ✓')
-        loadMusic()
-      } catch { toast('Error') }
-    },
-  })
+// Guarda el nombre editado en el modal unificado de edición (nombre + carátula).
+async function saveSongTitle() {
+  if (artModalId == null) return
+  const title = document.getElementById('art-modal-title').value.trim()
+  if (!title) { toast('El nombre no puede estar vacío'); return }
+  const s = musicSongs.find(x => x.id === artModalId)
+  if (s && title === s.title) { toast('Sin cambios'); return }
+  const btn = document.getElementById('art-modal-save-title')
+  btn.disabled = true; const orig = btn.textContent; btn.textContent = 'Guardando...'
+  try {
+    const res = await webFetch('/api/music/' + artModalId + '/rename', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title }),
+    })
+    if (!res.ok) { const d = await res.json().catch(() => null); toast(d && d.error ? d.error : 'Error'); return }
+    toast('Nombre guardado ✓')
+    document.getElementById('art-modal-song').textContent = title
+    loadMusic()
+  } catch { toast('Error') } finally { btn.disabled = false; btn.textContent = orig }
 }
 
 async function playSong(id) {
@@ -3436,6 +3446,7 @@ function openArtModal(id) {
   artModalId = id
   const s = musicSongs.find(x => x.id === id)
   document.getElementById('art-modal-song').textContent = s ? (s.title || '') : ''
+  document.getElementById('art-modal-title').value = s ? (s.title || '') : ''
   document.getElementById('art-modal-query').value = s ? [s.artist, s.title].filter(Boolean).join(' ').trim() : ''
   document.getElementById('art-modal-results').innerHTML = '<p class="empty">Buscando…</p>'
   document.getElementById('art-modal').style.display = 'flex'
