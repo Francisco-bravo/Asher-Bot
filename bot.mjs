@@ -1907,11 +1907,14 @@ function currentVoiceTarget(S = activeSession()) {
   return null
 }
 
-// Lista los canales de voz de cada servidor con los usuarios que hay dentro,
-// para que el panel deje elegir a cuál entrar.
+// Lista los canales de voz del SERVIDOR ACTIVO (el que se está viendo en el panel,
+// resuelto por la sesión / X-Guild-Id) con los usuarios que hay dentro, para que el
+// panel deje elegir a cuál entrar. No muestra canales de otros servidores.
 function listVoiceChannels(S = activeSession()) {
   const out = []
-  for (const guild of client.guilds.cache.values()) {
+  const gid = activeGuildId(S)
+  const activeGuild = gid ? client.guilds.cache.get(gid) : null
+  for (const guild of (activeGuild ? [activeGuild] : [])) {
     const channels = []
     for (const ch of guild.channels.cache.values()) {
       if (ch.type !== ChannelType.GuildVoice && ch.type !== ChannelType.GuildStageVoice) continue
