@@ -2022,7 +2022,7 @@ async function onHttp(req, res) {
         const gid = activeSession().guildId || null // servidor activo de esta petición
         const other = new URL(req.url, 'http://x').searchParams.get('other') === '1'
         return sendJson(soundLib.tree(
-          soundLib.listForUser(uid, gid, other), folders.listFor(uid, admin),
+          soundLib.listForUser(uid, gid, other), folders.listFor(uid, admin, gid),
           folders.aliasesForUser(uid), folders.meta(), uid))
       }
       if (path === '/api/voice-channels') {

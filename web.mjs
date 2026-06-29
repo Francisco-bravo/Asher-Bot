@@ -350,17 +350,20 @@ http.createServer(async (req, res) => {
     }
 
     // Carpetas del soundboard: listar (para el selector) y crear (botón dedicado).
+    // Servidor activo (multiservidor): solo carpetas transversales o de ese server.
+    const guildId = req.headers['x-guild-id'] || url.searchParams.get('g') || null
     if (req.method === 'GET' && path === '/api/folders') {
-      return send(res, 200, folders.list())
+      return send(res, 200, folders.list(guildId))
     }
     if (req.method === 'POST' && path === '/api/folders') {
       const body = JSON.parse((await readBody(req)).toString() || '{}')
       const raw = body.parent ? `${body.parent}/${body.name || ''}` : (body.path || body.name || '')
       try {
-        // Quien la crea es su dueño; elige color y público/privado.
+        // Quien la crea es su dueño; elige color y público/privado; nace en su server.
         const path = folders.create(raw, {
           ownerUserId: user.id, color: body.color || null,
           visibility: body.visibility === 'private' ? 'private' : 'public',
+          guildId,
         })
         return send(res, 201, { ok: true, path })
       } catch (e) {
