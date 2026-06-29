@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url'
 import { pipeline } from 'node:stream/promises'
 import { Readable } from 'node:stream'
 import http from 'node:http'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import ffmpegStatic from 'ffmpeg-static'
 import { getDb } from './lib/db.mjs'
 import * as soundLib from './lib/sounds.mjs'
@@ -190,6 +191,10 @@ class GuildSession {
     this.panelUpdateQueued = false
     this.musicPlayer = createAudioPlayer()
     this.soundPlayer = createAudioPlayer()
+    // Listeners por sesión: al quedar idle/errar el soundPlayer, limpia el sonido
+    // directo de ESTA sesión (finishDirectSound está hoisteada; corre tras la carga).
+    this.soundPlayer.on(AudioPlayerStatus.Idle, () => finishDirectSound(this))
+    this.soundPlayer.on('error', err => { console.error('sound:', err.message); finishDirectSound(this) })
   }
 }
 
@@ -213,9 +218,17 @@ function getSession(guildId) {
   }
   return s
 }
-// Sesión que controla el panel/web (que aún no manda guildId): la que tiene
-// conexión de voz; si ninguna, la primera registrada; si no hay, la global S.
+// Contexto async: cada entry point (comando Discord / petición web) fija aquí la
+// sesión del guild con sessionCtx.run(); así toda la cadena async (incluidos los
+// `S = activeSession()` por defecto y las sub-llamadas) usa la sesión correcta
+// SIN enhebrarla a mano. Los callbacks de eventos de player/stream disparan FUERA
+// del contexto, así que ahí se pasa S explícito (cierre léxico).
+const sessionCtx = new AsyncLocalStorage()
+// Sesión "activa": la del contexto async si lo hay; si no (panel/web sin guildId
+// aún), la que tiene conexión de voz; si ninguna, la primera; si no hay, la global S.
 function activeSession() {
+  const ctx = sessionCtx.getStore()
+  if (ctx) return ctx
   for (const s of sessions.values()) if (s.connection) return s
   return sessions.values().next().value || S
 }
@@ -254,7 +267,7 @@ function startStream(item, seekSec, S = activeSession()) {
   ff.on('error', err => console.error('ffmpeg:', err.message))
   ff.stderr.on('data', d => process.stderr.write(d))
   // Al cerrar (descarga terminada) ya hay CPU libre: pre-cachea la siguiente.
-  yt.on('close', () => { S.streamDownloading = false; backgroundWork() })
+  yt.on('close', () => { S.streamDownloading = false; backgroundWork(S) })
   S.activeProcs = [yt, ff]
   return ff.stdout
 }
@@ -300,7 +313,7 @@ function startStreamAndCache(item, seekSec, song, S = activeSession()) {
     } else {
       try { rmSync(partPath, { force: true }) } catch {}
     }
-    backgroundWork() // descarga terminada → pre-cachea la siguiente (gapless)
+    backgroundWork(S) // descarga terminada → pre-cachea la siguiente (gapless)
   })
   S.activeProcs = [yt, ff]
   return ff.stdout
@@ -355,7 +368,7 @@ function startRemoteStream(item, seekSec, song, S = activeSession()) {
       web.on('end', () => {
         S.streamDownloading = false
         if (song && seekSec === 0) { try { musicCache.recordPlay(song) } catch {} }
-        backgroundWork()
+        backgroundWork(S)
       })
     } catch (e) {
       if (ac.signal.aborted) { S.streamDownloading = false; try { ff.stdin.end() } catch {}; return }
@@ -418,7 +431,7 @@ function startLocalFallback(ff, item, song, seekSec, S = activeSession()) {
       } else if (song && seekSec === 0) {
         try { musicCache.recordPlay(song) } catch {}
       }
-      backgroundWork()
+      backgroundWork(S)
     })
   } catch (e) {
     S.streamDownloading = false
@@ -760,10 +773,10 @@ async function backgroundWork(S = activeSession()) {
   } catch { /* reintenta en el próximo tick */ } finally {
     S.prefetching = false
   }
-  if (didWork) setTimeout(() => backgroundWork(), 1500)
+  if (didWork) setTimeout(() => backgroundWork(S), 1500)
 }
-setInterval(() => { backgroundWork() }, BG_WORK_INTERVAL)
-setInterval(() => { backgroundWork() }, BG_WORK_INTERVAL)
+setInterval(() => { for (const s of sessions.values()) backgroundWork(s) }, BG_WORK_INTERVAL)
+setInterval(() => { for (const s of sessions.values()) backgroundWork(s) }, BG_WORK_INTERVAL)
 
 // Reproduce desde un archivo local ya descargado (el seek es seek de archivo).
 function startFileStream(filePath, seekSec, S = activeSession()) {
@@ -778,7 +791,7 @@ function startFileStream(filePath, seekSec, S = activeSession()) {
 }
 
 // ── Conexión de voz ───────────────────────────────────────────────────────
-async function ensureConnection(voiceChannelId, guildId, S = activeSession()) {
+async function ensureConnection(voiceChannelId, guildId, S = getSession(guildId)) {
   if (S.connection && S.currentChannelId === voiceChannelId) return
   if (S.connection) {
     S.connection.destroy()
@@ -907,7 +920,7 @@ async function ensurePlaying(S = activeSession()) {
       // Cuando el audio EMPIEZA a sonar (pasó la extracción inicial), se habilita el
       // enriquecido en paralelo (metadata + carátula) aunque el stream siga bajando.
       // Además se sueltan los sonidos que esperaban el switch a PCM (si los hubo).
-      S.musicPlayer.once(AudioPlayerStatus.Playing, () => { S.currentPlaying = true; flushPendingSounds(); backgroundWork() })
+      S.musicPlayer.once(AudioPlayerStatus.Playing, () => { S.currentPlaying = true; flushPendingSounds(S); backgroundWork(S) })
 
       const err = await waitIdle(S.musicPlayer)
       const reachedPlaying = S.currentPlaying // ¿llegó a sonar antes de quedar idle?
@@ -1080,7 +1093,7 @@ function requesterFromMember(member) {
   }
 }
 
-function addToQueue(url, voiceChannelId, guildId, textChannelId, title, addedBy = null, S = activeSession()) {
+function addToQueue(url, voiceChannelId, guildId, textChannelId, title, addedBy = null, S = getSession(guildId)) {
   if (S.queue.length >= MAX_QUEUE) throw new Error(`La cola está llena (máximo ${MAX_QUEUE})`)
   const item = { url, title: title || url, duration: null, voiceChannelId, guildId, textChannelId, addedBy }
   // La metadata (título/duración) NO se pide aquí para no lanzar otro yt-dlp que
@@ -1263,7 +1276,10 @@ setInterval(() => {
   if (S.panelMsg && S.current && S.musicPlayer.state.status === AudioPlayerStatus.Playing) updatePanel()
 }, 10000)
 
-client.on('interactionCreate', async (interaction) => {
+client.on('interactionCreate', (interaction) =>
+  sessionCtx.run(getSession(interaction.guildId), () => onInteraction(interaction)))
+async function onInteraction(interaction) {
+  const S = activeSession() // = sesión del guild fijada por run()
   if (interaction.isChatInputCommand() && interaction.commandName === 'p') {
     const query = interaction.options.getString('cancion', true)
     const member = await interaction.guild.members.fetch(interaction.user.id)
@@ -1366,7 +1382,7 @@ client.on('interactionCreate', async (interaction) => {
   else return
   try { await interaction.deferUpdate() } catch {}
   updatePanel()
-})
+}
 
 // ── Soundboard ────────────────────────────────────────────────────────────
 function listSounds() {
@@ -1420,9 +1436,6 @@ function finishDirectSound(S = activeSession()) {
   S.soundActive = 0
   if (S.connection) S.connection.subscribe(S.musicPlayer)
 }
-
-S.soundPlayer.on(AudioPlayerStatus.Idle, () => finishDirectSound(S))
-S.soundPlayer.on('error', err => { console.error('sound:', err.message); finishDirectSound(S) })
 
 function spawnSoundFfmpeg(filePath, gainDb = 0) {
   // El volumen GLOBAL (slider) se aplica al mezclar, en vivo. Aquí solo se aplica
@@ -1650,7 +1663,10 @@ function cmdStopSound(id, S = activeSession()) {
 }
 
 // ── Comandos de texto en Discord ──────────────────────────────────────────
-client.on('messageCreate', async (message) => {
+client.on('messageCreate', (message) =>
+  sessionCtx.run(getSession(message.guildId), () => onMessage(message)))
+async function onMessage(message) {
+  const S = activeSession() // = sesión del guild fijada por run()
   if (message.author.bot) return
   const content = message.content.trim()
 
@@ -1733,7 +1749,7 @@ client.on('messageCreate', async (message) => {
     await message.reply(lines.join('\n'))
     return
   }
-})
+}
 
 // ── Servidor HTTP del panel ───────────────────────────────────────────────
 function getState(S = activeSession()) {
@@ -1889,7 +1905,10 @@ const MUSIC_CONTROL_PATHS = new Set([
   '/api/sound', '/api/sound/stop',
 ])
 
-http.createServer(async (req, res) => {
+http.createServer((req, res) =>
+  sessionCtx.run(activeSession(), () => onHttp(req, res))).listen(PORT, () => console.log(`Panel de control en el puerto ${PORT}`))
+async function onHttp(req, res) {
+  const S = activeSession() // panel/web: sesión activa (interino hasta el selector de servidor)
   const sendJson = (data, status = 200) => {
     res.writeHead(status, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify(data))
@@ -2144,7 +2163,7 @@ http.createServer(async (req, res) => {
   } catch (err) {
     sendJson({ error: err.message }, 500)
   }
-}).listen(PORT, () => console.log(`Panel de control en el puerto ${PORT}`))
+}
 
 client.once('clientReady', async () => {
   console.log(`Bot listo: ${client.user.tag}`)
