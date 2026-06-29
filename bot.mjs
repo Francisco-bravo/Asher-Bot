@@ -200,8 +200,6 @@ const SOUND_PCM_WINDOW_MS = 5 * 60 * 1000 // sin sonidos por este tiempo → vol
 
 // Sesión única por ahora (multiservidor: se reemplaza por un Map<guildId, ...>).
 const S = new GuildSession()
-const musicPlayer = S.musicPlayer
-const soundPlayer = S.soundPlayer
 
 const client = new Client({
   intents: [
@@ -781,7 +779,7 @@ async function ensureConnection(voiceChannelId, guildId) {
     S.connection.once(VoiceConnectionStatus.Ready, onReady)
     S.connection.once('error', onErr)
   })
-  S.connection.subscribe(musicPlayer)
+  S.connection.subscribe(S.musicPlayer)
   S.currentChannelId = voiceChannelId
   S.currentChannelName = vc.name
 }
@@ -885,14 +883,14 @@ async function ensurePlaying() {
         })
         S.currentResource = createAudioResource(S.currentMixer, { inputType: StreamType.Raw })
       }
-      musicPlayer.play(S.currentResource)
+      S.musicPlayer.play(S.currentResource)
       updatePanel()
       // Cuando el audio EMPIEZA a sonar (pasó la extracción inicial), se habilita el
       // enriquecido en paralelo (metadata + carátula) aunque el stream siga bajando.
       // Además se sueltan los sonidos que esperaban el switch a PCM (si los hubo).
-      musicPlayer.once(AudioPlayerStatus.Playing, () => { S.currentPlaying = true; flushPendingSounds(); backgroundWork() })
+      S.musicPlayer.once(AudioPlayerStatus.Playing, () => { S.currentPlaying = true; flushPendingSounds(); backgroundWork() })
 
-      const err = await waitIdle(musicPlayer)
+      const err = await waitIdle(S.musicPlayer)
       const reachedPlaying = S.currentPlaying // ¿llegó a sonar antes de quedar idle?
       S.currentPlaying = false // terminó: no enriquecer esta canción ya
       killStreamProcs()
@@ -1081,14 +1079,14 @@ function addToQueue(url, voiceChannelId, guildId, textChannelId, title, addedBy 
 function cmdSkip() {
   if (!S.current) return false
   S.transition = 'next'
-  musicPlayer.stop()
+  S.musicPlayer.stop()
   return true
 }
 
 function cmdPrevious() {
   if (S.current) {
     S.transition = 'previous'
-    musicPlayer.stop()
+    S.musicPlayer.stop()
     return true
   }
   if (S.history.length > 0) {
@@ -1103,20 +1101,20 @@ function cmdSeek(toSeconds) {
   if (!S.current) return false
   S.seekTarget = Math.max(0, toSeconds)
   S.transition = 'seek'
-  musicPlayer.stop()
+  S.musicPlayer.stop()
   return true
 }
 
 function cmdPause() {
-  if (musicPlayer.state.status !== AudioPlayerStatus.Playing) return false
-  musicPlayer.pause()
+  if (S.musicPlayer.state.status !== AudioPlayerStatus.Playing) return false
+  S.musicPlayer.pause()
   updatePanel()
   return true
 }
 
 function cmdResume() {
-  if (musicPlayer.state.status !== AudioPlayerStatus.Paused) return false
-  musicPlayer.unpause()
+  if (S.musicPlayer.state.status !== AudioPlayerStatus.Paused) return false
+  S.musicPlayer.unpause()
   updatePanel()
   return true
 }
@@ -1128,7 +1126,7 @@ function cmdStop() {
   if (!S.current) return false
   S.transition = 'stop'
   S.pendingSounds = [] // si había sonidos esperando un switch, se descartan
-  musicPlayer.stop()
+  S.musicPlayer.stop()
   return true
 }
 
@@ -1163,7 +1161,7 @@ function progressBar() {
 }
 
 function panelPayload() {
-  const paused = musicPlayer.state.status === AudioPlayerStatus.Paused
+  const paused = S.musicPlayer.state.status === AudioPlayerStatus.Paused
   const lines = []
   if (S.current) {
     lines.push(`${paused ? '⏸' : '▶'} **${S.current.title}**`)
@@ -1243,7 +1241,7 @@ function updatePanel() {
 // Refrescar la barra de progreso mientras suena algo (10s mantiene las
 // ediciones muy por debajo del rate limit de Discord)
 setInterval(() => {
-  if (S.panelMsg && S.current && musicPlayer.state.status === AudioPlayerStatus.Playing) updatePanel()
+  if (S.panelMsg && S.current && S.musicPlayer.state.status === AudioPlayerStatus.Playing) updatePanel()
 }, 10000)
 
 client.on('interactionCreate', async (interaction) => {
@@ -1388,7 +1386,7 @@ function soundTree() {
 }
 
 // Sonido "directo" (sin música): solo puede haber uno a la vez porque comparten
-// el soundPlayer. play() reemplaza al anterior SIN emitir Idle, así que la
+// el S.soundPlayer. play() reemplaza al anterior SIN emitir Idle, así que la
 // limpieza se hace aquí y se invoca tanto desde el listener persistente de Idle
 // como al reemplazar un sonido por otro.
 // S.currentDirectId y S.directResource son campos de S (GuildSession).
@@ -1401,11 +1399,11 @@ function finishDirectSound() {
   S.directResource = null
   if (e) { try { e.proc.kill() } catch {} }
   S.soundActive = 0
-  if (S.connection) S.connection.subscribe(musicPlayer)
+  if (S.connection) S.connection.subscribe(S.musicPlayer)
 }
 
-soundPlayer.on(AudioPlayerStatus.Idle, finishDirectSound)
-soundPlayer.on('error', err => { console.error('sound:', err.message); finishDirectSound() })
+S.soundPlayer.on(AudioPlayerStatus.Idle, finishDirectSound)
+S.soundPlayer.on('error', err => { console.error('sound:', err.message); finishDirectSound() })
 
 function spawnSoundFfmpeg(filePath, gainDb = 0) {
   // El volumen GLOBAL (slider) se aplica al mezclar, en vivo. Aquí solo se aplica
@@ -1432,7 +1430,7 @@ async function playSound(soundId, user = null) {
     S.seekTarget = elapsed()
     S.transition = 'seek'
     S.opusDirect = false
-    musicPlayer.stop() // rompe waitIdle → ensurePlaying reconstruye en PCM
+    S.musicPlayer.stop() // rompe waitIdle → ensurePlaying reconstruye en PCM
     return id
   }
   return playSoundCore(soundId, user)
@@ -1462,7 +1460,7 @@ async function playSoundCore(soundId, user = null, presetId = null) {
   const meta = { label: sound.label, user, startedAt: Date.now(), durationMs: sound.duration_ms || null }
 
   // Con música sonando: mezclar el sonido encima, música atenuada
-  if (S.currentMixer && musicPlayer.state.status === AudioPlayerStatus.Playing) {
+  if (S.currentMixer && S.musicPlayer.state.status === AudioPlayerStatus.Playing) {
     const ff = spawnSoundFfmpeg(filePath, gain)
     S.activeProcs.push(ff)
     const ov = S.currentMixer.addOverlay(ff.stdout)
@@ -1480,12 +1478,12 @@ async function playSoundCore(soundId, user = null, presetId = null) {
       // Al cerrarse (sin sonidos un rato) devuelve la conexión al player de música.
       onClose: (inst) => {
         if (S.soundMixer === inst) S.soundMixer = null
-        if (S.connection) { try { S.connection.subscribe(musicPlayer) } catch {} }
+        if (S.connection) { try { S.connection.subscribe(S.musicPlayer) } catch {} }
       },
     })
     const res = createAudioResource(S.soundMixer, { inputType: StreamType.Raw })
-    S.connection.subscribe(soundPlayer)
-    soundPlayer.play(res)
+    S.connection.subscribe(S.soundPlayer)
+    S.soundPlayer.play(res)
   }
   const ff = spawnSoundFfmpeg(filePath, gain)
   const ov = S.soundMixer.addOverlay(ff.stdout)
@@ -1628,7 +1626,7 @@ function cmdStopSound(id) {
     if (e.mixer) e.mixer.overlays.delete(e.ov)
     S.activeSounds.delete(id)
   }
-  if (e.direct) soundPlayer.stop() // el listener de Idle (finishDirectSound) limpia la entrada
+  if (e.direct) S.soundPlayer.stop() // el listener de Idle (finishDirectSound) limpia la entrada
   return true
 }
 
@@ -1723,7 +1721,7 @@ function getState() {
   return {
     current: S.current ? { url: S.current.url, title: S.current.title, duration: S.current.duration, songId: S.current.songId ?? null } : null,
     elapsed: elapsed(),
-    paused: musicPlayer.state.status === AudioPlayerStatus.Paused,
+    paused: S.musicPlayer.state.status === AudioPlayerStatus.Paused,
     queue: S.queue.map(i => ({ url: i.url, title: i.title, duration: i.duration, songId: i.songId ?? null, addedBy: i.addedBy || null })),
     // Reproducidas recientes (en memoria), de más antigua a más reciente,
     // para mostrarlas en gris en la cola sin que desaparezcan.
