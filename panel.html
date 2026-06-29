@@ -739,7 +739,13 @@
     background: var(--panel3); color: var(--muted);
   }
   .ul-role.is-admin { background: var(--accent); color: #fff; }
+  .ul-role.is-super { background: #f5b301; color: #1a1a1a; font-weight: 700; }
   .ul-role.ul-none { font-style: italic; }
+  .ul-controls { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
+  .ul-guild-admin { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+  .ul-guild-admin select { padding: 6px 8px; border: var(--border); border-radius: 8px; background: var(--panel2); color: var(--text); font-size: .8rem; max-width: 150px; }
+  .ul-guild-admin button { padding: 6px 10px; border: var(--border); border-radius: 8px; background: var(--panel2); color: var(--text); font-size: .78rem; cursor: pointer; }
+  .ul-guild-admin button:hover { background: var(--panel3); }
   .ul-meta { color: var(--muted); font-size: .76rem; }
   .ul-toggle {
     flex: none; padding: 9px 14px; border: var(--border); border-radius: 9px; cursor: pointer;
@@ -1423,6 +1429,7 @@ function botUrl(path) { return BOT_BASE + path }
 // resuelve la sesión de ese servidor (o la activa si no se especifica).
 let selectedGuildId = localStorage.getItem('selectedGuildId') || null
 let isMultiServer = false // hay 2+ servidores accesibles (lo fija loadGuilds)
+let allGuilds = []        // lista de servidores accesibles (para la gestión de admins)
 async function botFetch(path, opts = {}) {
   const headers = { ...(opts.headers || {}) }
   if (selectedGuildId) headers['X-Guild-Id'] = selectedGuildId
@@ -2255,13 +2262,15 @@ function renderAuditUploads(rows) {
 
 // ── Gestión de usuarios (solo admin) ──
 let usersMeId = null
+let iAmSuper = false
 async function loadUsers() {
-  if (!(me && (me.roles || []).includes('admin'))) return
+  if (!(me && ((me.roles || []).includes('admin') || me.isSuper))) return
   try {
     const res = await webFetch('/api/users')
     if (!res.ok) return
     const data = await res.json()
     usersMeId = data.me
+    iAmSuper = !!(me && me.isSuper)
     renderUsers(data.users || [])
   } catch {}
 }
@@ -2270,41 +2279,83 @@ function renderUsers(users) {
   const el = document.getElementById('users-list')
   if (!el) return
   if (!users.length) { el.innerHTML = '<p class="empty">No hay usuarios todavía</p>'; return }
+  const guildName = (id) => { const g = allGuilds.find(x => x.id === id); return g ? g.name : id }
   el.innerHTML = users.map(u => {
     const name = esc(u.display_name || u.username || 'Usuario')
-    const isAdmin = (u.roles || []).includes('admin')
+    const isGlobalAdmin = (u.roles || []).includes('admin')
     const isMe = u.id === usersMeId
     const av = u.avatar_url
       ? `<img class="ul-av" src="${esc(u.avatar_url)}" alt="">`
       : `<span class="ul-av ul-ph">${esc((name[0] || '?').toUpperCase())}</span>`
-    const roles = (u.roles || []).length
-      ? (u.roles).map(r => `<span class="ul-role${r === 'admin' ? ' is-admin' : ''}">${esc(r)}</span>`).join('')
-      : '<span class="ul-role ul-none">sin rol</span>'
+    // Servidores donde es admin POR SERVIDOR (no global).
+    const guildAdmin = (u.roleScopes || []).filter(s => s.name === 'admin' && s.guildId)
+    const roleChips = []
+    if (u.isSuper) roleChips.push('<span class="ul-role is-super">⭐ super admin</span>')
+    if (isGlobalAdmin) roleChips.push('<span class="ul-role is-admin">admin (global)</span>')
+    for (const s of guildAdmin) roleChips.push(`<span class="ul-role is-admin">admin · ${esc(guildName(s.guildId))}</span>`)
+    for (const r of (u.roles || []).filter(r => r !== 'admin')) roleChips.push(`<span class="ul-role">${esc(r)}</span>`)
+    if (!roleChips.length) roleChips.push('<span class="ul-role ul-none">sin rol</span>')
     const meta = u.last_login_at ? 'Último acceso: ' + fmtDate(u.last_login_at) : 'Nunca ha entrado'
+    // Controles: el toggle global admin lo ve quien gestiona; el super y el
+    // admin POR SERVIDOR solo el super admin.
+    let controls = `<button class="ul-toggle${isGlobalAdmin ? ' on' : ''}" onclick="setUserAdmin(${u.id}, ${!isGlobalAdmin})">${isGlobalAdmin ? '➖ Quitar admin' : '➕ Admin global'}</button>`
+    if (iAmSuper) {
+      controls += `<button class="ul-toggle${u.isSuper ? ' on' : ''}" onclick="setUserSuper(${u.id}, ${!u.isSuper})">${u.isSuper ? '➖ Quitar super' : '⭐ Hacer super'}</button>`
+      if (isMultiServer && allGuilds.length) {
+        const adminGuildIds = new Set(guildAdmin.map(s => s.guildId))
+        const opts = allGuilds.map(g => `<option value="${g.id}">${adminGuildIds.has(g.id) ? '✓ ' : ''}${esc(g.name)}</option>`).join('')
+        controls += `<div class="ul-guild-admin">
+          <select id="ga-sel-${u.id}">${opts}</select>
+          <button onclick="grantGuildAdmin(${u.id}, true)">＋ admin aquí</button>
+          <button onclick="grantGuildAdmin(${u.id}, false)">－ quitar</button>
+        </div>`
+      }
+    }
     return `<div class="ul-row">
       ${av}
       <div class="ul-info">
         <div class="ul-name">${name}${isMe ? ' <span class="ul-you">(tú)</span>' : ''}</div>
-        <div class="ul-roles">${roles}</div>
+        <div class="ul-roles">${roleChips.join('')}</div>
         <div class="ul-meta">${meta}</div>
       </div>
-      <button class="ul-toggle${isAdmin ? ' on' : ''}" onclick="setUserAdmin(${u.id}, ${!isAdmin})">${isAdmin ? '➖ Quitar admin' : '➕ Hacer admin'}</button>
+      <div class="ul-controls">${controls}</div>
     </div>`
   }).join('')
 }
 
-async function setUserAdmin(userId, grant) {
-  if (!grant && userId === usersMeId && !confirm('¿Quitarte a ti mismo el rol de administrador?')) return
+async function userRoleReq(body, okMsg) {
   try {
     const res = await webFetch('/api/users/role', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId, role: 'admin', grant }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    })
+    const data = await res.json().catch(() => null)
+    if (!res.ok) { toast(data && data.error ? data.error : 'Error'); return false }
+    toast(okMsg); loadUsers()
+    if (body.userId === usersMeId) loadMe()
+    return true
+  } catch { toast('No se pudo contactar al servidor'); return false }
+}
+async function setUserAdmin(userId, grant) {
+  if (!grant && userId === usersMeId && !confirm('¿Quitarte a ti mismo el rol de administrador global?')) return
+  await userRoleReq({ userId, role: 'admin', grant }, grant ? 'Ahora es administrador global' : 'Admin global retirado')
+}
+async function grantGuildAdmin(userId, grant) {
+  const sel = document.getElementById('ga-sel-' + userId)
+  if (!sel || !sel.value) return
+  const g = allGuilds.find(x => x.id === sel.value)
+  await userRoleReq({ userId, role: 'admin', grant, guildId: sel.value },
+    grant ? `Admin en ${g ? g.name : 'ese servidor'}` : `Admin retirado en ${g ? g.name : 'ese servidor'}`)
+}
+async function setUserSuper(userId, grant) {
+  if (!grant && userId === usersMeId && !confirm('¿Quitarte a ti mismo el rol de SUPER administrador?')) return
+  try {
+    const res = await webFetch('/api/users/super', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId, grant }),
     })
     const data = await res.json().catch(() => null)
     if (!res.ok) { toast(data && data.error ? data.error : 'Error'); return }
-    toast(grant ? 'Ahora es administrador' : 'Permiso de admin retirado')
-    loadUsers()
-    if (userId === usersMeId) loadMe()   // si me cambié a mí mismo, refrescar la UI admin
+    toast(grant ? 'Ahora es super administrador' : 'Super administrador retirado')
+    loadUsers(); if (userId === usersMeId) loadMe()
   } catch { toast('No se pudo contactar al servidor') }
 }
 
@@ -3807,6 +3858,7 @@ async function loadGuilds() {
   let data
   try { const res = await botFetch('/api/guilds'); data = await res.json() } catch { return }
   if (!data || !Array.isArray(data.guilds)) return
+  allGuilds = data.guilds
   const sel = document.getElementById('guild-select')
   const btnOther = document.getElementById('btn-other-servers')
   isMultiServer = data.guilds.length >= 2

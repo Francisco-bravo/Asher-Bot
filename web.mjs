@@ -320,16 +320,20 @@ http.createServer(async (req, res) => {
     // A partir de aquí se requiere sesión
     const user = currentUser(req)
     if (!user) return send(res, 401, { error: 'No autenticado' })
+    // Servidor activo (multiservidor): para los chequeos de admin POR SERVIDOR y
+    // para etiquetar lo que se crea. NULL = transversal / global.
+    const guildId = req.headers['x-guild-id'] || url.searchParams.get('g') || null
 
     if (req.method === 'GET' && path === '/api/me') {
       return send(res, 200, {
         id: user.id, username: user.username, displayName: user.display_name,
-        avatarUrl: user.avatar_url, roles: rbac.getUserRoleNames(user.id),
+        avatarUrl: user.avatar_url, roles: rbac.getUserRoleNames(user.id, guildId),
+        isSuper: rbac.isSuper(user.id),
       })
     }
 
     if (req.method === 'GET' && path === '/api/sounds') {
-      const admin = rbac.isAdmin(user.id)
+      const admin = rbac.isAdmin(user.id, guildId)
       return send(res, 200, sounds.tree(
         sounds.listForUser(user.id), folders.listFor(user.id, admin),
         folders.aliasesForUser(user.id), folders.meta(), user.id))
@@ -341,7 +345,7 @@ http.createServer(async (req, res) => {
     if (mSndAudio && req.method === 'GET') {
       const s = sounds.getById(Number(mSndAudio[1]))
       if (!s) return send(res, 404, { error: 'Sonido no encontrado' })
-      if (!rbac.isAdmin(user.id) && !rbac.canSeeSound(user.id, s)) return send(res, 403, { error: 'No disponible' })
+      if (!rbac.isAdmin(user.id, guildId) && !rbac.canSeeSound(user.id, s)) return send(res, 403, { error: 'No disponible' })
       const store = getStore()
       if (!(await store.exists(s.object_key))) return send(res, 404, { error: 'Sin audio' })
       res.writeHead(200, { 'Content-Type': SOUND_MIME[s.ext] || 'application/octet-stream' })
@@ -350,8 +354,7 @@ http.createServer(async (req, res) => {
     }
 
     // Carpetas del soundboard: listar (para el selector) y crear (botón dedicado).
-    // Servidor activo (multiservidor): solo carpetas transversales o de ese server.
-    const guildId = req.headers['x-guild-id'] || url.searchParams.get('g') || null
+    // Solo carpetas transversales o del servidor activo (guildId, declarado arriba).
     if (req.method === 'GET' && path === '/api/folders') {
       return send(res, 200, folders.list(guildId))
     }
@@ -376,7 +379,7 @@ http.createServer(async (req, res) => {
       const body = JSON.parse((await readBody(req)).toString() || '{}')
       if (!body.path) return send(res, 400, { error: 'Falta path' })
       try {
-        folders.setProps(body.path, { color: body.color, visibility: body.visibility }, user.id, rbac.isAdmin(user.id))
+        folders.setProps(body.path, { color: body.color, visibility: body.visibility }, user.id, rbac.isAdmin(user.id, guildId))
         return send(res, 200, { ok: true })
       } catch (e) { return send(res, 400, { error: e.message }) }
     }
@@ -393,9 +396,8 @@ http.createServer(async (req, res) => {
       // Cualquiera puede subir público o privado. Pero si la carpeta es privada,
       // el sonido queda privado (la carpeta gobierna su subárbol).
       if (folders.isPrivatePath(folder, folders.meta())) visibility = 'private'
-      // Servidor activo (multiservidor): el sonido nace ligado a ESE servidor.
+      // El sonido nace ligado al servidor activo (guildId, declarado arriba).
       // NULL = transversal (single-server o sin selección) → visible en todos.
-      const guildId = req.headers['x-guild-id'] || url.searchParams.get('g') || null
       const buffer = await readBody(req)
       if (!buffer.length) return send(res, 400, { error: 'Cuerpo vacío' })
       const dur = await checkSoundDuration(buffer, ext)
@@ -428,7 +430,7 @@ http.createServer(async (req, res) => {
       if (!folder) return send(res, 400, { error: 'Carpeta inválida (no se puede mover a la raíz)' })
       const snd = sounds.getById(soundId)
       if (!snd || !rbac.canSeeSound(user.id, snd)) return send(res, 404, { error: 'Sonido no disponible' })
-      if (rbac.isAdmin(user.id)) { folders.create(folder); sounds.moveSoundGlobal(soundId, folder) }
+      if (rbac.isAdmin(user.id, guildId)) { folders.create(folder); sounds.moveSoundGlobal(soundId, folder) }
       else {
         // El usuario solo puede mover a una carpeta que él pueda ver (no privada ajena).
         if (!folders.accessibleTo(folder, user.id, false, folders.meta())) return send(res, 403, { error: 'Carpeta no disponible' })
@@ -443,7 +445,7 @@ http.createServer(async (req, res) => {
       const body = JSON.parse((await readBody(req)).toString() || '{}')
       if (!body.path || !(body.name || '').trim()) return send(res, 400, { error: 'Falta path o name' })
       try {
-        if (rbac.isAdmin(user.id)) return send(res, 200, { ok: true, path: folders.rename(body.path, body.name) })
+        if (rbac.isAdmin(user.id, guildId)) return send(res, 200, { ok: true, path: folders.rename(body.path, body.name) })
         folders.setUserAlias(user.id, body.path, body.name)
         return send(res, 200, { ok: true, path: body.path })
       } catch (e) { return send(res, 400, { error: e.message }) }
@@ -452,18 +454,18 @@ http.createServer(async (req, res) => {
     // Gestión (solo admin): árbol completo de TODOS los sonidos (incl. ocultos)
     // para administrarlos junto a las carpetas.
     if (req.method === 'GET' && path === '/api/sound-admin') {
-      if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un administrador' })
+      if (!rbac.isAdmin(user.id, guildId)) return send(res, 403, { error: 'Solo un administrador' })
       return send(res, 200, { tree: sounds.tree(sounds.listAllForAdmin(), folders.list()) })
     }
     // Auditoría (solo admin): renombres por usuario + registro de subidas.
     if (req.method === 'GET' && path === '/api/sound-audit') {
-      if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un administrador' })
+      if (!rbac.isAdmin(user.id, guildId)) return send(res, 403, { error: 'Solo un administrador' })
       return send(res, 200, { renames: sounds.allAliases(), uploads: sounds.allUploads() })
     }
     // Renombrar el nombre real de un sonido y/o cambiar su visibilidad
     // (público⇄privado). Afecta a todos. Solo admin.
     if (req.method === 'POST' && path === '/api/sound-admin/rename') {
-      if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un administrador' })
+      if (!rbac.isAdmin(user.id, guildId)) return send(res, 403, { error: 'Solo un administrador' })
       const body = JSON.parse((await readBody(req)).toString() || '{}')
       if (!body.soundId || !(body.label || '').trim()) return send(res, 400, { error: 'Falta soundId o label' })
       try {
@@ -482,7 +484,7 @@ http.createServer(async (req, res) => {
     }
     // Reemplazar el audio de un sonido (recortado en el navegador). Solo admin.
     if (req.method === 'POST' && path === '/api/sound-admin/replace-audio') {
-      if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un administrador' })
+      if (!rbac.isAdmin(user.id, guildId)) return send(res, 403, { error: 'Solo un administrador' })
       const id = Number(url.searchParams.get('id'))
       const ext = (url.searchParams.get('ext') || '').toLowerCase().trim()
       if (!id) return send(res, 400, { error: 'Falta id' })
@@ -496,7 +498,7 @@ http.createServer(async (req, res) => {
     }
     // Renombrar una carpeta (afecta a todos). Solo admin.
     if (req.method === 'POST' && path === '/api/sound-admin/rename-folder') {
-      if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un administrador' })
+      if (!rbac.isAdmin(user.id, guildId)) return send(res, 403, { error: 'Solo un administrador' })
       const body = JSON.parse((await readBody(req)).toString() || '{}')
       if (!body.path || !(body.name || '').trim()) return send(res, 400, { error: 'Falta path o name' })
       try { return send(res, 200, { ok: true, path: folders.rename(body.path, body.name) }) }
@@ -504,7 +506,7 @@ http.createServer(async (req, res) => {
     }
     // Ajuste MANUAL de volumen por sonido (se suma a la ganancia medida). Solo admin.
     if (req.method === 'POST' && path === '/api/sound-admin/gain') {
-      if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un administrador' })
+      if (!rbac.isAdmin(user.id, guildId)) return send(res, 403, { error: 'Solo un administrador' })
       const body = JSON.parse((await readBody(req)).toString() || '{}')
       if (!body.soundId) return send(res, 400, { error: 'Falta soundId' })
       sounds.setGainOffset(Number(body.soundId), Number(body.offsetDb) || 0)
@@ -513,7 +515,7 @@ http.createServer(async (req, res) => {
     // Revisar/igualar el volumen de TODOS los sonidos (en segundo plano). Solo admin.
     // `force`: re-mide también los ya medidos. Devuelve el progreso para sondear.
     if (req.method === 'POST' && path === '/api/sound-admin/normalize-all') {
-      if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un administrador' })
+      if (!rbac.isAdmin(user.id, guildId)) return send(res, 403, { error: 'Solo un administrador' })
       const body = JSON.parse((await readBody(req)).toString() || '{}')
       if (normProgress.running) return send(res, 200, { ...normProgress })
       normProgress = { running: true, done: 0, total: 0 }
@@ -523,12 +525,12 @@ http.createServer(async (req, res) => {
       return send(res, 202, { started: true, ...normProgress })
     }
     if (req.method === 'GET' && path === '/api/sound-admin/normalize-progress') {
-      if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un administrador' })
+      if (!rbac.isAdmin(user.id, guildId)) return send(res, 403, { error: 'Solo un administrador' })
       return send(res, 200, normProgress)
     }
     // Ocultar/restaurar un sonido para TODOS (soft delete). Solo admin.
     if (req.method === 'POST' && path === '/api/sound-admin/hide') {
-      if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un administrador' })
+      if (!rbac.isAdmin(user.id, guildId)) return send(res, 403, { error: 'Solo un administrador' })
       const body = JSON.parse((await readBody(req)).toString() || '{}')
       if (!body.soundId) return send(res, 400, { error: 'Falta soundId' })
       sounds.setGlobalHidden(Number(body.soundId), !!body.hidden)
@@ -536,7 +538,7 @@ http.createServer(async (req, res) => {
     }
     // Eliminar un sonido de forma permanente: solo si ya estaba oculto. Solo admin.
     if (req.method === 'DELETE' && path === '/api/sound-admin/sound') {
-      if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un administrador' })
+      if (!rbac.isAdmin(user.id, guildId)) return send(res, 403, { error: 'Solo un administrador' })
       const body = JSON.parse((await readBody(req)).toString() || '{}')
       const snd = body.soundId ? sounds.getById(Number(body.soundId)) : null
       if (!snd) return send(res, 404, { error: 'Sonido no encontrado' })
@@ -553,7 +555,7 @@ http.createServer(async (req, res) => {
     // Estadísticas de sonidos para el panel de administración: últimas
     // reproducciones de todos (con quién) + ranking ajustable. Solo admin.
     if (req.method === 'GET' && path === '/api/sound-stats') {
-      if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un administrador' })
+      if (!rbac.isAdmin(user.id, guildId)) return send(res, 403, { error: 'Solo un administrador' })
       const top = Math.min(50, Math.max(1, Number(url.searchParams.get('top')) || 10))
       return send(res, 200, {
         recent: playHistory.recentDetailed({ limit: 20 }),
@@ -573,17 +575,34 @@ http.createServer(async (req, res) => {
       const targetId = Number(body.userId)
       const role = String(body.role || '')
       const grant = !!body.grant
+      // Ámbito: guildId='<id>' (admin de ese servidor) | null (global). Asignar
+      // admin (global o por-servidor) y tocar super requiere SER super.
+      const scope = body.guildId ? String(body.guildId) : null
       if (!targetId || !VALID_ROLES.has(role)) return send(res, 400, { error: 'Datos inválidos' })
-      // No permitir quedarse sin ningún administrador.
-      if (role === 'admin' && !grant && auth.countAdmins() <= 1) {
+      if (role === 'admin' && !rbac.isSuper(user.id)) {
+        return send(res, 403, { error: 'Solo un super administrador puede gestionar administradores' })
+      }
+      // No permitir quedarse sin ningún admin pleno (super o admin global).
+      if (role === 'admin' && scope === null && !grant && auth.countAdmins() <= 1) {
         return send(res, 400, { error: 'No puedes quitar el último administrador' })
       }
       try {
-        if (grant) auth.assignRole(targetId, role)
-        else auth.removeRole(targetId, role)
+        if (grant) auth.assignRole(targetId, role, scope)
+        else auth.removeRole(targetId, role, scope)
       } catch (e) {
         return send(res, 400, { error: e.message || 'No se pudo actualizar el rol' })
       }
+      return send(res, 200, { ok: true })
+    }
+    // Super administrador global (solo otro super puede otorgarlo/quitarlo).
+    if (req.method === 'POST' && path === '/api/users/super') {
+      if (!rbac.isSuper(user.id)) return send(res, 403, { error: 'Solo un super administrador' })
+      const body = JSON.parse((await readBody(req)).toString() || '{}')
+      const targetId = Number(body.userId)
+      const grant = !!body.grant
+      if (!targetId) return send(res, 400, { error: 'Datos inválidos' })
+      if (!grant && auth.countAdmins() <= 1) return send(res, 400, { error: 'No puedes quitar el último administrador' })
+      auth.setSuper(targetId, grant)
       return send(res, 200, { ok: true })
     }
 
