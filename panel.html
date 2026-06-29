@@ -496,6 +496,9 @@
 
   /* Selector de canal de voz */
   .voice-panel { background: var(--panel); border: var(--border); border-radius: 12px; padding: 14px; margin-bottom: 16px; }
+  .vc-head-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .keepalive { display: inline-flex; align-items: center; gap: 6px; font-size: .85rem; font-weight: 600; cursor: pointer; user-select: none; }
+  .keepalive input { width: 16px; height: 16px; cursor: pointer; }
   .voice-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; font-weight: 700; }
   .voice-toggle {
     display: inline-flex; align-items: center; gap: 8px; flex: 1; min-width: 0;
@@ -1176,6 +1179,20 @@
         </div>
       </div>
       <div class="stats-section">
+        <h3>🔌 Desconexión por inactividad</h3>
+        <p class="hint" style="margin:0 0 12px">
+          Si el bot se queda en un canal de voz <b>sin personas</b> durante este tiempo, se
+          desconecta solo (ahorra recursos). <b>0</b> = nunca se desconecta por inactividad.
+          Un administrador puede forzar <b>“mantener conectado”</b> por servidor desde el panel
+          de voz (con advertencia). Recomendado <b>10</b> minutos.
+        </p>
+        <div class="add-row" style="max-width:380px; align-items:center">
+          <input type="number" id="idle-disconnect" step="1" min="0" max="120" value="10" style="max-width:110px">
+          <span style="font-weight:600">minutos</span>
+          <button id="btn-idle-disconnect">Guardar</button>
+        </div>
+      </div>
+      <div class="stats-section">
         <h3>📋 Tamaño máximo de la cola</h3>
         <p class="hint" style="margin:0 0 12px">
           Cuántas canciones se pueden tener <b>en espera</b> a la vez. Al llegar al tope, no se
@@ -1207,7 +1224,12 @@
     <div class="voice-panel" id="voice-panel">
       <div class="voice-head">
         <span class="voice-toggle-static">🔊 Elige un canal de voz</span>
-        <button id="btn-disconnect" class="vc-disconnect" onclick="disconnectVoice()" title="Desconectar del canal de voz">🔌 Desconectar</button>
+        <div class="vc-head-actions">
+          <label class="keepalive" id="keepalive-wrap" title="Mantener el bot conectado siempre (ignora la desconexión por inactividad)">
+            <input type="checkbox" id="keepalive-toggle"> 📌 Mantener conectado
+          </label>
+          <button id="btn-disconnect" class="vc-disconnect" onclick="disconnectVoice()" title="Desconectar del canal de voz">🔌 Desconectar</button>
+        </div>
       </div>
       <div class="voice-body" id="voice-list"><p class="empty">Cargando canales…</p></div>
     </div>
@@ -1423,6 +1445,24 @@
       </div>
     </div>
   </div>
+
+  <div class="modal-overlay" id="keepalive-modal" style="display:none">
+    <div class="modal">
+      <h2>⚠️ Mantener conectado siempre</h2>
+      <p class="modal-folder">
+        El bot se quedará en el canal de voz <b>aunque no haya nadie</b>, ignorando la
+        desconexión automática por inactividad.
+        <br><br>
+        Esto mantiene recursos ocupados de forma permanente: si <b>muchos servidores</b> lo
+        dejan activado, el bot se vuelve <b>más lento</b> con el tiempo. Actívalo solo si de
+        verdad lo necesitas.
+      </p>
+      <div class="modal-actions">
+        <button type="button" class="secondary" id="keepalive-cancel">Cancelar</button>
+        <button type="button" id="keepalive-confirm">Activar de todos modos</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- Vista "reproduciendo ahora" a pantalla completa (estilo YouTube Music):
@@ -1619,6 +1659,7 @@ function syncMusicVarsInputs() {
   syncWorkerCacheMaxInput()
   syncMusicBitrateInput()
   syncSoundPcmWindowInput()
+  syncIdleDisconnectInput()
   syncMaxQueueInput()
   syncMaxHistoryInput()
 }
@@ -1809,6 +1850,55 @@ document.getElementById('btn-sound-pcm-window').addEventListener('click', async 
   } finally { btn.disabled = false; btn.textContent = orig }
 })
 
+// Desconexión por inactividad (minutos; el estado la envía en ms).
+function syncIdleDisconnectInput() {
+  const inp = document.getElementById('idle-disconnect')
+  if (inp && state && state.idleDisconnectMs != null && document.activeElement !== inp)
+    inp.value = Math.round(state.idleDisconnectMs / 60000)
+}
+document.getElementById('btn-idle-disconnect').addEventListener('click', async () => {
+  const inp = document.getElementById('idle-disconnect')
+  const n = Number(inp.value)
+  if (!Number.isInteger(n) || n < 0 || n > 120) { toast('Valor inválido (0 a 120)'); return }
+  const btn = document.getElementById('btn-idle-disconnect')
+  btn.disabled = true; const orig = btn.textContent; btn.textContent = 'Guardando...'
+  try {
+    const data = await api('/api/idle-disconnect', { minutes: n })
+    if (data && data.ok) toast(n === 0 ? 'Auto-desconexión desactivada ✓' : 'Tiempo guardado ✓')
+  } finally { btn.disabled = false; btn.textContent = orig }
+})
+
+// "Mantener conectado siempre" (solo-admin, por servidor). Al ACTIVAR muestra una
+// advertencia (puede ralentizar el bot a la larga); al desactivar es directo.
+function syncKeepAliveToggle() {
+  const t = document.getElementById('keepalive-toggle')
+  if (t && state && state.keepAlive != null) t.checked = !!state.keepAlive
+}
+async function setKeepAlive(on) {
+  const data = await api('/api/keep-alive', { value: on })
+  if (data && data.ok) { toast(on ? 'Bot fijado: se mantendrá conectado 📌' : 'Auto-desconexión reactivada ✓'); refresh() }
+  else { toast((data && data.error) || 'No se pudo cambiar'); syncKeepAliveToggle() }
+}
+document.getElementById('keepalive-toggle').addEventListener('change', (e) => {
+  if (e.target.checked) {
+    e.target.checked = false // revertir hasta confirmar en el modal
+    document.getElementById('keepalive-modal').style.display = 'flex'
+  } else {
+    setKeepAlive(false)
+  }
+})
+document.getElementById('keepalive-cancel').addEventListener('click', () => {
+  document.getElementById('keepalive-modal').style.display = 'none'
+})
+document.getElementById('keepalive-confirm').addEventListener('click', () => {
+  document.getElementById('keepalive-modal').style.display = 'none'
+  document.getElementById('keepalive-toggle').checked = true
+  setKeepAlive(true)
+})
+document.getElementById('keepalive-modal').addEventListener('click', (e) => {
+  if (e.target.id === 'keepalive-modal') e.currentTarget.style.display = 'none'
+})
+
 // Tamaño máximo de la cola de música.
 function syncMaxQueueInput() {
   const inp = document.getElementById('max-queue')
@@ -1967,6 +2057,7 @@ function render() {
     : 'Desconectado del canal de voz'
   const dcBtn = document.getElementById('btn-disconnect')
   if (dcBtn) dcBtn.disabled = !state.connected
+  syncKeepAliveToggle()
 
   // Aviso de bloqueo: si el bot está en un canal y este usuario no está en él
   // (y no es admin), no puede controlar nada → se lo explicamos.

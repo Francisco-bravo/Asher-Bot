@@ -118,6 +118,13 @@ let musicBitrateKbps = 160
 // (passthrough, sin mixer). Mayor = prioriza el soundboard más tiempo; 0 = vuelve
 // a directo de inmediato (sin ventana de prioridad). Configurable en Variables Generales.
 let soundPcmWindowMs = 5 * 60 * 1000
+// Tiempo (ms) que el bot espera en un canal SIN personas antes de desconectarse
+// solo (detector de actividad). 0 = desactivado. Configurable en Variables Generales.
+let idleDisconnectMs = 10 * 60 * 1000
+// Servidores con "mantener conectado siempre" (ignoran el auto-desconectar). Es
+// un switch solo-admin POR SERVIDOR; persiste entre reinicios. Advertencia en la
+// UI: si muchos servidores lo activan, el bot se vuelve más lento a la larga.
+const keepAliveGuilds = new Set()
 try {
   const s = JSON.parse(readFileSync(SETTINGS_FILE, 'utf8'))
   soundBaseVolume = s.soundBaseVolume ?? 1
@@ -130,12 +137,14 @@ try {
   if (s.workerCacheMaxGb != null) workerCacheMaxGb = s.workerCacheMaxGb
   if (s.musicBitrateKbps != null) musicBitrateKbps = s.musicBitrateKbps
   if (s.soundPcmWindowMs != null) soundPcmWindowMs = s.soundPcmWindowMs
+  if (s.idleDisconnectMs != null) idleDisconnectMs = s.idleDisconnectMs
+  if (Array.isArray(s.keepAliveGuilds)) for (const g of s.keepAliveGuilds) keepAliveGuilds.add(String(g))
   if (s.maxQueue != null) MAX_QUEUE = s.maxQueue
   if (s.maxHistory != null) MAX_HISTORY = s.maxHistory
 } catch {}
 soundTargetLufs = setTargetI(soundTargetLufs) // aplica el objetivo cargado
 function saveSettings() {
-  try { writeFileSync(SETTINGS_FILE, JSON.stringify({ soundBaseVolume, maxSoundSeconds, musicDuck, musicVolume, musicVolumeCooldownMs, soundTargetLufs, workerMaxConcurrency, workerCacheMaxGb, musicBitrateKbps, soundPcmWindowMs, maxQueue: MAX_QUEUE, maxHistory: MAX_HISTORY })) } catch {}
+  try { writeFileSync(SETTINGS_FILE, JSON.stringify({ soundBaseVolume, maxSoundSeconds, musicDuck, musicVolume, musicVolumeCooldownMs, soundTargetLufs, workerMaxConcurrency, workerCacheMaxGb, musicBitrateKbps, soundPcmWindowMs, idleDisconnectMs, keepAliveGuilds: [...keepAliveGuilds], maxQueue: MAX_QUEUE, maxHistory: MAX_HISTORY })) } catch {}
 }
 // Empuja al worker los ajustes de Variables Generales que aplica en caliente
 // (concurrencia, tope de caché en disco, bitrate). El cliente está en
@@ -1240,6 +1249,27 @@ setInterval(() => {
   if (S.panelMsg && S.current && S.musicPlayer.state.status === AudioPlayerStatus.Playing) updatePanel()
 }, 10000)
 
+// Detector de actividad: si el bot está en un canal SIN personas durante
+// idleDisconnectMs, se desconecta solo — salvo que ese servidor tenga "mantener
+// conectado siempre" (keepAliveGuilds) o el tiempo esté en 0 (desactivado).
+const IDLE_CHECK_INTERVAL = 30000
+setInterval(() => {
+  if (!idleDisconnectMs) return // 0 = desactivado
+  for (const sess of sessions.values()) {
+    const gid = sess.guildId || sess.connection?.joinConfig?.guildId
+    if (!sess.connection || !sess.currentChannelId || keepAliveGuilds.has(gid)) { sess.emptySince = 0; continue }
+    if (humansInChannel(gid, sess.currentChannelId) > 0) { sess.emptySince = 0; continue }
+    if (!sess.emptySince) { sess.emptySince = Date.now(); continue } // primer tick vacío
+    if (Date.now() - sess.emptySince >= idleDisconnectMs) {
+      sess.emptySince = 0
+      console.log(`Inactividad: desconectando del canal de voz (guild ${gid})`)
+      // Mismo efecto que el botón Desconectar (detiene y vacía la cola), en el
+      // contexto de ESA sesión para que los defaults activeSession() resuelvan bien.
+      sessionCtx.run(sess, () => { try { cmdStop() } catch {} sess.queue.length = 0; destroyConnection(); updatePanel() })
+    }
+  }
+}, IDLE_CHECK_INTERVAL)
+
 client.on('interactionCreate', (interaction) =>
   sessionCtx.run(getSession(interaction.guildId), () => onInteraction(interaction)))
 async function onInteraction(interaction) {
@@ -1577,6 +1607,25 @@ function cmdSoundPcmWindow(sec) {
   return true
 }
 
+// Tiempo (minutos) que el bot espera en un canal SIN personas antes de
+// desconectarse solo. 0 = desactivado (no se desconecta por inactividad). Máx 120.
+function cmdIdleDisconnect(min) {
+  if (typeof min !== 'number' || isNaN(min)) return false
+  idleDisconnectMs = Math.round(Math.min(120, Math.max(0, min)) * 60 * 1000)
+  saveSettings()
+  return true
+}
+
+// "Mantener conectado siempre" para un servidor: ignora el auto-desconectar por
+// inactividad. POR SERVIDOR y solo-admin. Persiste entre reinicios.
+function cmdKeepAlive(guildId, on) {
+  if (!guildId) return false
+  if (on) keepAliveGuilds.add(String(guildId)); else keepAliveGuilds.delete(String(guildId))
+  getSession(guildId).emptySince = 0 // resetea el contador de inactividad
+  saveSettings()
+  return true
+}
+
 // Tope de la cola de música (1..500). No afecta lo ya encolado.
 function cmdMaxQueue(n) {
   if (typeof n !== 'number' || isNaN(n)) return false
@@ -1748,6 +1797,8 @@ function getState(S = activeSession()) {
     workerCacheMaxGb,
     musicBitrateKbps,
     soundPcmWindowMs,
+    idleDisconnectMs,
+    keepAlive: keepAliveGuilds.has(activeGuildId(S)),
     maxQueue: MAX_QUEUE,
     maxHistory: MAX_HISTORY,
   }
@@ -1772,6 +1823,24 @@ function panelUser(req) {
 function isPanelAdmin(req) {
   const u = panelUser(req)
   return !!(u && rbac.isAdmin(u.id))
+}
+
+// Cuenta las PERSONAS (no bots) presentes en un canal de voz.
+function humansInChannel(guildId, channelId) {
+  const guild = client.guilds.cache.get(guildId)
+  if (!guild || !channelId) return 0
+  let n = 0
+  for (const vs of guild.voiceStates.cache.values()) {
+    if (vs.channelId === channelId && !vs.member?.user?.bot) n++
+  }
+  return n
+}
+
+// Guild "activo" de una sesión: el suyo, el de su conexión, o —si el bot está en
+// un solo servidor— ese único guild (para el panel sin selector de servidor).
+function activeGuildId(S = activeSession()) {
+  return S.guildId || S.connection?.joinConfig?.guildId ||
+    (client.guilds.cache.size === 1 ? client.guilds.cache.first().id : null)
 }
 
 // ¿El usuario (por su Discord id) está ahora mismo en el canal de voz del bot?
@@ -2169,6 +2238,19 @@ async function onHttp(req, res) {
           S.queue.length = 0   // al desconectar sí se vacía la cola (reset completo)
           destroyConnection()
           return sendJson({ ok: true })
+        }
+        // Tiempo de auto-desconexión por inactividad (minutos; 0 = desactivado).
+        case '/api/idle-disconnect': {
+          if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)
+          return sendJson({ ok: cmdIdleDisconnect(body.minutes), idleDisconnectMs })
+        }
+        // "Mantener conectado siempre" para el servidor activo (solo-admin de ese servidor).
+        case '/api/keep-alive': {
+          const gid = activeGuildId(S)
+          const u = panelUser(req)
+          if (!u || !rbac.isAdmin(u.id, gid)) return sendJson({ error: 'Solo un administrador' }, 403)
+          if (!gid) return sendJson({ error: 'Sin servidor activo' }, 400)
+          return sendJson({ ok: cmdKeepAlive(gid, !!body.value), keepAlive: keepAliveGuilds.has(gid) })
         }
         case '/api/voice/join': {
           if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador puede mover el bot de canal' }, 403)
