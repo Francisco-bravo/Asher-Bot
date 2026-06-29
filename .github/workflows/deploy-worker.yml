@@ -1,0 +1,29 @@
+name: Deploy Worker (Coolify)
+
+# El worker de música (worker/) corre en el CX33 vía Coolify, NO en las VM Oracle.
+# Es un servicio COMPARTIDO por test y prod (music.aronne.dev), así que su redeploy
+# afecta a ambos a la vez → se dispara solo al promover a `main` (cuando cambie
+# worker/**) y, además, a mano con "Run workflow" (workflow_dispatch).
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'worker/**'
+      - '.github/workflows/deploy-worker.yml'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Coolify redeploy
+        env:
+          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+          COOLIFY_WORKER_UUID: ${{ secrets.COOLIFY_WORKER_UUID }}
+        run: |
+          echo "Disparando redeploy del worker (Coolify)…"
+          code=$(curl -s -o resp.json -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer $COOLIFY_TOKEN" \
+            "https://coolify.aronne.dev/api/v1/deploy?uuid=$COOLIFY_WORKER_UUID&force=true")
+          echo "HTTP $code"; cat resp.json; echo
+          test "$code" = "200"
