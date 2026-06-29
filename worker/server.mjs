@@ -84,6 +84,10 @@ function acquire() { if (active < MAX_CONC) { active++; return Promise.resolve()
 function release() { active = Math.max(0, active - 1); pump() }
 async function withSlot(fn) { await acquire(); try { return await fn() } finally { release() } }
 function setMaxConc(n) { MAX_CONC = Math.max(1, n | 0); pump() }
+// ¿Hay un slot de concurrencia libre AHORA? Lo usa serveArt para no encolar la
+// resolución de una carátula detrás de extracciones de audio: si no hay slot,
+// devuelve vacío y el bot tira de sus fuentes alternativas (iTunes/Deezer/…).
+function slotFree() { return active < MAX_CONC }
 
 // Bitrate del Opus de música (kbps). Ajustable en caliente (POST /config?bitrate=).
 // Solo afecta descargas NUEVAS; lo ya cacheado conserva su bitrate.
@@ -314,7 +318,13 @@ async function serveArt(res, src) {
     return createReadStream(file).pipe(res)
   }
   let meta = pre.meta
-  if (!meta) { try { meta = await getMeta(url) } catch (e) { res.writeHead(404); return res.end('sin meta: ' + e.message) } }
+  if (!meta) {
+    // Si la meta no está en disco y NO hay slot libre, la carátula exigiría un
+    // yt-dlp que quedaría encolado tras las extracciones de audio. En vez de
+    // bloquear, devolvemos vacío (404): el bot usa sus fuentes alternativas.
+    if (!existsSync(metaPath(key)) && !slotFree()) { res.writeHead(404); return res.end('worker ocupado (sin slot)') }
+    try { meta = await getMeta(url) } catch (e) { res.writeHead(404); return res.end('sin meta: ' + e.message) }
+  }
   if (!meta.thumbnail) { res.writeHead(404); return res.end('sin caratula') }
   const ctrl = new AbortController()
   const t = setTimeout(() => ctrl.abort(), 8000)

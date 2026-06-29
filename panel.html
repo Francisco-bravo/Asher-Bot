@@ -1162,6 +1162,20 @@
         </div>
       </div>
       <div class="stats-section">
+        <h3>🔊 Prioridad del soundboard (ventana)</h3>
+        <p class="hint" style="margin:0 0 12px">
+          Tras un sonido, la música se queda en mezcla PCM (para que los efectos suenen
+          <b>sin cortes</b>) durante este tiempo de inactividad de sonidos; pasado ese tiempo
+          vuelve al modo Opus-directo (más eficiente). Mayor = prioriza más el soundboard.
+          <b>0</b> = sin ventana. Recomendado <b>300</b> (5 min).
+        </p>
+        <div class="add-row" style="max-width:380px; align-items:center">
+          <input type="number" id="sound-pcm-window" step="30" min="0" max="3600" value="300" style="max-width:110px">
+          <span style="font-weight:600">segundos</span>
+          <button id="btn-sound-pcm-window">Guardar</button>
+        </div>
+      </div>
+      <div class="stats-section">
         <h3>📋 Tamaño máximo de la cola</h3>
         <p class="hint" style="margin:0 0 12px">
           Cuántas canciones se pueden tener <b>en espera</b> a la vez. Al llegar al tope, no se
@@ -1604,6 +1618,7 @@ function syncMusicVarsInputs() {
   syncWorkerConcInput()
   syncWorkerCacheMaxInput()
   syncMusicBitrateInput()
+  syncSoundPcmWindowInput()
   syncMaxQueueInput()
   syncMaxHistoryInput()
 }
@@ -1773,6 +1788,24 @@ document.getElementById('btn-music-bitrate').addEventListener('click', async () 
   try {
     const data = await api('/api/music-bitrate', { kbps: n })
     if (data && data.ok) toast('Calidad guardada ✓ (afecta canciones nuevas)')
+  } finally { btn.disabled = false; btn.textContent = orig }
+})
+
+// Ventana de prioridad del soundboard (segundos; el estado la envía en ms).
+function syncSoundPcmWindowInput() {
+  const inp = document.getElementById('sound-pcm-window')
+  if (inp && state && state.soundPcmWindowMs != null && document.activeElement !== inp)
+    inp.value = Math.round(state.soundPcmWindowMs / 1000)
+}
+document.getElementById('btn-sound-pcm-window').addEventListener('click', async () => {
+  const inp = document.getElementById('sound-pcm-window')
+  const n = Number(inp.value)
+  if (!Number.isInteger(n) || n < 0 || n > 3600) { toast('Valor inválido (0 a 3600)'); return }
+  const btn = document.getElementById('btn-sound-pcm-window')
+  btn.disabled = true; const orig = btn.textContent; btn.textContent = 'Guardando...'
+  try {
+    const data = await api('/api/sound-pcm-window', { seconds: n })
+    if (data && data.ok) toast('Ventana guardada ✓ (afecta la próxima canción)')
   } finally { btn.disabled = false; btn.textContent = orig }
 })
 

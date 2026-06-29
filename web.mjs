@@ -42,30 +42,13 @@ const MUSIC_EXTS = new Set(['mp3', 'wav', 'ogg', 'm4a', 'flac', 'webm', 'opus'])
 const MAX_MUSIC = 50 * 1024 * 1024 // 50 MB por canción
 
 // Worker de música (CX33): guarda y sirve audio/carátulas. La web proxea la
-// carátula desde el worker y le avisa de borrados/permanencia. Sin la env, todo
-// sigue saliendo del object-store local como antes.
-const MUSIC_WORKER_URL = (process.env.MUSIC_WORKER_URL || '').replace(/\/$/, '')
-const MUSIC_WORKER_TOKEN = process.env.MUSIC_WORKER_TOKEN || ''
-const USE_WORKER = !!MUSIC_WORKER_URL
-function workerReq(method, path, sourceUrl, extra = {}) {
-  const u = new URL(MUSIC_WORKER_URL + path)
-  if (sourceUrl) u.searchParams.set('url', sourceUrl)
-  for (const [k, v] of Object.entries(extra)) u.searchParams.set(k, v)
-  return fetch(u, { method, headers: { Authorization: `Bearer ${MUSIC_WORKER_TOKEN}` } })
-}
+// carátula desde el worker y le avisa de borrados/permanencia. Cliente compartido
+// con bot.mjs en lib/worker-client.mjs. Sin MUSIC_WORKER_URL, USE_WORKER es false
+// y todo sigue saliendo del object-store local como antes.
+const { USE_WORKER, workerReq, workerMeta, workerKeep, workerDelete, workerCachedKeys } = await import('./lib/worker-client.mjs')
 // Misma clave que el worker (sha1 de la fuente) para cruzar la biblioteca con lo
-// que el worker tiene cacheado. Se cachea la respuesta unos segundos.
+// que el worker tiene cacheado.
 const sha1 = s => createHash('sha1').update(s).digest('hex')
-let _workerKeys = { at: 0, set: new Set() }
-async function getWorkerCachedKeys() {
-  if (!USE_WORKER) return new Set()
-  if (Date.now() - _workerKeys.at < 8000) return _workerKeys.set
-  try {
-    const r = await workerReq('GET', '/cached-keys')
-    if (r.ok) { const j = await r.json(); _workerKeys = { at: Date.now(), set: new Set(j.keys || []) } }
-  } catch { /* worker caído: se devuelve lo último conocido */ }
-  return _workerKeys.set
-}
 
 getDb() // dispara migraciones
 
@@ -455,12 +438,16 @@ http.createServer(async (req, res) => {
     // para administrarlos junto a las carpetas.
     if (req.method === 'GET' && path === '/api/sound-admin') {
       if (!rbac.isAdmin(user.id, guildId)) return send(res, 403, { error: 'Solo un administrador' })
-      return send(res, 200, { tree: sounds.tree(sounds.listAllForAdmin(), folders.list()) })
+      // Super admin gestiona TODOS los servidores; admin por-servidor solo los
+      // transversales + los de su servidor activo.
+      const all = rbac.isSuper(user.id)
+      return send(res, 200, { tree: sounds.tree(sounds.listAllForAdmin(guildId, all), all ? folders.list() : folders.list(guildId)) })
     }
     // Auditoría (solo admin): renombres por usuario + registro de subidas.
     if (req.method === 'GET' && path === '/api/sound-audit') {
       if (!rbac.isAdmin(user.id, guildId)) return send(res, 403, { error: 'Solo un administrador' })
-      return send(res, 200, { renames: sounds.allAliases(), uploads: sounds.allUploads() })
+      const all = rbac.isSuper(user.id)
+      return send(res, 200, { renames: sounds.allAliases(guildId, all), uploads: sounds.allUploads(guildId, all) })
     }
     // Renombrar el nombre real de un sonido y/o cambiar su visibilidad
     // (público⇄privado). Afecta a todos. Solo admin.
@@ -666,7 +653,7 @@ http.createServer(async (req, res) => {
     if (req.method === 'GET' && path === '/api/music') {
       const list = music.listAll()
       // location: 'local' (caché de Santiago) | 'worker' (lo tiene el worker) | 'none'.
-      const wk = await getWorkerCachedKeys()
+      const wk = await workerCachedKeys()
       for (const s of list) {
         s.location = s.cached ? 'local'
           : (USE_WORKER && /^https?:/i.test(s.source_url || '') && wk.has(sha1(s.source_url))) ? 'worker'
@@ -706,9 +693,7 @@ http.createServer(async (req, res) => {
       const song = music.setPermanent(Number(mPerm[1]), !!body.permanent)
       if (!song) return send(res, 404, { error: 'Canción no encontrada' })
       // El worker no debe evictar las permanentes de su disco.
-      if (USE_WORKER && /^https?:\/\//i.test(song.source_url)) {
-        workerReq('POST', '/keep', song.source_url, { keep: song.permanent ? '1' : '0' }).catch(() => {})
-      }
+      if (USE_WORKER && /^https?:\/\//i.test(song.source_url)) workerKeep(song.source_url, song.permanent)
       return send(res, 200, { id: song.id, permanent: song.permanent })
     }
     // Botón ✏️: busca la carátula en iTunes → Deezer → álbum (album-art) → arte
@@ -751,8 +736,8 @@ http.createServer(async (req, res) => {
       // Añadir la miniatura "de siempre" (YouTube) como una opción más.
       if (USE_WORKER && /^https?:\/\//i.test(song.source_url)) {
         try {
-          const r = await workerReq('GET', '/meta', song.source_url)
-          if (r.ok) { const m = await r.json(); if (m.thumbnail) options.push({ source: 'YouTube', url: m.thumbnail, label: 'miniatura del video' }) }
+          const m = await workerMeta(song.source_url)
+          if (m.thumbnail) options.push({ source: 'YouTube', url: m.thumbnail, label: 'miniatura del video' })
         } catch {}
       }
       return send(res, 200, { options })
@@ -781,9 +766,7 @@ http.createServer(async (req, res) => {
       const song = music.getById(Number(mId[1])) // capturar source_url antes de borrar la fila
       const ok = await music.removeSong(Number(mId[1]))
       // Borra también la copia del disco del worker.
-      if (ok && USE_WORKER && song && /^https?:\/\//i.test(song.source_url)) {
-        workerReq('DELETE', '/cache', song.source_url).catch(() => {})
-      }
+      if (ok && USE_WORKER && song && /^https?:\/\//i.test(song.source_url)) workerDelete(song.source_url)
       return send(res, ok ? 200 : 404, ok ? { ok: true } : { error: 'Canción no encontrada' })
     }
 

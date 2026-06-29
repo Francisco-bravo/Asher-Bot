@@ -30,6 +30,7 @@ import * as musicCache from './lib/music-cache.mjs'
 import * as art from './lib/art.mjs'
 import * as artsearch from './lib/artsearch.mjs'
 import { MixerStream, SoundMixer } from './lib/audio/mixer.mjs'
+import { defineGuildSession } from './lib/audio/guild-session.mjs'
 import {
   USE_WORKER, workerHeaders, workerAudioUrl, workerMeta, workerEnsure,
   workerKeep, workerPlaylist, pushWorkerConfig as wcPushWorkerConfig,
@@ -113,6 +114,10 @@ let workerCacheMaxGb = 70
 // Bitrate del Opus que produce el worker (kbps). Solo afecta descargas NUEVAS;
 // lo ya cacheado queda al bitrate viejo. Configurable en Variables Generales.
 let musicBitrateKbps = 160
+// Ventana (ms) sin soundboard tras la cual una canción vuelve a Opus-directo
+// (passthrough, sin mixer). Mayor = prioriza el soundboard más tiempo; 0 = vuelve
+// a directo de inmediato (sin ventana de prioridad). Configurable en Variables Generales.
+let soundPcmWindowMs = 5 * 60 * 1000
 try {
   const s = JSON.parse(readFileSync(SETTINGS_FILE, 'utf8'))
   soundBaseVolume = s.soundBaseVolume ?? 1
@@ -124,12 +129,13 @@ try {
   if (s.workerMaxConcurrency != null) workerMaxConcurrency = s.workerMaxConcurrency
   if (s.workerCacheMaxGb != null) workerCacheMaxGb = s.workerCacheMaxGb
   if (s.musicBitrateKbps != null) musicBitrateKbps = s.musicBitrateKbps
+  if (s.soundPcmWindowMs != null) soundPcmWindowMs = s.soundPcmWindowMs
   if (s.maxQueue != null) MAX_QUEUE = s.maxQueue
   if (s.maxHistory != null) MAX_HISTORY = s.maxHistory
 } catch {}
 soundTargetLufs = setTargetI(soundTargetLufs) // aplica el objetivo cargado
 function saveSettings() {
-  try { writeFileSync(SETTINGS_FILE, JSON.stringify({ soundBaseVolume, maxSoundSeconds, musicDuck, musicVolume, musicVolumeCooldownMs, soundTargetLufs, workerMaxConcurrency, workerCacheMaxGb, musicBitrateKbps, maxQueue: MAX_QUEUE, maxHistory: MAX_HISTORY })) } catch {}
+  try { writeFileSync(SETTINGS_FILE, JSON.stringify({ soundBaseVolume, maxSoundSeconds, musicDuck, musicVolume, musicVolumeCooldownMs, soundTargetLufs, workerMaxConcurrency, workerCacheMaxGb, musicBitrateKbps, soundPcmWindowMs, maxQueue: MAX_QUEUE, maxHistory: MAX_HISTORY })) } catch {}
 }
 // Empuja al worker los ajustes de Variables Generales que aplica en caliente
 // (concurrencia, tope de caché en disco, bitrate). El cliente está en
@@ -146,64 +152,20 @@ if (!existsSync(SOUNDS_DIR)) mkdirSync(SOUNDS_DIR, { recursive: true })
 // ── Estado por servidor (GuildSession) ──────────────────────────────────────
 // item de la cola: { url, title, duration, voiceChannelId, guildId, textChannelId }
 // TODO el estado de reproducción vive en una instancia por servidor de Discord.
-// (Migración multiservidor: por ahora se usa una sola sesión `S`; el enrutado
-//  por guildId se añade después. Ver lib/audio/* para mixer/worker/yt-dlp.)
-// Trabajo de fondo (metadata/carátula/pre-cacheo): corre SOLO cuando no hay un
-// stream de reproducción descargando → JAMÁS dos yt-dlp a la vez (regla estricta).
-// Gapless: al cerrar el yt-dlp de la canción actual (descarga terminada) se
-// dispara el pre-cacheo a DISCO de la siguiente; al terminar de sonar, ya está.
-class GuildSession {
-  constructor(guildId = null) {
-    this.guildId = guildId
-    this.queue = []
-    this.history = []
-    this.current = null
-    this.currentResource = null
-    this.prefetching = false        // el trabajo de fondo está activo
-    this.streamDownloading = false  // hay un yt-dlp de reproducción descargando (con extracción)
-    this.currentPlaying = false     // la canción actual YA suena (pasó la extracción inicial)
-    this.bgSongId = null            // id de la canción que el fondo está pre-cacheando
-    this.bgPromise = null           // promesa del pre-cacheo en curso (para esperarlo si toca)
-    this.playFailReason = null      // motivo si la canción actual no se pudo reproducir
-    this.seekOffset = 0             // segundos ya descartados por seek en el stream actual
-    this.seekTarget = 0             // desde dónde arrancar el próximo stream
-    this.transition = 'next'        // al quedar idle: next | previous | seek | stop
-    this.playing = false
-    this.connection = null
-    this.currentChannelId = null
-    this.currentChannelName = null
-    this.soundActive = 0
-    this.activeProcs = []
-    this.remoteAbort = null         // AbortController del fetch al worker (si USE_WORKER)
-    this.soundIdSeq = 0
-    this.activeSounds = new Map()   // id -> { file, proc, ov?, mixer?, direct? }
-    // Passthrough de Opus: música sola → Ogg/Opus del worker tal cual (sin ffmpeg
-    // ni encoder). Si hubo soundboard en los últimos SOUND_PCM_WINDOW_MS, se queda
-    // en mezcla PCM → cero cortes (prioridad soundboard).
-    this.opusDirect = false         // la canción actual suena en passthrough (sin mixer)
-    this.lastSoundAt = 0            // timestamp del último uso del soundboard
-    this.pendingSounds = []         // sonidos a soltar cuando el mixer PCM esté listo tras un switch
-    this.soundMixer = null
-    this.currentMixer = null
-    this.panelMsg = null            // mensaje del panel de control en el chat de Discord
-    this.currentDirectId = null
-    this.directResource = null
-    this.lastMusicVolumeAt = 0      // último cambio de volumen (cooldown)
-    this.musicVolume = musicVolume  // volumen de música POR SERVIDOR (sembrado del default global)
-    this.panelUpdateQueued = false
-    this.musicPlayer = createAudioPlayer()
-    this.soundPlayer = createAudioPlayer()
-    // Listeners por sesión: al quedar idle/errar el soundPlayer, limpia el sonido
-    // directo de ESTA sesión (finishDirectSound está hoisteada; corre tras la carga).
-    this.soundPlayer.on(AudioPlayerStatus.Idle, () => finishDirectSound(this))
-    this.soundPlayer.on('error', err => { console.error('sound:', err.message); finishDirectSound(this) })
-  }
-}
+// La clase está en lib/audio/guild-session.mjs (contenedor de estado puro); aquí
+// se le inyectan sus dependencias (players de @discordjs/voice, el volumen por
+// defecto y el callback de "sonido directo terminó" = finishDirectSound, que está
+// hoisteado y se referencia perezosamente en el closure).
+const GuildSession = defineGuildSession({
+  createAudioPlayer,
+  AudioPlayerStatus,
+  getDefaultMusicVolume: () => musicVolume,
+  onSoundIdle: (S) => finishDirectSound(S),
+})
 
 const metaBackfillTried = new Set() // ids de canciones ya intentadas en el backfill de metadata
 const artBackfillTried = new Set()  // ids ya intentadas en el backfill de carátula
 const BG_WORK_INTERVAL = 10000 // cada 10s intenta enriquecer/cachear de fondo
-const SOUND_PCM_WINDOW_MS = 5 * 60 * 1000 // sin sonidos por este tiempo → volver a Opus-directo
 
 // ── Registro de sesiones por servidor ───────────────────────────────────────
 // Una GuildSession por guild de Discord. La primera reutiliza la instancia `S`
@@ -861,7 +823,7 @@ async function ensurePlaying(S = activeSession()) {
       // de soundboard (si se usan sonidos seguimos en PCM para mezclarlos sin
       // cortes). Si el worker no puede extraer (geo-restricción), se cae al PCM.
       const wantOpusDirect = USE_WORKER && /^https?:\/\//i.test(S.current.url) &&
-        (Date.now() - S.lastSoundAt > SOUND_PCM_WINDOW_MS)
+        (Date.now() - S.lastSoundAt > soundPcmWindowMs)
       if (wantOpusDirect) {
         try {
           const raw = S.current.url
@@ -1605,6 +1567,16 @@ function cmdMusicBitrate(k) {
   return true
 }
 
+// Ventana (segundos) sin soundboard tras la cual la música vuelve a Opus-directo
+// (passthrough). 0 = sin ventana (vuelve a directo de inmediato). Máx 1 h. Aplica
+// a la SIGUIENTE canción que arranque.
+function cmdSoundPcmWindow(sec) {
+  if (typeof sec !== 'number' || isNaN(sec)) return false
+  soundPcmWindowMs = Math.round(Math.min(3600, Math.max(0, sec)) * 1000)
+  saveSettings()
+  return true
+}
+
 // Tope de la cola de música (1..500). No afecta lo ya encolado.
 function cmdMaxQueue(n) {
   if (typeof n !== 'number' || isNaN(n)) return false
@@ -1775,6 +1747,7 @@ function getState(S = activeSession()) {
     workerMaxConcurrency,
     workerCacheMaxGb,
     musicBitrateKbps,
+    soundPcmWindowMs,
     maxQueue: MAX_QUEUE,
     maxHistory: MAX_HISTORY,
   }
@@ -2177,6 +2150,10 @@ async function onHttp(req, res) {
         case '/api/music-bitrate': {
           if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)
           return sendJson({ ok: cmdMusicBitrate(body.kbps), musicBitrateKbps })
+        }
+        case '/api/sound-pcm-window': {
+          if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)
+          return sendJson({ ok: cmdSoundPcmWindow(body.seconds), soundPcmWindowMs })
         }
         case '/api/max-queue': {
           if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)
