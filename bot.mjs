@@ -1905,10 +1905,19 @@ const MUSIC_CONTROL_PATHS = new Set([
   '/api/sound', '/api/sound/stop',
 ])
 
+// Sesión que controla esta petición del panel: el guild elegido (header
+// X-Guild-Id o query ?g=) si el bot está en él; si no, la sesión activa.
+function sessionForReq(req) {
+  let gid = req.headers['x-guild-id']
+  if (!gid) { try { gid = new URL(req.url, 'http://x').searchParams.get('g') } catch {} }
+  if (gid && client.guilds.cache.has(gid)) return getSession(gid)
+  return activeSession()
+}
+
 http.createServer((req, res) =>
-  sessionCtx.run(activeSession(), () => onHttp(req, res))).listen(PORT, () => console.log(`Panel de control en el puerto ${PORT}`))
+  sessionCtx.run(sessionForReq(req), () => onHttp(req, res))).listen(PORT, () => console.log(`Panel de control en el puerto ${PORT}`))
 async function onHttp(req, res) {
-  const S = activeSession() // panel/web: sesión activa (interino hasta el selector de servidor)
+  const S = activeSession() // = sesión fijada por run() (guild elegido o activa)
   const sendJson = (data, status = 200) => {
     res.writeHead(status, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify(data))
@@ -1921,7 +1930,7 @@ async function onHttp(req, res) {
     res.setHeader('Access-Control-Allow-Origin', origin)
     res.setHeader('Access-Control-Allow-Credentials', 'true')
     res.setHeader('Vary', 'Origin')
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Guild-Id')
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS')
   }
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return }
@@ -1965,6 +1974,24 @@ async function onHttp(req, res) {
         const st = getState()
         st.canControl = canControlMusic(req)   // ¿este usuario puede tocar la música/sonidos?
         return sendJson(st)
+      }
+      if (path === '/api/guilds') {
+        // Servidores donde está el bot, con su estado, para el selector del panel.
+        const out = []
+        for (const g of client.guilds.cache.values()) {
+          const s = sessions.get(g.id)
+          out.push({
+            id: g.id,
+            name: g.name,
+            icon: g.iconURL?.({ size: 64 }) ?? null,
+            connected: !!(s && s.connection),
+            playing: !!(s && s.current),
+            current: s && s.current ? (s.current.title || s.current.url) : null,
+            queueLength: s ? s.queue.length : 0,
+          })
+        }
+        out.sort((a, b) => (b.connected - a.connected) || (b.playing - a.playing) || a.name.localeCompare(b.name))
+        return sendJson({ guilds: out, current: activeSession().guildId || null })
       }
       if (path === '/api/sounds') {
         const pu = panelUser(req)

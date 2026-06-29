@@ -61,6 +61,12 @@
   }
   .status-pill .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--danger); flex-shrink: 0; }
   .status-pill .dot.on { background: var(--ok); animation: pulse 2.2s infinite; }
+  /* Selector de servidor (multiservidor) */
+  .guild-select {
+    background: var(--panel); border: var(--border); color: var(--text);
+    padding: 9px 14px; border-radius: 999px; font-size: .85rem; cursor: pointer;
+    box-shadow: var(--shadow); max-width: 200px;
+  }
   /* Usuario logueado (arriba a la derecha) */
   .user-chip {
     display: none; align-items: center; gap: 9px;
@@ -839,6 +845,7 @@
       </div>
     </div>
     <div class="topbar-right">
+      <select id="guild-select" class="guild-select" title="Servidor de Discord a controlar" style="display:none"></select>
       <button id="view-toggle" class="view-toggle" title="Alternar entre vista dividida y pestañas"></button>
       <div class="status-pill">
         <span class="dot" id="conn-dot"></span><span id="conn-text">Desconectado del canal de voz</span>
@@ -1383,8 +1390,13 @@ async function webFetch(path, opts = {}) {
   return fetch(webUrl(path), { credentials: 'include', ...opts })
 }
 function botUrl(path) { return BOT_BASE + path }
+// Servidor (guild) que controla el panel. Se manda en cada petición; el bot
+// resuelve la sesión de ese servidor (o la activa si no se especifica).
+let selectedGuildId = localStorage.getItem('selectedGuildId') || null
 async function botFetch(path, opts = {}) {
-  return fetch(botUrl(path), { credentials: 'include', ...opts })
+  const headers = { ...(opts.headers || {}) }
+  if (selectedGuildId) headers['X-Guild-Id'] = selectedGuildId
+  return fetch(botUrl(path), { credentials: 'include', ...opts, headers })
 }
 async function loadMe() {
   try {
@@ -3741,11 +3753,42 @@ document.getElementById('folder-form').addEventListener('submit', async (e) => {
 
 document.getElementById('top-n').addEventListener('change', loadStats)
 
+// Selector de servidor (multiservidor). Solo aparece si el bot está en 2+ guilds.
+async function loadGuilds() {
+  let data
+  try { const res = await botFetch('/api/guilds'); data = await res.json() } catch { return }
+  if (!data || !Array.isArray(data.guilds)) return
+  const sel = document.getElementById('guild-select')
+  if (data.guilds.length <= 1) {
+    sel.style.display = 'none'
+    if (data.guilds[0] && !selectedGuildId) selectedGuildId = data.guilds[0].id
+    return
+  }
+  const ids = data.guilds.map(g => g.id)
+  if (!selectedGuildId || !ids.includes(selectedGuildId)) {
+    selectedGuildId = (data.current && ids.includes(data.current)) ? data.current : data.guilds[0].id
+    localStorage.setItem('selectedGuildId', selectedGuildId)
+  }
+  sel.innerHTML = data.guilds.map(g => {
+    const dot = g.connected ? '🔊 ' : (g.playing ? '▶ ' : '')
+    return `<option value="${g.id}">${dot}${esc(g.name)}</option>`
+  }).join('')
+  sel.value = selectedGuildId
+  sel.style.display = ''
+}
+document.getElementById('guild-select').addEventListener('change', (e) => {
+  selectedGuildId = e.target.value
+  localStorage.setItem('selectedGuildId', selectedGuildId)
+  refresh(); loadSounds(); loadVoiceChannels()
+})
+
 refresh()
 loadMe()
+loadGuilds()
 loadSounds()
 loadVoiceChannels()
 setInterval(refresh, 1000)
+setInterval(loadGuilds, 5000)
 setInterval(loadSounds, 5000)
 setInterval(loadVoiceChannels, 5000)
 // Refresca las estadísticas solo si la subpestaña está abierta (y eres admin).
