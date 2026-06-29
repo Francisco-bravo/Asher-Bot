@@ -2019,8 +2019,10 @@ async function onHttp(req, res) {
         const pu = panelUser(req)
         const uid = pu ? pu.id : null
         const admin = rbac.isAdmin(uid)
+        const gid = activeSession().guildId || null // servidor activo de esta petición
+        const other = new URL(req.url, 'http://x').searchParams.get('other') === '1'
         return sendJson(soundLib.tree(
-          soundLib.listForUser(uid), folders.listFor(uid, admin),
+          soundLib.listForUser(uid, gid, other), folders.listFor(uid, admin),
           folders.aliasesForUser(uid), folders.meta(), uid))
       }
       if (path === '/api/voice-channels') {

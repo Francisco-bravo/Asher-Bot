@@ -74,8 +74,8 @@
   .sp-inner .brand-logo { width: 56px; height: 56px; display: block; margin: 0 auto 18px; }
   .sp-title { text-align: center; font-size: 1.6rem; font-weight: 700; margin-bottom: 6px; }
   .sp-sub { text-align: center; color: var(--muted); margin-bottom: 28px; }
-  .sp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 16px; }
-  .sp-card { background: var(--panel); border: var(--border); border-radius: 14px; padding: 22px 18px; cursor: pointer; text-align: center; box-shadow: var(--shadow); transition: transform .1s ease, border-color .1s ease; }
+  .sp-grid { display: flex; flex-wrap: wrap; justify-content: center; gap: 16px; }
+  .sp-card { flex: 0 1 200px; max-width: 240px; background: var(--panel); border: var(--border); border-radius: 14px; padding: 22px 18px; cursor: pointer; text-align: center; box-shadow: var(--shadow); transition: transform .1s ease, border-color .1s ease; }
   .sp-card:hover { transform: translateY(-2px); border-color: var(--accent); }
   .sp-card img, .sp-card .sp-ph { width: 64px; height: 64px; border-radius: 50%; margin: 0 auto 12px; display: block; object-fit: cover; }
   .sp-card .sp-ph { background: var(--accent); color: #fff; font-size: 1.7rem; line-height: 64px; font-weight: 700; }
@@ -901,6 +901,7 @@
         <div class="sb-main">
           <div class="sb-search-row">
             <input type="text" id="sound-search" class="sound-search" placeholder="🔍 Buscar sonidos...">
+            <button class="sb-action" id="btn-other-servers" title="Mostrar también los sonidos públicos de otros servidores" style="display:none">🌐 Otros servidores</button>
             <button class="sb-action" id="btn-manage-sounds" title="Renombrar u ocultar sonidos (solo para ti)">⚙️ Administrar</button>
             <button class="sb-action" id="btn-new-folder" title="Crear una carpeta">📁 Nueva carpeta</button>
             <button class="sb-action primary" id="btn-upload-sound" title="Subir un sonido nuevo">⬆️ Subir sonido</button>
@@ -1409,7 +1410,9 @@ let me = null // perfil del usuario logueado (para saber si es admin)
 
 function webUrl(path) { return WEB_BASE + path }
 async function webFetch(path, opts = {}) {
-  return fetch(webUrl(path), { credentials: 'include', ...opts })
+  const headers = { ...(opts.headers || {}) }
+  if (selectedGuildId) headers['X-Guild-Id'] = selectedGuildId
+  return fetch(webUrl(path), { credentials: 'include', ...opts, headers })
 }
 function botUrl(path) { return BOT_BASE + path }
 // Servidor (guild) que controla el panel. Se manda en cada petición; el bot
@@ -2476,9 +2479,10 @@ function renderManageRenames(rows) {
   }).join('')
 }
 
+let showOtherServers = false
 async function loadSounds() {
   try {
-    const res = await botFetch('/api/sounds')
+    const res = await botFetch('/api/sounds' + (showOtherServers ? '?other=1' : ''))
     const text = await res.text()
     if (text === lastSoundsJSON) return // sin cambios: no re-renderizar
     lastSoundsJSON = text
@@ -3494,6 +3498,13 @@ function closeSoundModal() {
   document.getElementById('sound-form').reset()
 }
 document.getElementById('btn-upload-sound').addEventListener('click', openSoundModal)
+document.getElementById('btn-other-servers').addEventListener('click', (e) => {
+  showOtherServers = !showOtherServers
+  e.currentTarget.classList.toggle('on', showOtherServers)
+  e.currentTarget.textContent = showOtherServers ? '🌐 Ocultar otros' : '🌐 Otros servidores'
+  lastSoundsJSON = ''   // forzar re-render
+  loadSounds()
+})
 document.getElementById('sound-cancel').addEventListener('click', closeSoundModal)
 // Al elegir un archivo, prepara el recortador (y autocompleta el nombre).
 document.getElementById('sound-file').addEventListener('change', async (e) => {
@@ -3781,11 +3792,14 @@ async function loadGuilds() {
   try { const res = await botFetch('/api/guilds'); data = await res.json() } catch { return }
   if (!data || !Array.isArray(data.guilds)) return
   const sel = document.getElementById('guild-select')
+  const btnOther = document.getElementById('btn-other-servers')
   if (data.guilds.length <= 1) {
     sel.style.display = 'none'
+    if (btnOther) btnOther.style.display = 'none'
     if (data.guilds[0] && !selectedGuildId) selectedGuildId = data.guilds[0].id
     return
   }
+  if (btnOther) btnOther.style.display = ''
   const ids = data.guilds.map(g => g.id)
   if (!selectedGuildId || !ids.includes(selectedGuildId)) {
     selectedGuildId = (data.current && ids.includes(data.current)) ? data.current : data.guilds[0].id

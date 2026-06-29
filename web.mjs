@@ -263,7 +263,7 @@ http.createServer(async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', origin)
     res.setHeader('Access-Control-Allow-Credentials', 'true')
     res.setHeader('Vary', 'Origin')
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Guild-Id')
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS')
   }
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return }
@@ -390,11 +390,14 @@ http.createServer(async (req, res) => {
       // Cualquiera puede subir público o privado. Pero si la carpeta es privada,
       // el sonido queda privado (la carpeta gobierna su subárbol).
       if (folders.isPrivatePath(folder, folders.meta())) visibility = 'private'
+      // Servidor activo (multiservidor): el sonido nace ligado a ESE servidor.
+      // NULL = transversal (single-server o sin selección) → visible en todos.
+      const guildId = req.headers['x-guild-id'] || url.searchParams.get('g') || null
       const buffer = await readBody(req)
       if (!buffer.length) return send(res, 400, { error: 'Cuerpo vacío' })
       const dur = await checkSoundDuration(buffer, ext)
       if (!dur.ok) return send(res, 400, { error: `El sonido dura ${(dur.durationMs / 1000).toFixed(1)} s; el máximo es ${dur.maxSeconds} s. Recórtalo antes de subirlo.` })
-      const s = await sounds.upload({ ownerUserId: user.id, label, folder, ext, buffer, durationMs: dur.durationMs, visibility })
+      const s = await sounds.upload({ ownerUserId: user.id, label, folder, ext, buffer, durationMs: dur.durationMs, visibility, guildId })
       return send(res, 201, { id: s.id, label: s.label, folder: s.folder, visibility: s.visibility })
     }
 
