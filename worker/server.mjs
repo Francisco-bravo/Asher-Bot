@@ -423,8 +423,12 @@ const server = http.createServer(async (req, res) => {
       if (!needSrc()) return
       const { key, url } = await resolveKeyAndUrl(src)
       if (existsSync(audioPath(key))) { touch(key); return sendJson(res, 200, { cached: true }) }
-      await downloadToCache(url, key)
-      return sendJson(res, 200, { cached: true })
+      try {
+        await downloadToCache(url, key)
+        return sendJson(res, 200, { cached: true })
+      } catch (e) {
+        return sendJson(res, 500, { error: e.message })
+      }
     }
 
     if (p === '/keep' && req.method === 'POST') {
