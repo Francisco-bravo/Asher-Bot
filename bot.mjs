@@ -835,8 +835,11 @@ async function ensurePlaying(S = activeSession()) {
       // Passthrough de Opus: solo con worker, fuente URL y SIN actividad reciente
       // de soundboard (si se usan sonidos seguimos en PCM para mezclarlos sin
       // cortes). Si el worker no puede extraer (geo-restricción), se cae al PCM.
+      // Opus directo NO se usa si el volumen de música está ajustado (≠100%):
+      // el passthrough bypasea el mixer donde se aplica S.musicVolume.
       const wantOpusDirect = USE_WORKER && /^https?:\/\//i.test(S.current.url) &&
-        (Date.now() - S.lastSoundAt > soundPcmWindowMs)
+        (Date.now() - S.lastSoundAt > soundPcmWindowMs) &&
+        S.musicVolume === 1
       if (wantOpusDirect) {
         try {
           const raw = S.current.url
@@ -1581,7 +1584,15 @@ function cmdMusicVolume(v, S = activeSession()) {
   if (typeof v !== 'number' || isNaN(v)) return false
   if (musicVolumeCooldownLeft(S) > 0) return false // limitado: aún en enfriamiento
   S.lastMusicVolumeAt = Date.now()
+  const prev = S.musicVolume
   S.musicVolume = Math.round(Math.min(2, Math.max(0, v)) * 100) / 100
+  // Si estaba en passthrough Opus y el volumen deja de ser 1, reiniciar en PCM
+  // para que el mixer pueda aplicar el volumen desde el inicio del siguiente chunk.
+  if (S.opusDirect && prev === 1 && S.musicVolume !== 1 && S.current && S.currentPlaying) {
+    S.transition = 'seek'
+    S.seekTarget = elapsed(S)
+    S.musicPlayer.stop()
+  }
   return true
 }
 
