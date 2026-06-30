@@ -1390,6 +1390,7 @@
         </label>
         <div class="modal-actions">
           <button type="button" class="cancel" id="folder-cancel">Cancelar</button>
+          <button type="button" class="danger" id="folder-delete" style="display:none" title="Eliminar carpeta">🗑️ Eliminar</button>
           <button type="submit" id="folder-submit">Crear</button>
         </div>
       </form>
@@ -3964,6 +3965,7 @@ function openFolderModal(editPath = null) {
   const colorInp = document.getElementById('folder-color')
   const visSel = document.getElementById('folder-visibility')
   const submit = document.getElementById('folder-submit')
+  const deleteBtn = document.getElementById('folder-delete')
   if (editPath) {
     const node = findNode(soundData, editPath)
     const canProps = isAdmin || (node && node.mine)   // color/visibilidad: dueño o admin
@@ -3980,6 +3982,14 @@ function openFolderModal(editPath = null) {
     document.getElementById('folder-color-row').style.display = canProps ? '' : 'none'
     document.getElementById('folder-visibility-row').style.display = canProps ? '' : 'none'
     submit.textContent = 'Guardar'
+    if (isAdmin) {
+      const isEmpty = !node || allSounds(node).length === 0
+      deleteBtn.style.display = ''
+      deleteBtn.disabled = !isEmpty
+      deleteBtn.title = isEmpty ? 'Eliminar esta carpeta (vacía)' : 'No se puede eliminar: la carpeta contiene sonidos'
+    } else {
+      deleteBtn.style.display = 'none'
+    }
   } else {
     title.textContent = 'Nueva carpeta'
     desc.innerHTML = 'Se crea <b>dentro de la carpeta seleccionada</b> (raíz si estás en "Todos los sonidos"). Elige color y si es pública o privada.'
@@ -3991,6 +4001,7 @@ function openFolderModal(editPath = null) {
     document.getElementById('folder-color-row').style.display = ''
     document.getElementById('folder-visibility-row').style.display = ''
     submit.textContent = 'Crear'
+    deleteBtn.style.display = 'none'
   }
   document.getElementById('folder-modal').style.display = 'flex'
   nameInp.focus()
@@ -4004,6 +4015,27 @@ document.getElementById('btn-new-folder').addEventListener('click', () => openFo
 document.getElementById('folder-cancel').addEventListener('click', closeFolderModal)
 document.getElementById('folder-modal').addEventListener('click', (e) => {
   if (e.target.id === 'folder-modal') closeFolderModal()
+})
+document.getElementById('folder-delete').addEventListener('click', async () => {
+  if (!folderEditPath) return
+  const leaf = folderEditPath.split('/').pop()
+  if (!confirm(`¿Eliminar la carpeta "${leaf}"? Esta acción no se puede deshacer.`)) return
+  const btn = document.getElementById('folder-delete')
+  btn.disabled = true; btn.textContent = 'Eliminando...'
+  try {
+    const r = await webFetch('/api/folder-delete', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: folderEditPath }),
+    })
+    if (!r.ok) { const d = await r.json().catch(() => ({})); toast(d.error || 'No se pudo eliminar'); return }
+    toast('Carpeta eliminada ✓')
+    if (selectedPath === folderEditPath || selectedPath.startsWith(folderEditPath + '/')) selectedPath = ''
+    closeFolderModal()
+    lastSoundsJSON = null
+    await loadSounds()
+    populateFolderSelects()
+  } catch { toast('No se pudo eliminar la carpeta') }
+  finally { btn.disabled = false; btn.textContent = '🗑️ Eliminar' }
 })
 document.getElementById('folder-form').addEventListener('submit', async (e) => {
   e.preventDefault()
@@ -4020,17 +4052,22 @@ document.getElementById('folder-form').addEventListener('submit', async (e) => {
       const isAdmin = (me.roles || []).includes('admin')
       const canProps = isAdmin || (node && node.mine)
       const curName = node ? (node.display || node.name) : folderEditPath.split('/').pop()
+      // effectivePath se actualiza al nuevo path si hay rename (el path viejo deja
+      // de existir en DB, usar el viejo para folder-props crearía una carpeta fantasma)
+      let effectivePath = folderEditPath
       if (name !== curName) {
         const r = await webFetch('/api/folder-rename', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ path: folderEditPath, name }),
         })
         if (!r.ok) { const d = await r.json().catch(() => ({})); toast(d.error || 'No se pudo renombrar'); return }
+        const d = await r.json().catch(() => ({}))
+        if (d.path) effectivePath = d.path
       }
       if (canProps) {
         const r = await webFetch('/api/folder-props', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ path: folderEditPath, color, visibility }),
+          body: JSON.stringify({ path: effectivePath, color, visibility }),
         })
         if (!r.ok) { const d = await r.json().catch(() => ({})); toast(d.error || 'No se pudo guardar'); return }
       }

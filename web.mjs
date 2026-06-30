@@ -434,6 +434,14 @@ http.createServer(async (req, res) => {
       } catch (e) { return send(res, 400, { error: e.message }) }
     }
 
+    if (req.method === 'POST' && path === '/api/folder-delete') {
+      if (!rbac.isAdmin(user.id, guildId)) return send(res, 403, { error: 'Solo un administrador puede eliminar carpetas' })
+      const body = JSON.parse((await readBody(req)).toString() || '{}')
+      if (!body.path) return send(res, 400, { error: 'Falta path' })
+      try { folders.deleteFolder(body.path); return send(res, 200, { ok: true }) }
+      catch (e) { return send(res, 400, { error: e.message }) }
+    }
+
     // Gestión (solo admin): árbol completo de TODOS los sonidos (incl. ocultos)
     // para administrarlos junto a las carpetas.
     if (req.method === 'GET' && path === '/api/sound-admin') {
