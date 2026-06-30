@@ -54,16 +54,25 @@ const META_DIR = join(DATA_DIR, 'meta')
 const INDEX_FILE = join(DATA_DIR, 'index.json')
 for (const d of [DATA_DIR, AUDIO_DIR, ART_DIR, META_DIR]) { try { mkdirSync(d, { recursive: true }) } catch {} }
 
+// Cookies persistentes: se guardan en el volumen de datos (sobreviven reinicios).
+// Preferimos /data/cookies.txt (subido vía panel) sobre la variable COOKIES_FILE.
+const COOKIES_DATA = join(DATA_DIR, 'cookies.txt')
 // yt-dlp reescribe el cookie jar al salir; si el archivo está montado read-only
 // falla con OSError y sale con código != 0 (aunque la descarga sea correcta).
-// Copiamos las cookies a una ruta escribible y apuntamos yt-dlp ahí. El montaje
-// original sigue :ro y seguro; las cookies refrescadas viven en /tmp (efímeras,
-// se re-siembran del montaje en cada arranque).
-let COOKIES_RW = COOKIES
-if (existsSync(COOKIES)) {
-  try { COOKIES_RW = '/tmp/cookies.txt'; copyFileSync(COOKIES, COOKIES_RW) }
-  catch { COOKIES_RW = COOKIES }
+// Copiamos las cookies a una ruta escribible. Si hay cookies en /data (subidas vía
+// panel) las usamos directamente (ya son escribibles); si no, copiamos las del montaje.
+let COOKIES_RW = ''
+function reloadCookies() {
+  if (existsSync(COOKIES_DATA)) {
+    COOKIES_RW = COOKIES_DATA  // en /data → ya escribible, yt-dlp puede refrescarlas
+  } else if (existsSync(COOKIES)) {
+    try { COOKIES_RW = '/tmp/cookies.txt'; copyFileSync(COOKIES, COOKIES_RW) }
+    catch { COOKIES_RW = COOKIES }
+  } else {
+    COOKIES_RW = ''
+  }
 }
+reloadCookies()
 
 // Clave estable por fuente: las URLs directas se hashean tal cual; el bot SIEMPRE
 // pasa la URL canónica (resuelta antes con /meta), así audio/art/meta comparten clave.
@@ -509,6 +518,26 @@ const server = http.createServer(async (req, res) => {
         concurrency: MAX_CONC, active, queued: waiters.length,
         maxGb: +(MAX_BYTES / 1024 ** 3).toFixed(1), bitrate: MUSIC_BITRATE,
       })
+    }
+
+    // Cookies de YouTube: subir/consultar. Persisten en /data/cookies.txt.
+    if (p === '/cookies/status' && req.method === 'GET') {
+      const path = existsSync(COOKIES_DATA) ? COOKIES_DATA : (existsSync(COOKIES) ? COOKIES : null)
+      if (!path) return sendJson(res, 200, { exists: false })
+      const st = statSync(path)
+      return sendJson(res, 200, { exists: true, size: st.size, mtime: st.mtimeMs, path })
+    }
+    if (p === '/cookies' && req.method === 'POST') {
+      const chunks = []; let size = 0
+      for await (const c of req) { size += c.length; if (size > 2 * 1024 * 1024) break; chunks.push(c) }
+      if (size > 2 * 1024 * 1024) { res.writeHead(413); return res.end('too large') }
+      const content = Buffer.concat(chunks).toString('utf8').trim()
+      if (!content) { return sendJson(res, 400, { error: 'Contenido vacío' }) }
+      writeFileSync(COOKIES_DATA, content + '\n', 'utf8')
+      reloadCookies()
+      console.log(`cookies actualizadas (${content.length} bytes) → ${COOKIES_RW}`)
+      const st = statSync(COOKIES_DATA)
+      return sendJson(res, 200, { ok: true, size: st.size })
     }
 
     if (p === '/stream-logs' && req.method === 'GET') {

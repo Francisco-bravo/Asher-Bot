@@ -10,7 +10,7 @@ import {
 import { spawn } from 'node:child_process'
 import {
   readdirSync, existsSync, mkdirSync, readFileSync, writeFileSync,
-  createWriteStream, chmodSync, renameSync, rmSync
+  createWriteStream, chmodSync, renameSync, rmSync, statSync,
 } from 'node:fs'
 import { join, extname, dirname, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -33,7 +33,8 @@ import { MixerStream, SoundMixer } from './lib/audio/mixer.mjs'
 import { defineGuildSession } from './lib/audio/guild-session.mjs'
 import {
   USE_WORKER, workerHeaders, workerAudioUrl, workerMeta, workerEnsure,
-  workerKeep, workerPlaylist, workerCachedKeys, pushWorkerConfig as wcPushWorkerConfig,
+  workerKeep, workerPlaylist, workerCachedKeys, workerUploadCookies, workerCookiesStatus,
+  pushWorkerConfig as wcPushWorkerConfig,
 } from './lib/worker-client.mjs'
 import { createHash } from 'node:crypto'
 import {
@@ -2154,6 +2155,15 @@ async function onHttp(req, res) {
         if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)
         return sendJson({ ...bulkCache })
       }
+      if (path === '/api/admin/cookies/status') {
+        const pu = panelUser(req)
+        if (!pu || !rbac.isSuper(pu.id)) return sendJson({ error: 'Solo el super administrador' }, 403)
+        const botSt = existsSync(COOKIES)
+          ? (() => { const s = statSync(COOKIES); return { exists: true, size: s.size, mtime: s.mtimeMs } })()
+          : { exists: false }
+        const workerSt = await workerCookiesStatus().catch(() => null)
+        return sendJson({ bot: botSt, worker: workerSt })
+      }
     }
     if (req.method === 'POST') {
       const body = await readBody(req)
@@ -2185,6 +2195,23 @@ async function onHttp(req, res) {
           }
           runBulkCache().catch(e => console.error('[bulk-cache] error inesperado:', e.message))
           return sendJson({ ok: true, started: true })
+        }
+        case '/api/admin/cookies': {
+          const pu = panelUser(req)
+          if (!pu || !rbac.isSuper(pu.id)) return sendJson({ error: 'Solo el super administrador' }, 403)
+          const raw = body && typeof body === 'object' && body.content ? body.content : null
+          if (!raw || !raw.trim()) return sendJson({ error: 'Contenido de cookies vacío' }, 400)
+          const content = raw.trim()
+          // Guardar en el bot (yt-dlp local, fallback)
+          writeFileSync(COOKIES, content + '\n', 'utf8')
+          console.log(`[cookies] guardadas localmente (${content.length} bytes)`)
+          // Empujar al worker
+          const result = { bot: true, worker: false, workerError: null }
+          if (USE_WORKER) {
+            try { await workerUploadCookies(content); result.worker = true }
+            catch (e) { result.workerError = e.message; console.warn('[cookies] worker:', e.message) }
+          }
+          return sendJson({ ok: true, ...result })
         }
         // Resuelve un link/búsqueda a una canción de la Biblioteca (sin reproducir
         // ni cachear), para agregarla a una playlist. No requiere canal de voz.

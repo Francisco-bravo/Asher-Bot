@@ -917,12 +917,30 @@
       </div>
       <button class="admin-menu-item" data-asec="cache">💾 Caché</button>
       <button class="admin-menu-item" data-asec="users">👥 Usuarios</button>
+      <button class="admin-menu-item" data-asec="cookies" id="admin-menu-cookies" style="display:none">🍪 Cookies</button>
     </nav>
     <div class="admin-content">
       <div class="admin-sec active" id="admin-sec-vars-sound"></div>
       <div class="admin-sec" id="admin-sec-vars-music"></div>
       <div class="admin-sec" id="admin-sec-cache"></div>
       <div class="admin-sec" id="admin-sec-users"></div>
+      <div class="admin-sec" id="admin-sec-cookies">
+        <div class="page-head">🍪 Cookies de YouTube</div>
+        <p class="hint" style="margin:0 0 16px">
+          Las cookies permiten que yt-dlp descargue canciones con restricción de edad,
+          privadas o de YouTube Music. Exporta tu sesión con la extensión
+          <b>Get cookies.txt LOCALLY</b> y súbela aquí. Las cookies se guardan en el
+          bot (fallback local) y en el worker (descarga principal). Solo el super admin puede hacer esto.
+        </p>
+        <div id="cookies-status" style="margin-bottom:16px"></div>
+        <div class="add-row" style="align-items:flex-start;gap:10px;flex-wrap:wrap">
+          <label style="flex:1;min-width:220px">
+            <span style="display:block;font-weight:600;margin-bottom:6px">Archivo cookies.txt</span>
+            <input type="file" id="cookies-file" accept=".txt,text/plain" style="width:100%">
+          </label>
+          <button id="cookies-upload-btn" onclick="uploadCookies()" style="align-self:flex-end">⬆️ Subir cookies</button>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -4266,11 +4284,74 @@ function setupAdminScreen() {
     menu.style.display = menu.style.display === 'none' ? 'block' : 'none'
   })
   document.addEventListener('click', () => { menu.style.display = 'none' })
+  // Mostrar sección Cookies solo si es super admin
+  if (me && me.isSuper) {
+    const cookiesMenu = document.getElementById('admin-menu-cookies')
+    if (cookiesMenu) cookiesMenu.style.display = ''
+  }
+
+  document.getElementById('admin-menu-cookies')?.addEventListener('click', loadCookiesStatus)
+
   document.getElementById('user-menu-admin').addEventListener('click', () => {
     menu.style.display = 'none'
     document.getElementById('admin-screen').style.display = 'flex'
     loadMusic(); loadUsers()   // refrescar contenido al abrir
   })
+}
+
+// ── Cookies de YouTube ──────────────────────────────────────────────────────
+async function loadCookiesStatus() {
+  const box = document.getElementById('cookies-status')
+  if (!box) return
+  box.innerHTML = '<p class="empty">Cargando...</p>'
+  try {
+    const res = await botFetch('/api/admin/cookies/status')
+    if (!res.ok) { box.innerHTML = '<p class="empty">Error al cargar estado</p>'; return }
+    const d = await res.json()
+    const fmt = ms => ms ? new Date(ms).toLocaleString('es-CL') : '–'
+    const fmtSz = b => b >= 1024 ? (b / 1024).toFixed(1) + ' KB' : b + ' B'
+    const row = (label, st) => {
+      if (!st) return `<tr><td><b>${label}</b></td><td colspan="2" style="color:var(--muted)">no disponible</td></tr>`
+      return st.exists
+        ? `<tr><td><b>${label}</b></td><td style="color:#3fb950">✓ ${fmtSz(st.size)}</td><td style="color:var(--muted);font-size:.85rem">${fmt(st.mtime)}</td></tr>`
+        : `<tr><td><b>${label}</b></td><td style="color:var(--muted)">Sin cookies</td><td></td></tr>`
+    }
+    box.innerHTML = `<table style="border-collapse:collapse;width:100%;max-width:480px">
+      <thead><tr><th style="text-align:left;padding:4px 10px 4px 0;opacity:.6">Destino</th><th style="text-align:left;padding:4px 10px 4px 0;opacity:.6">Estado</th><th style="text-align:left;padding:4px 0;opacity:.6">Actualizado</th></tr></thead>
+      <tbody>
+        ${row('Bot (local)', d.bot)}
+        ${row('Worker (CX33)', d.worker)}
+      </tbody>
+    </table>`
+  } catch { box.innerHTML = '<p class="empty">No se pudo cargar el estado</p>' }
+}
+
+async function uploadCookies() {
+  const input = document.getElementById('cookies-file')
+  const btn = document.getElementById('cookies-upload-btn')
+  if (!input.files.length) { toast('Elige un archivo cookies.txt'); return }
+  const file = input.files[0]
+  if (file.size > 2 * 1024 * 1024) { toast('El archivo es demasiado grande (máx 2 MB)'); return }
+  const content = await file.text()
+  if (!content.trim()) { toast('El archivo está vacío'); return }
+  btn.disabled = true; btn.textContent = 'Subiendo...'
+  try {
+    const res = await botFetch('/api/admin/cookies', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+    })
+    const d = await res.json().catch(() => ({}))
+    if (!res.ok) { toast(d.error || 'Error al subir'); return }
+    const parts = []
+    if (d.bot) parts.push('bot ✓')
+    if (d.worker) parts.push('worker ✓')
+    if (d.workerError) parts.push('worker ✗: ' + d.workerError)
+    toast('Cookies guardadas — ' + parts.join(', '))
+    input.value = ''
+    await loadCookiesStatus()
+  } catch { toast('No se pudo contactar al bot') }
+  finally { btn.disabled = false; btn.textContent = '⬆️ Subir cookies' }
 }
 setupAdminScreen()
 
