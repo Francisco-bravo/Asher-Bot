@@ -340,7 +340,7 @@ function startRemoteStream(item, seekSec, song, S = activeSession()) {
       })
       if (!res.ok || !res.body) throw new Error(`worker HTTP ${res.status}`)
       const web = Readable.fromWeb(res.body)
-      web.on('error', () => {})
+      web.on('error', () => { S.streamDownloading = false; try { ff.stdin.destroy() } catch {} })
       web.pipe(ff.stdin)
       web.on('end', () => {
         S.streamDownloading = false
@@ -842,7 +842,7 @@ async function ensurePlaying(S = activeSession()) {
           const raw = S.current.url
           const s = musicCache.findByUrl(raw) || musicCache.upsertSong({ sourceUrl: raw, title: S.current.title })
           S.current.songId = s.id
-          S.currentResource = await startRemoteOpusResource({ ...current, url: raw }, S.seekOffset)
+          S.currentResource = await startRemoteOpusResource({ ...S.current, url: raw }, S.seekOffset)
           S.opusDirect = true
           console.log('  ↳ passthrough Opus (sin decodificar)')
         } catch (e) {
@@ -872,8 +872,8 @@ async function ensurePlaying(S = activeSession()) {
             const s = song || musicCache.upsertSong({ sourceUrl: raw, title: S.current.title })
             S.current.songId = s.id
             stream = USE_WORKER
-              ? startRemoteStream({ ...current, url: raw }, S.seekOffset, s)
-              : startStreamAndCache({ ...current, url: raw }, S.seekOffset, s)
+              ? startRemoteStream({ ...S.current, url: raw }, S.seekOffset, s)
+              : startStreamAndCache({ ...S.current, url: raw }, S.seekOffset, s)
           } else {
             // Término de búsqueda: stream directo (yt-dlp resuelve y reproduce en una
             // sola pasada). El cacheo/resolución lo hará el proceso de inactividad.
