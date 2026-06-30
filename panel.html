@@ -1247,6 +1247,11 @@
         <button onclick="forceCacheUrl()">⬇️ Forzar caché</button>
       </div>
       <button class="sb-action primary" id="btn-upload-song">⬆️ Subir canción permanente</button>
+      <button class="sb-action" id="btn-cache-all" onclick="toggleBulkCache()">⏬ Cachear todo</button>
+    </div>
+    <div id="bulk-cache-bar" style="display:none;margin:10px 0 4px;background:var(--panel2);border-radius:8px;padding:10px 14px;align-items:center;gap:10px;flex-wrap:wrap">
+      <span id="bulk-cache-status" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.9rem"></span>
+      <span id="bulk-cache-count" style="font-variant-numeric:tabular-nums;font-size:.9rem;white-space:nowrap;opacity:.75"></span>
     </div>
     <p class="hint" style="margin:12px 0 16px">
       <b>Forzar caché</b>: descarga la canción ya para que suene al instante (puede evictarse luego).
@@ -2946,6 +2951,12 @@ async function loadMusic() {
     renderMusicList(musicSongs)   // pestaña 💾 Caché (solo admin)
     renderLibrary()               // Música › Biblioteca (todos)
     loadPlaylists()               // Música › Biblioteca › Playlists
+    // Si hay un bulk cache corriendo (abrió la pestaña en medio del job), arranca el polling
+    if (!bulkCacheTimer) {
+      botFetch('/api/music/cache-all/status').then(r => r.json()).then(st => {
+        if (st && st.running) startBulkCachePolling()
+      }).catch(() => {})
+    }
   } catch { cacheBox.innerHTML = '<p class="empty">No se pudo cargar.</p>' }
 }
 
@@ -3442,6 +3453,64 @@ async function saveSongTitle() {
 async function playSong(id) {
   const data = await api('/api/music/play', { id })
   if (data && data.ok) toast('Agregado a la cola ✓')
+}
+
+// ── Cacheo masivo ──────────────────────────────────────────────────────────
+let bulkCacheTimer = null
+
+async function toggleBulkCache() {
+  const btn = document.getElementById('btn-cache-all')
+  btn.disabled = true
+  try {
+    const res = await botFetch('/api/music/cache-all', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+    const d = await res.json().catch(() => ({}))
+    if (!res.ok) { toast(d.error || 'Error'); return }
+    if (d.started) {
+      startBulkCachePolling()
+    } else if (d.stopped) {
+      toast('Deteniendo...')
+    }
+  } catch { toast('No se pudo contactar al bot') }
+  finally { btn.disabled = false }
+}
+
+function startBulkCachePolling() {
+  if (bulkCacheTimer) return
+  bulkCacheTimer = setInterval(pollBulkCache, 2000)
+  pollBulkCache()
+}
+
+async function pollBulkCache() {
+  try {
+    const res = await botFetch('/api/music/cache-all/status')
+    if (!res.ok) return
+    const st = await res.json()
+    const btn = document.getElementById('btn-cache-all')
+    const bar = document.getElementById('bulk-cache-bar')
+    const statusEl = document.getElementById('bulk-cache-status')
+    const countEl = document.getElementById('bulk-cache-count')
+    if (st.running) {
+      btn.textContent = '⏹ Detener cacheo'
+      bar.style.display = 'flex'
+      statusEl.textContent = st.current ? `⏬ ${st.current}` : '⏬ Preparando...'
+      countEl.textContent = st.total > 0 ? `${st.done}/${st.total}${st.errors ? ` · ${st.errors} err` : ''}` : ''
+    } else {
+      btn.textContent = '⏬ Cachear todo'
+      if (st.done > 0 || st.errors > 0 || st.total > 0) {
+        bar.style.display = 'flex'
+        const label = st.total === 0 ? 'Nada que cachear ✓'
+          : st.abort ? `Detenido — ${st.done} cacheadas${st.errors ? `, ${st.errors} errores` : ''}`
+          : `Completado — ${st.done} cacheadas${st.errors ? `, ${st.errors} errores` : ''}`
+        statusEl.textContent = label
+        countEl.textContent = ''
+        loadMusic()
+      } else {
+        bar.style.display = 'none'
+      }
+      clearInterval(bulkCacheTimer)
+      bulkCacheTimer = null
+    }
+  } catch {}
 }
 
 // Cache-busting de las carátulas tras actualizarlas (el navegador cachea /art/:id).

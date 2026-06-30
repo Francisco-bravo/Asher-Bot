@@ -33,8 +33,9 @@ import { MixerStream, SoundMixer } from './lib/audio/mixer.mjs'
 import { defineGuildSession } from './lib/audio/guild-session.mjs'
 import {
   USE_WORKER, workerHeaders, workerAudioUrl, workerMeta, workerEnsure,
-  workerKeep, workerPlaylist, pushWorkerConfig as wcPushWorkerConfig,
+  workerKeep, workerPlaylist, workerCachedKeys, pushWorkerConfig as wcPushWorkerConfig,
 } from './lib/worker-client.mjs'
+import { createHash } from 'node:crypto'
 import {
   initYtdlp, trackBg, untrackBg, killBgYtdlp, ytdlpArgs,
   ensureYtDlp, ytdlpPrint, ytdlpResolveMetaLocal, ytdlpFlatPlaylistLocal,
@@ -624,6 +625,44 @@ async function forceCacheAudio(item) {
   await musicCache.ensureCached(song, destPath => downloadToFile(sourceUrl, destPath))
   await ensureSongArt(song, sourceUrl) // al forzar caché, también traemos la carátula
   return song
+}
+
+// ── Cacheo masivo ("cachear todo") ─────────────────────────────────────────
+const sha1hex = s => createHash('sha1').update(s).digest('hex')
+let bulkCache = { running: false, abort: false, done: 0, total: 0, errors: 0, current: null }
+
+async function runBulkCache() {
+  bulkCache = { running: true, abort: false, done: 0, total: 0, errors: 0, current: null }
+  try {
+    const allSongs = musicCache.listAll()
+    const httpSongs = allSongs.filter(s => /^https?:\/\//i.test(s.source_url))
+    let uncached
+    if (USE_WORKER) {
+      const wk = await workerCachedKeys()
+      if (bulkCache.abort) return
+      uncached = httpSongs.filter(s => !wk.has(sha1hex(s.source_url)))
+    } else {
+      uncached = httpSongs.filter(s => !musicCache.hasLocal(s))
+    }
+    bulkCache.total = uncached.length
+    console.log(`[bulk-cache] iniciando: ${uncached.length} canciones sin caché`)
+    for (const song of uncached) {
+      if (bulkCache.abort) break
+      bulkCache.current = song.title || song.source_url
+      try {
+        await forceCacheAudio({ url: song.source_url, title: song.title })
+        bulkCache.done++
+      } catch (e) {
+        bulkCache.errors++
+        console.warn(`[bulk-cache] ✗ "${song.title || song.source_url}": ${e.message}`)
+      }
+    }
+    const reason = bulkCache.abort ? 'detenido' : 'completado'
+    console.log(`[bulk-cache] ${reason} — OK: ${bulkCache.done}, errores: ${bulkCache.errors}`)
+  } finally {
+    bulkCache.running = false
+    bulkCache.current = null
+  }
 }
 
 // Resuelve la canción de un item SIN gastar yt-dlp si ya se conoce (songId o URL
@@ -2111,6 +2150,10 @@ async function onHttp(req, res) {
         if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)
         return sendJson(listVoiceChannels())
       }
+      if (path === '/api/music/cache-all/status') {
+        if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)
+        return sendJson({ ...bulkCache })
+      }
     }
     if (req.method === 'POST') {
       const body = await readBody(req)
@@ -2133,6 +2176,15 @@ async function onHttp(req, res) {
           const resolved = await resolveInput(body.url)
           const song = await forceCacheAudio({ url: resolved.url, title: resolved.title })
           return sendJson({ ok: true, id: song.id, title: song.title })
+        }
+        case '/api/music/cache-all': {
+          if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)
+          if (bulkCache.running) {
+            bulkCache.abort = true
+            return sendJson({ ok: true, stopped: true })
+          }
+          runBulkCache().catch(e => console.error('[bulk-cache] error inesperado:', e.message))
+          return sendJson({ ok: true, started: true })
         }
         // Resuelve un link/búsqueda a una canción de la Biblioteca (sin reproducir
         // ni cachear), para agregarla a una playlist. No requiere canal de voz.
