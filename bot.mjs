@@ -897,7 +897,7 @@ async function ensurePlaying(S = activeSession()) {
       // Cuando el audio EMPIEZA a sonar (pasó la extracción inicial), se habilita el
       // enriquecido en paralelo (metadata + carátula) aunque el stream siga bajando.
       // Además se sueltan los sonidos que esperaban el switch a PCM (si los hubo).
-      S.musicPlayer.once(AudioPlayerStatus.Playing, () => { S.currentPlaying = true; flushPendingSounds(S); backgroundWork(S) })
+      S.musicPlayer.once(AudioPlayerStatus.Playing, () => { S.currentPlaying = true; updatePanel(); flushPendingSounds(S); backgroundWork(S) })
 
       const err = await waitIdle(S.musicPlayer)
       const reachedPlaying = S.currentPlaying // ¿llegó a sonar antes de quedar idle?
@@ -1171,11 +1171,13 @@ function progressBar(S = activeSession()) {
 
 function panelPayload(S = activeSession()) {
   const paused = S.musicPlayer.state.status === AudioPlayerStatus.Paused
+  const loading = !!(S.current && !S.currentPlaying)
   const lines = []
   if (S.current) {
-    lines.push(`${paused ? '⏸' : '▶'} **${S.current.title}**`)
+    lines.push(`${loading ? '⏳' : paused ? '⏸' : '▶'} **${S.current.title}**`)
+    if (loading) lines.push('`Cargando...`')
     const bar = progressBar()
-    if (bar) lines.push(bar)
+    if (!loading && bar) lines.push(bar)
   } else {
     lines.push('Nada reproduciéndose')
   }
@@ -1191,19 +1193,19 @@ function panelPayload(S = activeSession()) {
   const volFooter = `Volumen música: ${Math.round(S.musicVolume * 100)}%`
   embed.setFooter({ text: (S.currentChannelName ? `🔊 ${S.currentChannelName} · ` : '') + volFooter })
   const row1 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('mp_prev').setEmoji('⏮').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('mp_prev').setEmoji('⏮').setStyle(ButtonStyle.Secondary).setDisabled(loading),
     new ButtonBuilder().setCustomId('mp_voldown').setEmoji('🔉').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('mp_toggle').setEmoji(paused ? '▶' : '⏸').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId('mp_volup').setEmoji('🔊').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('mp_skip').setEmoji('⏭').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('mp_skip').setEmoji('⏭').setStyle(ButtonStyle.Secondary).setDisabled(loading),
   )
   const row2 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('mp_goto').setEmoji('🕐').setLabel('Ir a...').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('mp_goto').setEmoji('🕐').setLabel('Ir a...').setStyle(ButtonStyle.Secondary).setDisabled(loading),
     new ButtonBuilder().setCustomId('mp_stop').setEmoji('⏹').setLabel('Detener').setStyle(ButtonStyle.Danger),
   )
   const rows = [row1, row2]
   // Menú "Saltar a...": posiciones espaciadas según la duración (máx 25 opciones)
-  if (S.current && S.current.duration) {
+  if (S.current && S.current.duration && !loading) {
     const step = seekStep(S.current.duration)
     const opts = []
     for (let t = 0; t < S.current.duration && opts.length < 25; t += step) {
@@ -1316,6 +1318,11 @@ async function onInteraction(interaction) {
       await interaction.reply({ content: 'Debes estar en el canal de voz del bot para controlar la música.', flags: 64 }).catch(() => {})
       return
     }
+    const S = activeSession()
+    if (S.current && !S.currentPlaying) {
+      await interaction.reply({ content: '⏳ Espera a que la canción comience a reproducirse.', flags: 64 }).catch(() => {})
+      return
+    }
     cmdSeek(Number(interaction.values[0]))
     try { await interaction.deferUpdate() } catch {}
     updatePanel()
@@ -1373,9 +1380,23 @@ async function onInteraction(interaction) {
     }
     cmdMusicVolume(S.musicVolume + (id === 'mp_volup' ? 0.1 : -0.1), S)
   }
-  else if (id === 'mp_prev') cmdPrevious()
+  else if (id === 'mp_prev') {
+    const S = activeSession()
+    if (S.current && !S.currentPlaying) {
+      await interaction.reply({ content: '⏳ Espera a que la canción comience a reproducirse.', flags: 64 }).catch(() => {})
+      return
+    }
+    cmdPrevious()
+  }
   else if (id === 'mp_toggle') { if (!cmdPause()) cmdResume() }
-  else if (id === 'mp_skip') cmdSkip()
+  else if (id === 'mp_skip') {
+    const S = activeSession()
+    if (S.current && !S.currentPlaying) {
+      await interaction.reply({ content: '⏳ Espera a que la canción comience a reproducirse.', flags: 64 }).catch(() => {})
+      return
+    }
+    cmdSkip()
+  }
   else if (id === 'mp_stop') cmdStop()
   else return
   try { await interaction.deferUpdate() } catch {}
@@ -1782,6 +1803,7 @@ function getState(S = activeSession()) {
     current: S.current ? { url: S.current.url, title: S.current.title, duration: S.current.duration, songId: S.current.songId ?? null } : null,
     elapsed: elapsed(),
     paused: S.musicPlayer.state.status === AudioPlayerStatus.Paused,
+    loading: !!(S.current && !S.currentPlaying),
     queue: S.queue.map(i => ({ url: i.url, title: i.title, duration: i.duration, songId: i.songId ?? null, addedBy: i.addedBy || null })),
     // Reproducidas recientes (en memoria), de más antigua a más reciente,
     // para mostrarlas en gris en la cola sin que desaparezcan.
@@ -2143,12 +2165,19 @@ async function onHttp(req, res) {
           const r = addToQueue(song.source_url, t.vcId, t.gId, null, song.title || song.source_url, addedBy)
           return sendJson({ ok: true, ...r })
         }
-        case '/api/skip': return sendJson({ ok: cmdSkip() })
-        case '/api/previous': return sendJson({ ok: cmdPrevious() })
+        case '/api/skip': {
+          if (S.current && !S.currentPlaying) return sendJson({ ok: false, loading: true })
+          return sendJson({ ok: cmdSkip() })
+        }
+        case '/api/previous': {
+          if (S.current && !S.currentPlaying) return sendJson({ ok: false, loading: true })
+          return sendJson({ ok: cmdPrevious() })
+        }
         case '/api/pause': return sendJson({ ok: cmdPause() })
         case '/api/resume': return sendJson({ ok: cmdResume() })
         case '/api/stop': cmdStop(); return sendJson({ ok: true })
         case '/api/seek': {
+          if (S.current && !S.currentPlaying) return sendJson({ ok: false, loading: true })
           const to = body.to !== undefined ? body.to : elapsed() + (body.delta || 0)
           return sendJson({ ok: cmdSeek(to) })
         }

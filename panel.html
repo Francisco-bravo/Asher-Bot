@@ -546,9 +546,10 @@
     background: var(--panel); color: var(--text); cursor: pointer;
     font-size: .95rem; min-width: 0; white-space: nowrap; transition: background .12s, transform .05s;
   }
-  .ctrl:hover { background: var(--accent); border-color: transparent; }
-  .ctrl:active { transform: scale(.95); }
-  .ctrl.danger:hover { background: var(--danger); }
+  .ctrl:hover:not(:disabled) { background: var(--accent); border-color: transparent; }
+  .ctrl:active:not(:disabled) { transform: scale(.95); }
+  .ctrl.danger:hover:not(:disabled) { background: var(--danger); }
+  .ctrl:disabled { opacity: .35; cursor: not-allowed; }
 
   .add-row { display: flex; gap: 8px; margin-bottom: 16px; }
   .add-row input {
@@ -1505,9 +1506,9 @@
   </div>
   <div class="pb-center">
     <div class="controls">
-      <button class="ctrl" onclick="api('/api/previous',{})" title="Anterior">⏮</button>
+      <button class="ctrl" id="btn-prev" onclick="api('/api/previous',{})" title="Anterior">⏮</button>
       <button class="ctrl" id="btn-toggle" onclick="togglePause()" title="Pausar/Reanudar">⏸</button>
-      <button class="ctrl" onclick="api('/api/skip',{})" title="Siguiente">⏭</button>
+      <button class="ctrl" id="btn-skip" onclick="api('/api/skip',{})" title="Siguiente">⏭</button>
       <button class="ctrl danger" onclick="api('/api/stop',{})" title="Detener (la canción pasa a reproducidas; el bot no se desconecta)">⏹</button>
     </div>
     <div class="pb-progress">
@@ -1988,7 +1989,7 @@ function addUrl() {
 }
 
 document.getElementById('progress').onclick = (e) => {
-  if (!state || !state.current || !state.current.duration) return
+  if (!state || !state.current || !state.current.duration || state.loading) return
   const rect = e.currentTarget.getBoundingClientRect()
   const frac = (e.clientX - rect.left) / rect.width
   api('/api/seek', { to: frac * state.current.duration })
@@ -2085,6 +2086,13 @@ function render() {
   document.getElementById('npv-title').textContent = npTitle
   updateNpArt()
   document.getElementById('btn-toggle').textContent = state.paused ? '▶' : '⏸'
+  const loading = !!state.loading
+  const btnSkip = document.getElementById('btn-skip')
+  const btnPrev = document.getElementById('btn-prev')
+  if (btnSkip) btnSkip.disabled = loading
+  if (btnPrev) btnPrev.disabled = loading
+  const progressEl = document.getElementById('progress')
+  if (progressEl) { progressEl.style.cursor = loading ? 'not-allowed' : ''; progressEl.style.opacity = loading ? '0.45' : '' }
   const volSlider = document.getElementById('music-volume')
   if (volSlider && state.musicVolume != null && document.activeElement !== volSlider) {
     volSlider.value = Math.round(state.musicVolume * 100)
