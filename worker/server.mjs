@@ -25,6 +25,20 @@ import { join } from 'node:path'
 
 const PORT = +(process.env.PORT || 8080)
 const TOKEN = process.env.WORKER_TOKEN || ''
+
+// Ring buffer de logs para el endpoint /stream-logs
+const LOG_RING = []
+const LOG_RING_MAX = 500
+const logListeners = new Set()
+function pushLog(line) {
+  LOG_RING.push(line)
+  if (LOG_RING.length > LOG_RING_MAX) LOG_RING.shift()
+  for (const fn of logListeners) fn(line)
+}
+;['log', 'warn', 'error', 'info'].forEach(m => {
+  const orig = console[m].bind(console)
+  console[m] = (...args) => { orig(...args); pushLog(args.map(String).join(' ')) }
+})
 const COOKIES = process.env.COOKIES_FILE || '/cookies.txt'
 const YTDLP = process.env.YTDLP || '/usr/local/bin/yt-dlp'
 const FFMPEG = process.env.FFMPEG || 'ffmpeg'
@@ -491,6 +505,22 @@ const server = http.createServer(async (req, res) => {
         concurrency: MAX_CONC, active, queued: waiters.length,
         maxGb: +(MAX_BYTES / 1024 ** 3).toFixed(1), bitrate: MUSIC_BITRATE,
       })
+    }
+
+    if (p === '/stream-logs' && req.method === 'GET') {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no',
+      })
+      // Enviar el historial acumulado
+      for (const line of LOG_RING) res.write('data: ' + line + '\n\n')
+      // Seguir enviando nuevos logs en tiempo real
+      const listener = line => { try { res.write('data: ' + line + '\n\n') } catch {} }
+      logListeners.add(listener)
+      req.on('close', () => logListeners.delete(listener))
+      return
     }
 
     res.writeHead(404); res.end('not found')
