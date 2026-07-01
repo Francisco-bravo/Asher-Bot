@@ -793,7 +793,6 @@ async function backgroundWork(S = activeSession()) {
   if (didWork) setTimeout(() => backgroundWork(S), 1500)
 }
 setInterval(() => { for (const s of sessions.values()) backgroundWork(s) }, BG_WORK_INTERVAL)
-setInterval(() => { for (const s of sessions.values()) backgroundWork(s) }, BG_WORK_INTERVAL)
 
 // Reproduce desde un archivo local ya descargado (el seek es seek de archivo).
 function startFileStream(filePath, seekSec, S = activeSession()) {
