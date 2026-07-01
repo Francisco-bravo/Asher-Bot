@@ -27,6 +27,7 @@ import * as playHistory from './lib/history.mjs'
 import * as auth from './lib/auth.mjs'
 import * as rbac from './lib/rbac.mjs'
 import * as musicCache from './lib/music-cache.mjs'
+import { pickNext as djPickNext } from './lib/audio/dj.mjs'
 import * as art from './lib/art.mjs'
 import * as artsearch from './lib/artsearch.mjs'
 import { MixerStream, SoundMixer } from './lib/audio/mixer.mjs'
@@ -131,6 +132,11 @@ const keepAliveGuilds = new Set()
 // mientras está activo, cmdMusicVolume rechaza cualquier cambio (web o Discord),
 // incluso del propio admin, hasta que se desactive. Persiste entre reinicios.
 const volumeLockedGuilds = new Set()
+// Servidores con el modo DJ automático activo (switch solo-admin POR SERVIDOR):
+// cuando la cola se queda vacía, elige sola la siguiente canción (ver lib/audio/dj.mjs).
+// Persiste entre reinicios; el estado de "sesión" del DJ (canciones ya elegidas,
+// playlist que sigue) vive en la GuildSession y se resetea al activar el switch.
+const djEnabledGuilds = new Set()
 try {
   const s = JSON.parse(readFileSync(SETTINGS_FILE, 'utf8'))
   soundBaseVolume = s.soundBaseVolume ?? 1
@@ -146,12 +152,13 @@ try {
   if (s.idleDisconnectMs != null) idleDisconnectMs = s.idleDisconnectMs
   if (Array.isArray(s.keepAliveGuilds)) for (const g of s.keepAliveGuilds) keepAliveGuilds.add(String(g))
   if (Array.isArray(s.volumeLockedGuilds)) for (const g of s.volumeLockedGuilds) volumeLockedGuilds.add(String(g))
+  if (Array.isArray(s.djEnabledGuilds)) for (const g of s.djEnabledGuilds) djEnabledGuilds.add(String(g))
   if (s.maxQueue != null) MAX_QUEUE = s.maxQueue
   if (s.maxHistory != null) MAX_HISTORY = s.maxHistory
 } catch {}
 soundTargetLufs = setTargetI(soundTargetLufs) // aplica el objetivo cargado
 function saveSettings() {
-  try { writeFileSync(SETTINGS_FILE, JSON.stringify({ soundBaseVolume, maxSoundSeconds, musicDuck, musicVolume, musicVolumeCooldownMs, soundTargetLufs, workerMaxConcurrency, workerCacheMaxGb, musicBitrateKbps, soundPcmWindowMs, idleDisconnectMs, keepAliveGuilds: [...keepAliveGuilds], volumeLockedGuilds: [...volumeLockedGuilds], maxQueue: MAX_QUEUE, maxHistory: MAX_HISTORY })) } catch {}
+  try { writeFileSync(SETTINGS_FILE, JSON.stringify({ soundBaseVolume, maxSoundSeconds, musicDuck, musicVolume, musicVolumeCooldownMs, soundTargetLufs, workerMaxConcurrency, workerCacheMaxGb, musicBitrateKbps, soundPcmWindowMs, idleDisconnectMs, keepAliveGuilds: [...keepAliveGuilds], volumeLockedGuilds: [...volumeLockedGuilds], djEnabledGuilds: [...djEnabledGuilds], maxQueue: MAX_QUEUE, maxHistory: MAX_HISTORY })) } catch {}
 }
 // Empuja al worker los ajustes de Variables Generales que aplica en caliente
 // (concurrencia, tope de caché en disco, bitrate). El cliente está en
@@ -166,7 +173,9 @@ pushWorkerConfig() // al arrancar, sincroniza el worker con el ajuste guardado
 if (!existsSync(SOUNDS_DIR)) mkdirSync(SOUNDS_DIR, { recursive: true })
 
 // ── Estado por servidor (GuildSession) ──────────────────────────────────────
-// item de la cola: { url, title, duration, voiceChannelId, guildId, textChannelId }
+// item de la cola: { url, title, duration, voiceChannelId, guildId, textChannelId,
+//                     addedBy, playlistId } — playlistId solo si vino de "reproducir
+//                     todo" en una playlist (lo usa el DJ automático, lib/audio/dj.mjs)
 // TODO el estado de reproducción vive en una instancia por servidor de Discord.
 // La clase está en lib/audio/guild-session.mjs (contenedor de estado puro); aquí
 // se le inyectan sus dependencias (players de @discordjs/voice, el volumen por
@@ -877,6 +886,17 @@ function disconnectAndClear(S) {
   })
 }
 
+// ── Modo DJ automático (ver lib/audio/dj.mjs) ───────────────────────────────
+// Si la cola de ESTA sesión está vacía y el DJ está activo para su servidor,
+// encola una canción más (mantiene siempre 1 de colchón; ver ensurePlaying).
+function djMaybeTopUp(S) {
+  // Sin canal de voz no hay dónde reproducir (evita elegir canciones al pedo
+  // si el DJ se activa con el bot desconectado).
+  if (S.queue.length > 0 || !S.currentChannelId || !djEnabledGuilds.has(String(S.guildId))) return
+  const item = djPickNext(S)
+  if (item) S.queue.push(item)
+}
+
 // ── Motor de reproducción ─────────────────────────────────────────────────
 async function ensurePlaying(S = activeSession()) {
   if (S.playing) return
@@ -884,8 +904,15 @@ async function ensurePlaying(S = activeSession()) {
   try {
     while (true) {
       if (!S.current) {
-        if (S.queue.length === 0) break
+        if (S.queue.length === 0) {
+          djMaybeTopUp(S)
+          if (S.queue.length === 0) break
+        }
         S.current = S.queue.shift()
+        // La playlist de la última canción sonada (si la hubo) es la que el DJ
+        // continuaría al vaciarse la cola; se actualiza siempre, DJ activo o no.
+        S.djLastPlaylistId = S.current.playlistId ?? null
+        djMaybeTopUp(S) // deja 1 canción de colchón ya encolada
       }
       try {
         await ensureConnection(S.current.voiceChannelId, S.current.guildId)
@@ -1153,9 +1180,9 @@ function requesterFromMember(member) {
   }
 }
 
-function addToQueue(url, voiceChannelId, guildId, textChannelId, title, addedBy = null, S = getSession(guildId)) {
+function addToQueue(url, voiceChannelId, guildId, textChannelId, title, addedBy = null, playlistId = null, S = getSession(guildId)) {
   if (S.queue.length >= MAX_QUEUE) throw new Error(`La cola está llena (máximo ${MAX_QUEUE})`)
-  const item = { url, title: title || url, duration: null, voiceChannelId, guildId, textChannelId, addedBy }
+  const item = { url, title: title || url, duration: null, voiceChannelId, guildId, textChannelId, addedBy, playlistId }
   // La metadata (título/duración) NO se pide aquí para no lanzar otro yt-dlp que
   // compita con el arranque del stream; la rellena backgroundWork cuando ya suena.
   S.queue.push(item)
@@ -1389,7 +1416,7 @@ async function onInteraction(interaction) {
     }
     let r
     try {
-      r = addToQueue(resolved.url, member.voice.channel.id, interaction.guildId, interaction.channelId, resolved.title, requesterFromMember(member))
+      r = addToQueue(resolved.url, member.voice.channel.id, interaction.guildId, interaction.channelId, resolved.title, requesterFromMember(member), null)
     } catch (err) {
       await interaction.editReply(err.message)
       return
@@ -1763,6 +1790,19 @@ function cmdVolumeLock(guildId, on) {
   return true
 }
 
+// Modo DJ automático POR SERVIDOR (solo-admin): al activarlo arranca una
+// "sesión" de DJ nueva (limpia lo ya elegido y qué playlist seguía).
+function cmdDjEnabled(guildId, on) {
+  if (!guildId) return false
+  if (on) djEnabledGuilds.add(String(guildId)); else djEnabledGuilds.delete(String(guildId))
+  const S = getSession(guildId)
+  S.djPlayedIds.clear()
+  S.djLastPlaylistId = null
+  saveSettings()
+  if (on) ensurePlaying(S) // por si la cola ya estaba vacía, arranca de inmediato
+  return true
+}
+
 // Tope de la cola de música (1..500). No afecta lo ya encolado.
 function cmdMaxQueue(n) {
   if (typeof n !== 'number' || isNaN(n)) return false
@@ -1851,7 +1891,7 @@ async function onMessage(message) {
     }
     let r
     try {
-      r = addToQueue(resolved.url, member.voice.channel.id, message.guildId, message.channelId, resolved.title, requesterFromMember(member))
+      r = addToQueue(resolved.url, member.voice.channel.id, message.guildId, message.channelId, resolved.title, requesterFromMember(member), null)
     } catch (err) {
       await message.reply(err.message)
       return
@@ -1938,6 +1978,7 @@ function getState(S = activeSession()) {
     idleDisconnectMs,
     keepAlive: keepAliveGuilds.has(activeGuildId(S)),
     volumeLocked: volumeLockedGuilds.has(String(activeGuildId(S))),
+    djEnabled: djEnabledGuilds.has(String(activeGuildId(S))),
     maxQueue: MAX_QUEUE,
     maxHistory: MAX_HISTORY,
   }
@@ -2246,7 +2287,7 @@ async function onHttp(req, res) {
           if (!t) return sendJson({ error: 'El bot no está en un canal de voz' }, 400)
           const pu = panelUser(req)
           const addedBy = pu ? { id: pu.id, name: pu.display_name || pu.username, avatar: pu.avatar_url || null } : null
-          const r = addToQueue(resolved.url, t.vcId, t.gId, null, resolved.title, addedBy)
+          const r = addToQueue(resolved.url, t.vcId, t.gId, null, resolved.title, addedBy, null)
           return sendJson({ ok: true, ...r })
         }
         case '/api/music/cache': {
@@ -2320,7 +2361,8 @@ async function onHttp(req, res) {
           if (!t) return sendJson({ error: 'El bot no está en un canal de voz' }, 400)
           const pu = panelUser(req)
           const addedBy = pu ? { id: pu.id, name: pu.display_name || pu.username, avatar: pu.avatar_url || null } : null
-          const r = addToQueue(song.source_url, t.vcId, t.gId, null, song.title || song.source_url, addedBy)
+          const playlistId = body.playlistId ? Number(body.playlistId) : null
+          const r = addToQueue(song.source_url, t.vcId, t.gId, null, song.title || song.source_url, addedBy, playlistId)
           return sendJson({ ok: true, ...r })
         }
         case '/api/skip': {
@@ -2453,6 +2495,14 @@ async function onHttp(req, res) {
           if (!u || !rbac.isAdmin(u.id, gid)) return sendJson({ error: 'Solo un administrador' }, 403)
           if (!gid) return sendJson({ error: 'Sin servidor activo' }, 400)
           return sendJson({ ok: cmdVolumeLock(gid, !!body.value), volumeLocked: volumeLockedGuilds.has(String(gid)) })
+        }
+        // Modo DJ automático para el servidor activo (solo-admin de ese servidor).
+        case '/api/dj-enabled': {
+          const gid = activeGuildId(S)
+          const u = panelUser(req)
+          if (!u || !rbac.isAdmin(u.id, gid)) return sendJson({ error: 'Solo un administrador' }, 403)
+          if (!gid) return sendJson({ error: 'Sin servidor activo' }, 400)
+          return sendJson({ ok: cmdDjEnabled(gid, !!body.value), djEnabled: djEnabledGuilds.has(String(gid)) })
         }
         case '/api/voice/join': {
           if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador puede mover el bot de canal' }, 403)

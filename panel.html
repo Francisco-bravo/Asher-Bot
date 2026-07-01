@@ -1262,6 +1262,9 @@
           <label class="keepalive" id="keepalive-wrap" title="Mantener el bot conectado siempre (ignora la desconexión por inactividad)">
             <input type="checkbox" id="keepalive-toggle"> 📌 Mantener conectado
           </label>
+          <label class="keepalive" id="dj-wrap" title="Cuando la cola se vacía, el DJ elige sola la siguiente canción (sigue la playlist en curso o elige al azar de la Biblioteca)">
+            <input type="checkbox" id="dj-toggle" onchange="toggleDj(this.checked)"> 🎧 DJ automático
+          </label>
           <button id="btn-disconnect" class="vc-disconnect" onclick="disconnectVoice()" title="Desconectar del canal de voz">🔌 Desconectar</button>
         </div>
       </div>
@@ -1964,6 +1967,17 @@ document.getElementById('keepalive-modal').addEventListener('click', (e) => {
   if (e.target.id === 'keepalive-modal') e.currentTarget.style.display = 'none'
 })
 
+// Modo DJ automático (solo-admin, por servidor): sin confirmación, directo.
+function syncDjToggle() {
+  const t = document.getElementById('dj-toggle')
+  if (t && state && state.djEnabled != null) t.checked = !!state.djEnabled
+}
+async function toggleDj(on) {
+  const data = await api('/api/dj-enabled', { value: on })
+  if (data && data.ok) toast(on ? '🎧 DJ automático activado' : 'DJ automático desactivado')
+  else { toast((data && data.error) || 'No se pudo cambiar'); syncDjToggle() }
+}
+
 // Tamaño máximo de la cola de música.
 function syncMaxQueueInput() {
   const inp = document.getElementById('max-queue')
@@ -2136,6 +2150,7 @@ function render() {
   const dcBtn = document.getElementById('btn-disconnect')
   if (dcBtn) dcBtn.disabled = !state.connected
   syncKeepAliveToggle()
+  syncDjToggle()
 
   // Aviso de bloqueo: si el bot está en un canal y este usuario no está en él
   // (y no es admin), no puede controlar nada → se lo explicamos.
@@ -3370,7 +3385,7 @@ async function playOpenPlaylist() {
     if (!items.length) { toast('La lista está vacía'); return }
     let added = 0
     for (const it of items) {
-      const data = await api('/api/music/play', { id: it.song_id })
+      const data = await api('/api/music/play', { id: it.song_id, playlistId: openPlaylist.id })
       if (data && data.ok) added++
       else break   // p. ej. bloqueado por no estar en el canal de voz
     }
