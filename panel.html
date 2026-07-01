@@ -1590,6 +1590,14 @@ async function botFetch(path, opts = {}) {
   return fetch(botUrl(path), { credentials: 'include', ...opts, headers })
 }
 async function loadMe() {
+  await refreshMe()
+  loadMusic()
+  loadUsers()   // se autolimita a admins; necesario para la vista dividida en PC
+}
+// Solo re-consulta /api/me (roles dependen del guild activo vía X-Guild-Id) y
+// refresca la UI que depende de ser-admin. Se separó de loadMe() para poder
+// llamarlo al cambiar de servidor sin repetir loadMusic()/loadUsers().
+async function refreshMe() {
   try {
     const res = await webFetch('/api/me')
     me = res.ok ? await res.json() : null
@@ -1603,8 +1611,6 @@ async function loadMe() {
   } catch { me = null }
   applyAdminUI()
   renderUserChip()
-  loadMusic()
-  loadUsers()   // se autolimita a admins; necesario para la vista dividida en PC
 }
 
 // Muestra el usuario logueado (avatar + nombre) arriba a la derecha.
@@ -4250,6 +4256,7 @@ function chooseServer(id) {
   localStorage.setItem('selectedGuildId', id)
   document.getElementById('server-picker').classList.remove('show')
   const sel = document.getElementById('guild-select'); if (sel) sel.value = id
+  refreshMe() // los roles (admin) dependen del servidor activo
   refresh(); loadSounds(); loadVoiceChannels()
 }
 async function bootGuildSelection() {
