@@ -864,13 +864,14 @@ function destroyConnection(S = activeSession()) {
   }
 }
 
-// Detiene la reproducción (no pausa), vacía la cola y suelta la conexión de
-// voz. Se usa en TODA salida del canal de voz (botón Desconectar, inactividad,
-// o Discord desconectando al bot por fuera de nuestro control: kick/mover/etc).
+// Detiene la reproducción (no pausa) y suelta la conexión de voz; cmdStop() ya
+// vacía la cola completa (marcando lo cancelado como 'stopped' en el
+// historial). Se usa en TODA salida del canal de voz (botón Desconectar,
+// inactividad, o Discord desconectando al bot por fuera de nuestro control:
+// kick/mover/etc).
 function disconnectAndClear(S) {
   sessionCtx.run(S, () => {
     try { cmdStop() } catch {}
-    S.queue.length = 0
     destroyConnection(S)
     updatePanel()
   })
@@ -994,7 +995,10 @@ async function ensurePlaying(S = activeSession()) {
 
       const t = S.transition
       S.transition = 'next'
-      if (t === 'next') {
+      if (t === 'next' || t === 'skip') {
+        // 'next' = terminó sola (motivo 'played'); 'skip' = el usuario la saltó
+        // (cmdSkip ya dejó S.transition='skip'). Mismo avance, distinto motivo.
+        S.current.reason = t === 'skip' ? 'skipped' : 'played'
         S.history.push(S.current)
         if (S.history.length > MAX_HISTORY) S.history.shift()
         S.current = null
@@ -1004,8 +1008,10 @@ async function ensurePlaying(S = activeSession()) {
       } else if (t === 'seek') {
         // S.current se mantiene, S.seekTarget ya viene seteado
       } else if (t === 'stop') {
-        // Stop: la canción se trata como terminada (pasa a reproducidas), pero
-        // NO se avanza a la siguiente. El bot queda detenido sin desconectarse.
+        // Stop: la canción se trata como terminada (pasa a reproducidas, motivo
+        // 'stopped'), pero NO se avanza a la siguiente. El bot queda detenido
+        // sin desconectarse. cmdStop ya vació el resto de la cola.
+        S.current.reason = 'stopped'
         S.history.push(S.current)
         if (S.history.length > MAX_HISTORY) S.history.shift()
         S.current = null
@@ -1164,7 +1170,7 @@ function addToQueue(url, voiceChannelId, guildId, textChannelId, title, addedBy 
 
 function cmdSkip(S = activeSession()) {
   if (!S.current) return false
-  S.transition = 'next'
+  S.transition = 'skip' // distinto de 'next' (fin natural) para el motivo en el historial
   S.musicPlayer.stop()
   return true
 }
@@ -1206,13 +1212,20 @@ function cmdResume(S = activeSession()) {
 }
 
 function cmdStop(S = activeSession()) {
-  // Detiene la canción actual como si hubiera terminado (pasa a reproducidas);
-  // NO inicia la siguiente, NO borra la cola y NO se desconecta. El bot queda
-  // detenido en el canal hasta que alguien reproduzca o agregue una canción.
-  if (!S.current) return false
+  // Detiene la canción actual Y vacía la cola completa; todo lo cancelado queda
+  // marcado con motivo 'stopped' en el historial (no 'played', ver getState/
+  // reason). NO se desconecta. El bot queda detenido en el canal hasta que
+  // alguien reproduzca o agregue una canción.
+  if (!S.current && S.queue.length === 0) return false
   S.transition = 'stop'
   S.pendingSounds = [] // si había sonidos esperando un switch, se descartan
-  S.musicPlayer.stop()
+  for (const item of S.queue) {
+    item.reason = 'stopped'
+    S.history.push(item)
+    if (S.history.length > MAX_HISTORY) S.history.shift()
+  }
+  S.queue.length = 0
+  if (S.current) S.musicPlayer.stop()
   return true
 }
 
@@ -1906,7 +1919,7 @@ function getState(S = activeSession()) {
     queue: S.queue.map(i => ({ url: i.url, title: i.title, duration: i.duration, songId: i.songId ?? null, addedBy: i.addedBy || null })),
     // Reproducidas recientes (en memoria), de más antigua a más reciente,
     // para mostrarlas en gris en la cola sin que desaparezcan.
-    played: S.history.slice(-20).map(i => ({ url: i.url, title: i.title, duration: i.duration, songId: i.songId ?? null, addedBy: i.addedBy || null })),
+    played: S.history.slice(-20).map(i => ({ url: i.url, title: i.title, duration: i.duration, songId: i.songId ?? null, addedBy: i.addedBy || null, reason: i.reason || 'played' })),
     historyCount: S.history.length,
     connected: !!S.connection,
     voiceChannel: S.currentChannelName,
