@@ -5,7 +5,7 @@ import {
 } from 'discord.js'
 import {
   joinVoiceChannel, createAudioPlayer, createAudioResource,
-  AudioPlayerStatus, VoiceConnectionStatus, StreamType
+  AudioPlayerStatus, VoiceConnectionStatus, StreamType, entersState
 } from '@discordjs/voice'
 import { spawn } from 'node:child_process'
 import {
@@ -821,6 +821,24 @@ async function ensureConnection(voiceChannelId, guildId, S = getSession(guildId)
     guildId,
     adapterCreator: vc.guild.voiceAdapterCreator,
   })
+  // Si Discord nos saca del canal por fuera de nuestro control (kick, canal
+  // borrado, movidos por un admin), la conexión pasa a Disconnected sin pasar
+  // por nuestro destroyConnection(). Distinguimos de una reconexión real
+  // (p.ej. cambio de canal de voz) esperando brevemente a Signalling/Connecting;
+  // si no llega, es un corte definitivo y limpiamos igual que el botón Desconectar.
+  const conn = S.connection
+  conn.on(VoiceConnectionStatus.Disconnected, async () => {
+    try {
+      await Promise.race([
+        entersState(conn, VoiceConnectionStatus.Signalling, 5000),
+        entersState(conn, VoiceConnectionStatus.Connecting, 5000),
+      ])
+    } catch {
+      if (S.connection !== conn) return // ya fue reemplazada por otra conexión
+      console.log(`Voz desconectada externamente (guild ${guildId}); limpiando cola`)
+      disconnectAndClear(S)
+    }
+  })
   await new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error('Timeout conectando al canal de voz')), 20000)
     const onReady = () => { clearTimeout(timeout); S.connection.off('error', onErr); resolve() }
@@ -840,6 +858,18 @@ function destroyConnection(S = activeSession()) {
     S.currentChannelId = null
     S.currentChannelName = null
   }
+}
+
+// Detiene la reproducción (no pausa), vacía la cola y suelta la conexión de
+// voz. Se usa en TODA salida del canal de voz (botón Desconectar, inactividad,
+// o Discord desconectando al bot por fuera de nuestro control: kick/mover/etc).
+function disconnectAndClear(S) {
+  sessionCtx.run(S, () => {
+    try { cmdStop() } catch {}
+    S.queue.length = 0
+    destroyConnection(S)
+    updatePanel()
+  })
 }
 
 // ── Motor de reproducción ─────────────────────────────────────────────────
@@ -1312,9 +1342,7 @@ setInterval(() => {
     if (Date.now() - sess.emptySince >= idleDisconnectMs) {
       sess.emptySince = 0
       console.log(`Inactividad: desconectando del canal de voz (guild ${gid})`)
-      // Mismo efecto que el botón Desconectar (detiene y vacía la cola), en el
-      // contexto de ESA sesión para que los defaults activeSession() resuelvan bien.
-      sessionCtx.run(sess, () => { try { cmdStop() } catch {} sess.queue.length = 0; destroyConnection(); updatePanel() })
+      disconnectAndClear(sess)
     }
   }
 }, IDLE_CHECK_INTERVAL)
@@ -2360,9 +2388,7 @@ async function onHttp(req, res) {
         }
         case '/api/disconnect': {
           if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)
-          cmdStop()
-          S.queue.length = 0   // al desconectar sí se vacía la cola (reset completo)
-          destroyConnection()
+          disconnectAndClear(S)
           return sendJson({ ok: true })
         }
         // Tiempo de auto-desconexión por inactividad (minutos; 0 = desactivado).
