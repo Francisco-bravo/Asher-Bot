@@ -2201,10 +2201,14 @@ function render() {
     const list = document.getElementById('queue-list')
     const played = state.played || []
     const rows = []
-    // 1) Reproducidas (en gris, no se quitan; ↻ para re-agregar)
+    // 1) Reproducidas (en gris, no se quitan; ↻ para re-agregar). El ícono
+    // depende de cómo terminó: reproducida entera, saltada, o cancelada por stop.
     for (const item of played) {
+      const [histIco, histTitle] = item.reason === 'skipped' ? ['⏭', 'Saltada']
+        : item.reason === 'stopped' ? ['⏹', 'Cancelada (stop)']
+        : ['✅', 'Reproducida']
       rows.push(`<li class="track-played">
-        <span class="status-ico" title="Ya reproducida">✓</span>
+        <span class="status-ico" title="${histTitle}">${histIco}</span>
         ${artThumb(item.songId)}
         <span class="title" title="${esc(item.url)}">${esc(item.title)}</span>
         ${addedByHtml(item.addedBy)}
