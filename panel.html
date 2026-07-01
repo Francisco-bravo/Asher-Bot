@@ -433,9 +433,10 @@
   .pb-center { display: flex; flex-direction: column; gap: 7px; flex: 0 1 560px; max-width: 620px; }
   /* Lado derecho con el volumen; flex:1 equilibra para centrar los controles (estilo Spotify) */
   .pb-right { flex: 1; display: flex; align-items: center; justify-content: flex-end; }
-  .pb-volume { display: flex; align-items: center; gap: 8px; width: 100%; max-width: 170px; }
+  .pb-volume { display: flex; align-items: center; gap: 8px; width: 100%; max-width: 200px; }
   .pb-volume input[type=range] { flex: 1; min-width: 70px; accent-color: var(--accent); cursor: pointer; }
   .pb-vol-ico { font-size: 1rem; opacity: .85; flex-shrink: 0; }
+  .pb-vol-pct { font-size: .72rem; color: var(--muted); font-variant-numeric: tabular-nums; flex-shrink: 0; width: 34px; text-align: right; }
   .pb-progress { display: flex; align-items: center; gap: 10px; }
   .pb-progress span { color: var(--muted); font-size: .72rem; font-variant-numeric: tabular-nums; flex-shrink: 0; }
   .pb-progress .progress { flex: 1; }
@@ -1546,6 +1547,7 @@
       <span class="pb-vol-ico">🔊</span>
       <input type="range" id="music-volume" min="0" max="200" step="5" value="100"
              oninput="onMusicVolumeInput(this.value)" onchange="saveMusicVolume(this.value)">
+      <span class="pb-vol-pct" id="pb-vol-pct">100%</span>
     </div>
   </div>
 </div>
@@ -2024,6 +2026,8 @@ document.getElementById('progress').onclick = (e) => {
 function updateVolIcon(pct) {
   const ico = document.querySelector('.pb-vol-ico')
   if (ico) ico.textContent = pct == 0 ? '🔇' : pct < 60 ? '🔈' : pct < 120 ? '🔉' : '🔊'
+  const lbl = document.getElementById('pb-vol-pct')
+  if (lbl) lbl.textContent = Math.round(pct) + '%'
 }
 function onMusicVolumeInput(pct) { updateVolIcon(pct) } // feedback inmediato al arrastrar
 async function saveMusicVolume(pct) {
