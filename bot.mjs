@@ -127,6 +127,10 @@ let idleDisconnectMs = 10 * 60 * 1000
 // un switch solo-admin POR SERVIDOR; persiste entre reinicios. Advertencia en la
 // UI: si muchos servidores lo activan, el bot se vuelve más lento a la larga.
 const keepAliveGuilds = new Set()
+// Servidores con el volumen de música BLOQUEADO (switch solo-admin POR SERVIDOR):
+// mientras está activo, cmdMusicVolume rechaza cualquier cambio (web o Discord),
+// incluso del propio admin, hasta que se desactive. Persiste entre reinicios.
+const volumeLockedGuilds = new Set()
 try {
   const s = JSON.parse(readFileSync(SETTINGS_FILE, 'utf8'))
   soundBaseVolume = s.soundBaseVolume ?? 1
@@ -141,12 +145,13 @@ try {
   if (s.soundPcmWindowMs != null) soundPcmWindowMs = s.soundPcmWindowMs
   if (s.idleDisconnectMs != null) idleDisconnectMs = s.idleDisconnectMs
   if (Array.isArray(s.keepAliveGuilds)) for (const g of s.keepAliveGuilds) keepAliveGuilds.add(String(g))
+  if (Array.isArray(s.volumeLockedGuilds)) for (const g of s.volumeLockedGuilds) volumeLockedGuilds.add(String(g))
   if (s.maxQueue != null) MAX_QUEUE = s.maxQueue
   if (s.maxHistory != null) MAX_HISTORY = s.maxHistory
 } catch {}
 soundTargetLufs = setTargetI(soundTargetLufs) // aplica el objetivo cargado
 function saveSettings() {
-  try { writeFileSync(SETTINGS_FILE, JSON.stringify({ soundBaseVolume, maxSoundSeconds, musicDuck, musicVolume, musicVolumeCooldownMs, soundTargetLufs, workerMaxConcurrency, workerCacheMaxGb, musicBitrateKbps, soundPcmWindowMs, idleDisconnectMs, keepAliveGuilds: [...keepAliveGuilds], maxQueue: MAX_QUEUE, maxHistory: MAX_HISTORY })) } catch {}
+  try { writeFileSync(SETTINGS_FILE, JSON.stringify({ soundBaseVolume, maxSoundSeconds, musicDuck, musicVolume, musicVolumeCooldownMs, soundTargetLufs, workerMaxConcurrency, workerCacheMaxGb, musicBitrateKbps, soundPcmWindowMs, idleDisconnectMs, keepAliveGuilds: [...keepAliveGuilds], volumeLockedGuilds: [...volumeLockedGuilds], maxQueue: MAX_QUEUE, maxHistory: MAX_HISTORY })) } catch {}
 }
 // Empuja al worker los ajustes de Variables Generales que aplica en caliente
 // (concurrencia, tope de caché en disco, bitrate). El cliente está en
@@ -1443,6 +1448,10 @@ async function onInteraction(interaction) {
   }
 
   if (id === 'mp_voldown' || id === 'mp_volup') {
+    if (volumeLockedGuilds.has(String(activeGuildId(S)))) {
+      await interaction.reply({ content: '🔒 El volumen está bloqueado por un administrador.', flags: 64 }).catch(() => {})
+      return
+    }
     const left = musicVolumeCooldownLeft(S)
     if (left > 0) {
       await interaction.reply({ content: `⏳ Espera ${Math.ceil(left / 1000)}s para volver a cambiar el volumen.`, flags: 64 }).catch(() => {})
@@ -1650,6 +1659,7 @@ function musicVolumeCooldownLeft(S = activeSession()) {
 // Solo admins pueden superar el 100% (tope 200%); el resto queda acotado a 100%.
 function cmdMusicVolume(v, S = activeSession(), isAdmin = false) {
   if (typeof v !== 'number' || isNaN(v)) return false
+  if (volumeLockedGuilds.has(String(activeGuildId(S)))) return false // bloqueado por un admin
   if (musicVolumeCooldownLeft(S) > 0) return false // limitado: aún en enfriamiento
   S.lastMusicVolumeAt = Date.now()
   const prev = S.musicVolume
@@ -1727,6 +1737,15 @@ function cmdKeepAlive(guildId, on) {
   if (!guildId) return false
   if (on) keepAliveGuilds.add(String(guildId)); else keepAliveGuilds.delete(String(guildId))
   getSession(guildId).emptySince = 0 // resetea el contador de inactividad
+  saveSettings()
+  return true
+}
+
+// Bloqueador de volumen POR SERVIDOR (solo-admin, solo web): mientras está
+// activo, cmdMusicVolume rechaza cualquier cambio (incluso del propio admin).
+function cmdVolumeLock(guildId, on) {
+  if (!guildId) return false
+  if (on) volumeLockedGuilds.add(String(guildId)); else volumeLockedGuilds.delete(String(guildId))
   saveSettings()
   return true
 }
@@ -1905,6 +1924,7 @@ function getState(S = activeSession()) {
     soundPcmWindowMs,
     idleDisconnectMs,
     keepAlive: keepAliveGuilds.has(activeGuildId(S)),
+    volumeLocked: volumeLockedGuilds.has(String(activeGuildId(S))),
     maxQueue: MAX_QUEUE,
     maxHistory: MAX_HISTORY,
   }
@@ -2307,6 +2327,8 @@ async function onHttp(req, res) {
           return sendJson({ ok: cmdSeek(to) })
         }
         case '/api/music-volume': {
+          if (volumeLockedGuilds.has(String(activeGuildId(S))))
+            return sendJson({ error: 'El volumen está bloqueado por un administrador', locked: true, musicVolume: S.musicVolume }, 423)
           const left = musicVolumeCooldownLeft(S)
           if (left > 0) return sendJson({ error: `Espera ${Math.ceil(left / 1000)}s para volver a cambiar el volumen`, retryMs: left, musicVolume: S.musicVolume }, 429)
           const v = body.to !== undefined ? body.to : S.musicVolume + (body.delta || 0)
@@ -2410,6 +2432,14 @@ async function onHttp(req, res) {
           if (!u || !rbac.isAdmin(u.id, gid)) return sendJson({ error: 'Solo un administrador' }, 403)
           if (!gid) return sendJson({ error: 'Sin servidor activo' }, 400)
           return sendJson({ ok: cmdKeepAlive(gid, !!body.value), keepAlive: keepAliveGuilds.has(gid) })
+        }
+        // Bloqueador de volumen para el servidor activo (solo-admin de ese servidor, solo web).
+        case '/api/volume-lock': {
+          const gid = activeGuildId(S)
+          const u = panelUser(req)
+          if (!u || !rbac.isAdmin(u.id, gid)) return sendJson({ error: 'Solo un administrador' }, 403)
+          if (!gid) return sendJson({ error: 'Sin servidor activo' }, 400)
+          return sendJson({ ok: cmdVolumeLock(gid, !!body.value), volumeLocked: volumeLockedGuilds.has(String(gid)) })
         }
         case '/api/voice/join': {
           if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador puede mover el bot de canal' }, 403)

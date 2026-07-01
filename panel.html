@@ -440,6 +440,14 @@
   /* Zona "aumentada" (>100%, solo admins pueden llegar ahí) */
   .pb-volume.boosted input[type=range] { accent-color: #f59e0b; }
   .pb-volume.boosted .pb-vol-pct { color: #f59e0b; font-weight: 600; }
+  /* Bloqueador de volumen (solo admin puede togglearlo; el efecto se ve para todos) */
+  .vol-lock-btn {
+    background: none; border: none; cursor: pointer; font-size: .95rem; opacity: .75;
+    flex-shrink: 0; padding: 0 0 0 2px; line-height: 1;
+  }
+  .vol-lock-btn:hover { opacity: 1; }
+  .pb-volume.locked input[type=range] { opacity: .4; pointer-events: none; }
+  .pb-volume.locked .pb-vol-ico, .pb-volume.locked .pb-vol-pct { opacity: .5; }
   .pb-progress { display: flex; align-items: center; gap: 10px; }
   .pb-progress span { color: var(--muted); font-size: .72rem; font-variant-numeric: tabular-nums; flex-shrink: 0; }
   .pb-progress .progress { flex: 1; }
@@ -1551,6 +1559,7 @@
       <input type="range" id="music-volume" min="0" max="200" step="5" value="100"
              oninput="onMusicVolumeInput(this.value)" onchange="saveMusicVolume(this.value)">
       <span class="pb-vol-pct" id="pb-vol-pct">100%</span>
+      <button id="vol-lock-btn" class="vol-lock-btn" style="display:none" onclick="toggleVolumeLock()"></button>
     </div>
   </div>
 </div>
@@ -1646,6 +1655,10 @@ function applyAdminUI() {
     volSlider.max = isAdmin ? 200 : 100
     if (Number(volSlider.value) > Number(volSlider.max)) volSlider.value = volSlider.max
   }
+  // Bloqueador de volumen: solo admins ven el candado para togglearlo (el
+  // efecto del bloqueo, en cambio, se aplica a TODOS por igual).
+  const lockBtn = document.getElementById('vol-lock-btn')
+  if (lockBtn) lockBtn.style.display = isAdmin ? '' : 'none'
 }
 
 // Alternar vista en PC: dividida (lado a lado) o por pestañas. Se recuerda.
@@ -2048,6 +2061,11 @@ function updateVolIcon(pct) {
   if (wrap) wrap.classList.toggle('boosted', Number(pct) > 100)
 }
 function onMusicVolumeInput(pct) { updateVolIcon(pct) } // feedback inmediato al arrastrar
+async function toggleVolumeLock() {
+  const wantOn = !(state && state.volumeLocked)
+  const data = await api('/api/volume-lock', { value: wantOn })
+  if (data && data.ok) toast(data.volumeLocked ? '🔒 Volumen bloqueado' : '🔓 Volumen desbloqueado')
+}
 async function saveMusicVolume(pct) {
   const data = await api('/api/music-volume', { to: Number(pct) / 100 })
   // Si fue rechazado (p. ej. dentro del cooldown global web+Discord), devolver el
@@ -2143,6 +2161,15 @@ function render() {
   if (volSlider && state.musicVolume != null && document.activeElement !== volSlider) {
     volSlider.value = Math.round(state.musicVolume * 100)
     updateVolIcon(volSlider.value)
+  }
+  const volLocked = !!state.volumeLocked
+  const volWrap = document.querySelector('.pb-volume')
+  if (volWrap) volWrap.classList.toggle('locked', volLocked)
+  if (volSlider) volSlider.disabled = volLocked
+  const lockBtn = document.getElementById('vol-lock-btn')
+  if (lockBtn) {
+    lockBtn.textContent = volLocked ? '🔒' : '🔓'
+    lockBtn.title = volLocked ? 'Desbloquear el volumen (solo admin)' : 'Bloquear el volumen para todos (solo admin)'
   }
   document.getElementById('t-elapsed').textContent = state.current ? fmt(state.elapsed) : '0:00'
   document.getElementById('t-total').textContent = state.current ? fmt(state.current.duration) : '–'
