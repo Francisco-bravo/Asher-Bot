@@ -2121,6 +2121,10 @@ function updateNpArt() {
   })
 }
 
+// Clave de la última canción que se centró en la vista de la cola; evita
+// re-centrar (y pelear con el scroll manual del usuario) en cada refresh de
+// 1s si la canción actual no cambió.
+let lastCenteredSongKey = null
 function render() {
   if (!state) return
   const dot = document.getElementById('conn-dot')
@@ -2238,6 +2242,16 @@ function render() {
       </li>`)
     })
     list.innerHTML = rows.length ? rows.join('') : '<li class="empty">La cola está vacía</li>'
+
+    // Centrar verticalmente la canción actual (arriba = reproducidas, abajo =
+    // próximas), solo cuando CAMBIA la canción (no en cada refresh de 1s, para
+    // no pelear con el scroll manual del usuario mientras navega la lista).
+    const curKey = state.current ? (state.current.songId || state.current.url) : null
+    if (curKey !== lastCenteredSongKey) {
+      lastCenteredSongKey = curKey
+      const curEl = list.querySelector('.track-current')
+      if (curEl) curEl.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    }
   }
 }
 
