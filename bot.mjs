@@ -1448,7 +1448,7 @@ async function onInteraction(interaction) {
       await interaction.reply({ content: `⏳ Espera ${Math.ceil(left / 1000)}s para volver a cambiar el volumen.`, flags: 64 }).catch(() => {})
       return
     }
-    cmdMusicVolume(S.musicVolume + (id === 'mp_volup' ? 0.1 : -0.1), S)
+    cmdMusicVolume(S.musicVolume + (id === 'mp_volup' ? 0.1 : -0.1), S, memberIsAdmin(interaction.member))
   }
   else if (id === 'mp_prev') {
     const S = activeSession()
@@ -1647,12 +1647,14 @@ function cmdSoundTargetLufs(v) {
 function musicVolumeCooldownLeft(S = activeSession()) {
   return Math.max(0, musicVolumeCooldownMs - (Date.now() - S.lastMusicVolumeAt))
 }
-function cmdMusicVolume(v, S = activeSession()) {
+// Solo admins pueden superar el 100% (tope 200%); el resto queda acotado a 100%.
+function cmdMusicVolume(v, S = activeSession(), isAdmin = false) {
   if (typeof v !== 'number' || isNaN(v)) return false
   if (musicVolumeCooldownLeft(S) > 0) return false // limitado: aún en enfriamiento
   S.lastMusicVolumeAt = Date.now()
   const prev = S.musicVolume
-  S.musicVolume = Math.round(Math.min(2, Math.max(0, v)) * 100) / 100
+  const cap = isAdmin ? 2 : 1
+  S.musicVolume = Math.round(Math.min(cap, Math.max(0, v)) * 100) / 100
   // Si estaba en passthrough Opus y el volumen deja de ser 1, reiniciar en PCM
   // para que el mixer pueda aplicar el volumen desde el inicio del siguiente chunk.
   if (S.opusDirect && prev === 1 && S.musicVolume !== 1 && S.current && S.currentPlaying) {
@@ -1968,14 +1970,20 @@ function canControlMusic(req) {
   return isInBotVoiceChannel(u.discord_id)
 }
 
+// ¿El miembro de Discord es administrador? (para el tope de volumen >100%, etc.)
+function memberIsAdmin(member) {
+  if (!member) return false
+  const u = auth.getUserByDiscordId(member.id)
+  return !!(u && rbac.isAdmin(u.id))
+}
+
 // Variante para comandos/botones de Discord: admin siempre; si el bot ya está en
 // un canal, el miembro debe estar en ESE canal; si no hay conexión, se permite
 // (el primero en pedir trae el bot a su canal). member.id es el id de Discord; el
 // rol admin se consulta mapeando a la fila interna del usuario.
 function memberCanControl(member, S = activeSession()) {
   if (!member) return false
-  const u = auth.getUserByDiscordId(member.id)
-  if (u && rbac.isAdmin(u.id)) return true
+  if (memberIsAdmin(member)) return true
   if (!S.connection || !S.currentChannelId) return true
   return member.voice?.channelId === S.currentChannelId
 }
@@ -2302,7 +2310,7 @@ async function onHttp(req, res) {
           const left = musicVolumeCooldownLeft(S)
           if (left > 0) return sendJson({ error: `Espera ${Math.ceil(left / 1000)}s para volver a cambiar el volumen`, retryMs: left, musicVolume: S.musicVolume }, 429)
           const v = body.to !== undefined ? body.to : S.musicVolume + (body.delta || 0)
-          return sendJson({ ok: cmdMusicVolume(v, S), musicVolume: S.musicVolume })
+          return sendJson({ ok: cmdMusicVolume(v, S, isPanelAdmin(req)), musicVolume: S.musicVolume })
         }
         case '/api/queue/remove': {
           const i = body.index

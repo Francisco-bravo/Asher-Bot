@@ -437,6 +437,9 @@
   .pb-volume input[type=range] { flex: 1; min-width: 70px; accent-color: var(--accent); cursor: pointer; }
   .pb-vol-ico { font-size: 1rem; opacity: .85; flex-shrink: 0; }
   .pb-vol-pct { font-size: .72rem; color: var(--muted); font-variant-numeric: tabular-nums; flex-shrink: 0; width: 34px; text-align: right; }
+  /* Zona "aumentada" (>100%, solo admins pueden llegar ahí) */
+  .pb-volume.boosted input[type=range] { accent-color: #f59e0b; }
+  .pb-volume.boosted .pb-vol-pct { color: #f59e0b; font-weight: 600; }
   .pb-progress { display: flex; align-items: center; gap: 10px; }
   .pb-progress span { color: var(--muted); font-size: .72rem; font-variant-numeric: tabular-nums; flex-shrink: 0; }
   .pb-progress .progress { flex: 1; }
@@ -1630,6 +1633,13 @@ function applyAdminUI() {
     if (isAdmin) el.style.removeProperty('display')
     else el.style.setProperty('display', 'none', 'important')
   }
+  // Solo admins pueden subir el volumen de música por sobre 100% (tope 200%);
+  // el resto del panel lo mantiene limitado a 0-100%.
+  const volSlider = document.getElementById('music-volume')
+  if (volSlider) {
+    volSlider.max = isAdmin ? 200 : 100
+    if (Number(volSlider.value) > Number(volSlider.max)) volSlider.value = volSlider.max
+  }
 }
 
 // Alternar vista en PC: dividida (lado a lado) o por pestañas. Se recuerda.
@@ -2028,6 +2038,8 @@ function updateVolIcon(pct) {
   if (ico) ico.textContent = pct == 0 ? '🔇' : pct < 60 ? '🔈' : pct < 120 ? '🔉' : '🔊'
   const lbl = document.getElementById('pb-vol-pct')
   if (lbl) lbl.textContent = Math.round(pct) + '%'
+  const wrap = document.querySelector('.pb-volume')
+  if (wrap) wrap.classList.toggle('boosted', Number(pct) > 100)
 }
 function onMusicVolumeInput(pct) { updateVolIcon(pct) } // feedback inmediato al arrastrar
 async function saveMusicVolume(pct) {
