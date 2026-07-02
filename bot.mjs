@@ -1213,6 +1213,7 @@ function addToQueue(url, voiceChannelId, guildId, textChannelId, title, addedBy 
   if (known) {
     item.songId = known.id
     if (known.duration_ms) item.duration = known.duration_ms / 1000
+    if (!isPoorTitle(known.title, known.source_url)) item.title = known.title
   }
   // El resto de la metadata (título si falta/carátula) NO se pide aquí para no
   // lanzar otro yt-dlp que compita con el arranque del stream; la rellena
