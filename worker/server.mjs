@@ -14,9 +14,17 @@
 //   POST   /keep?url=<src>&keep=1    → marca/desmarca la canción como no-evictable (permanente)
 //   DELETE /cache?url=<src>          → borra audio+carátula+meta del disco
 //   GET    /playlist?url=<src>       → JSON [{url,title,duration,playlistTitle,thumbnail}]
+//   GET    /songs                    → catálogo completo (Biblioteca compartida)
+//   GET    /songs/one?id=|url=       → una canción
+//   POST   /songs?sourceUrl=&title=… → crea/upsert por source_url
+//   POST   /songs/update?id=&…       → actualización parcial (título/artista/permanente/…)
+//   POST   /songs/play?id=           → suma una reproducción
+//   DELETE /songs?id=                → borra la fila + sus archivos en disco
+//   POST   /songs/art?id=            → guarda una carátula elegida a mano (bytes crudos)
 import http from 'node:http'
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import { DatabaseSync } from 'node:sqlite'
 import {
   existsSync, mkdirSync, createReadStream, createWriteStream, statSync,
   renameSync, rmSync, readFileSync, writeFileSync, copyFileSync,
@@ -51,8 +59,70 @@ let MAX_BYTES = +(process.env.CACHE_MAX_BYTES || 70 * 1024 ** 3)
 const AUDIO_DIR = join(DATA_DIR, 'audio')
 const ART_DIR = join(DATA_DIR, 'art')
 const META_DIR = join(DATA_DIR, 'meta')
+const ART_OVERRIDE_DIR = join(DATA_DIR, 'art-override') // carátula elegida a mano (admin), prioridad sobre la de YouTube
 const INDEX_FILE = join(DATA_DIR, 'index.json')
-for (const d of [DATA_DIR, AUDIO_DIR, ART_DIR, META_DIR]) { try { mkdirSync(d, { recursive: true }) } catch {} }
+for (const d of [DATA_DIR, AUDIO_DIR, ART_DIR, META_DIR, ART_OVERRIDE_DIR]) { try { mkdirSync(d, { recursive: true }) } catch {} }
+
+// Catálogo de canciones (Biblioteca): único compartido por todos los entornos
+// (antes vivía en la DB local de cada bot). El audio/carátula/metadata siguen
+// siendo archivos en disco keyeados por sha1(url); esta tabla solo guarda los
+// datos de catálogo (título, autor, duración, contador de reproducciones).
+const songsDb = new DatabaseSync(join(DATA_DIR, 'songs.db'))
+songsDb.exec('PRAGMA journal_mode = WAL')
+songsDb.exec(`CREATE TABLE IF NOT EXISTS songs (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_url     TEXT UNIQUE NOT NULL,
+  title          TEXT,
+  artist         TEXT,
+  album          TEXT,
+  duration_ms    INTEGER,
+  ext            TEXT,
+  play_count     INTEGER NOT NULL DEFAULT 0,
+  permanent      INTEGER NOT NULL DEFAULT 0,
+  last_played_at INTEGER,
+  created_at     INTEGER NOT NULL
+)`)
+
+function dbGetById(id) { return songsDb.prepare('SELECT * FROM songs WHERE id = ?').get(Number(id)) }
+function dbFindByUrl(url) { return songsDb.prepare('SELECT * FROM songs WHERE source_url = ?').get(url) }
+function dbList() { return songsDb.prepare('SELECT * FROM songs ORDER BY COALESCE(last_played_at, 0) DESC, created_at DESC').all() }
+function dbUpsert({ sourceUrl, title = null, artist = null, album = null, durationMs = null, ext = null }) {
+  const existing = dbFindByUrl(sourceUrl)
+  if (existing) return existing
+  const info = songsDb.prepare(
+    `INSERT INTO songs (source_url, title, artist, album, duration_ms, ext, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).run(sourceUrl, title, artist, album, durationMs, ext, Date.now())
+  return dbGetById(info.lastInsertRowid)
+}
+function dbUpdate(id, { title, artist, album, durationMs, permanent } = {}) {
+  const sets = [], vals = []
+  if (title !== undefined) { sets.push('title = ?'); vals.push(title) }
+  if (artist !== undefined) { sets.push('artist = ?'); vals.push(artist) }
+  if (album !== undefined) { sets.push('album = ?'); vals.push(album) }
+  if (durationMs !== undefined) { sets.push('duration_ms = ?'); vals.push(durationMs) }
+  if (permanent !== undefined) { sets.push('permanent = ?'); vals.push(permanent ? 1 : 0) }
+  if (sets.length) { vals.push(Number(id)); songsDb.prepare(`UPDATE songs SET ${sets.join(', ')} WHERE id = ?`).run(...vals) }
+  return dbGetById(id)
+}
+function dbBumpPlay(id) {
+  songsDb.prepare('UPDATE songs SET play_count = play_count + 1, last_played_at = ? WHERE id = ?').run(Date.now(), Number(id))
+  return dbGetById(id)
+}
+function dbDelete(id) {
+  const song = dbGetById(id)
+  if (!song) return false
+  songsDb.prepare('DELETE FROM songs WHERE id = ?').run(Number(id))
+  return song
+}
+
+// ¿Tiene carátula en disco (auto-descargada o elegida a mano)? Reemplaza a la
+// vieja columna `art_key`: acá la verdad es el archivo, no una fila — el bot
+// usa este flag para no volver a buscar carátula si ya hay una.
+function hasArt(song) {
+  const key = keyOf(song.source_url)
+  return existsSync(join(ART_DIR, key)) || existsSync(join(ART_OVERRIDE_DIR, key))
+}
+function annotateArt(song) { return song && { ...song, has_art: hasArt(song) } }
 
 // Cookies persistentes: se guardan en el volumen de datos (sobreviven reinicios).
 // Preferimos /data/cookies.txt (subido vía panel) sobre la variable COOKIES_FILE.
@@ -216,6 +286,15 @@ function sendJson(res, code, obj) {
   res.end(b)
 }
 
+// Borra todo lo cacheado en disco para una clave: audio, carátula (auto y override), meta.
+function deleteCachedFiles(key) {
+  try { rmSync(audioPath(key), { force: true }) } catch {}
+  try { rmSync(join(ART_DIR, key), { force: true }) } catch {}
+  try { rmSync(join(ART_OVERRIDE_DIR, key), { force: true }) } catch {}
+  try { rmSync(metaPath(key), { force: true }) } catch {}
+  delete index[key]; saveIndex()
+}
+
 // Argumentos ffmpeg para producir Ogg/Opus @48k estéreo (con seek opcional). El
 // bitrate es configurable en caliente (MUSIC_BITRATE, kbps).
 function opusArgs(input, seek) {
@@ -374,6 +453,9 @@ function downloadToCacheRaw(src, key, proxy = false) {
 // extra (no se llama a yt-dlp). Devuelve también la meta si tuvo que resolverla.
 async function resolveKeyAndUrl(src) {
   if (/^https?:\/\//i.test(src)) return { key: keyOf(src), url: src, meta: null }
+  // Claves sintéticas de subidas manuales (sin URL real de la que extraer nada):
+  // ya son canónicas, no hay que resolverlas por yt-dlp.
+  if (/^upload:/.test(src)) return { key: keyOf(src), url: src, meta: null }
   const meta = await getMeta(src)            // resuelve + cachea (yt-dlp solo la 1ª vez)
   const url = meta.url || src
   return { key: keyOf(url), url, meta }
@@ -384,9 +466,15 @@ async function serveArt(res, src) {
   let key, url, pre
   try { pre = await resolveKeyAndUrl(src); key = pre.key; url = pre.url } catch (e) { res.writeHead(404); return res.end('sin meta: ' + e.message) }
   const file = join(ART_DIR, key)
+  const overrideFile = join(ART_OVERRIDE_DIR, key)
   const mimeOf = u => {
     const e = (u.split(/[?#]/)[0].split('.').pop() || '').toLowerCase()
     return e === 'png' ? 'image/png' : e === 'webp' ? 'image/webp' : e === 'gif' ? 'image/gif' : 'image/jpeg'
+  }
+  // Carátula elegida a mano (admin): prioridad sobre la miniatura auto-descargada.
+  if (existsSync(overrideFile) && index[key]?.artOverrideMime) {
+    res.writeHead(200, { 'Content-Type': index[key].artOverrideMime, 'Cache-Control': 'no-store' })
+    return createReadStream(overrideFile).pipe(res)
   }
   if (existsSync(file) && index[key]?.artMime) {
     res.writeHead(200, { 'Content-Type': index[key].artMime, 'Cache-Control': 'public, max-age=86400' })
@@ -503,10 +591,7 @@ const server = http.createServer(async (req, res) => {
     if (p === '/cache' && req.method === 'DELETE') {
       if (!needSrc()) return
       const { key } = await resolveKeyAndUrl(src)
-      try { rmSync(audioPath(key), { force: true }) } catch {}
-      try { rmSync(join(ART_DIR, key), { force: true }) } catch {}
-      try { rmSync(metaPath(key), { force: true }) } catch {}
-      delete index[key]; saveIndex()
+      deleteCachedFiles(key)
       return sendJson(res, 200, { deleted: true })
     }
 
@@ -514,6 +599,75 @@ const server = http.createServer(async (req, res) => {
       if (!needSrc()) return
       try { return sendJson(res, 200, await getPlaylist(src)) }
       catch (e) { return sendJson(res, e.playlistError ? 422 : 500, { error: e.message }) }
+    }
+
+    // Catálogo de canciones (Biblioteca), compartido por todos los entornos.
+    if (p === '/songs' && req.method === 'GET') {
+      return sendJson(res, 200, dbList().map(annotateArt))
+    }
+    if (p === '/songs/one' && req.method === 'GET') {
+      const id = u.searchParams.get('id')
+      const url = u.searchParams.get('url')
+      const song = id ? dbGetById(id) : url ? dbFindByUrl(url) : null
+      if (!song) { res.writeHead(404); return res.end('not found') }
+      return sendJson(res, 200, annotateArt(song))
+    }
+    if (p === '/songs' && req.method === 'POST') {
+      const sourceUrl = u.searchParams.get('sourceUrl')
+      if (!sourceUrl) { res.writeHead(400); return res.end('missing sourceUrl') }
+      const num = v => (v == null || v === '') ? null : Number(v)
+      return sendJson(res, 200, annotateArt(dbUpsert({
+        sourceUrl,
+        title: u.searchParams.get('title'),
+        artist: u.searchParams.get('artist'),
+        album: u.searchParams.get('album'),
+        durationMs: num(u.searchParams.get('durationMs')),
+        ext: u.searchParams.get('ext'),
+      })))
+    }
+    if (p === '/songs/update' && req.method === 'POST') {
+      const id = u.searchParams.get('id')
+      if (!id) { res.writeHead(400); return res.end('missing id') }
+      const patch = {}
+      if (u.searchParams.has('title')) patch.title = u.searchParams.get('title')
+      if (u.searchParams.has('artist')) patch.artist = u.searchParams.get('artist')
+      if (u.searchParams.has('album')) patch.album = u.searchParams.get('album')
+      if (u.searchParams.has('durationMs')) patch.durationMs = Number(u.searchParams.get('durationMs'))
+      if (u.searchParams.has('permanent')) patch.permanent = u.searchParams.get('permanent') === '1'
+      const song = dbUpdate(id, patch)
+      if (!song) { res.writeHead(404); return res.end('not found') }
+      return sendJson(res, 200, annotateArt(song))
+    }
+    if (p === '/songs/play' && req.method === 'POST') {
+      const id = u.searchParams.get('id')
+      if (!id) { res.writeHead(400); return res.end('missing id') }
+      const song = dbBumpPlay(id)
+      if (!song) { res.writeHead(404); return res.end('not found') }
+      return sendJson(res, 200, annotateArt(song))
+    }
+    if (p === '/songs' && req.method === 'DELETE') {
+      const id = u.searchParams.get('id')
+      if (!id) { res.writeHead(400); return res.end('missing id') }
+      const song = dbDelete(id)
+      if (!song) { res.writeHead(404); return res.end('not found') }
+      deleteCachedFiles(keyOf(song.source_url))
+      return sendJson(res, 200, { deleted: true })
+    }
+    if (p === '/songs/art' && req.method === 'POST') {
+      const id = u.searchParams.get('id')
+      if (!id) { res.writeHead(400); return res.end('missing id') }
+      const song = dbGetById(id)
+      if (!song) { res.writeHead(404); return res.end('not found') }
+      const key = keyOf(song.source_url)
+      const chunks = []; let size = 0
+      for await (const c of req) { size += c.length; if (size > 8 * 1024 * 1024) break; chunks.push(c) }
+      if (size > 8 * 1024 * 1024) { res.writeHead(413); return res.end('too large') }
+      const buf = Buffer.concat(chunks)
+      if (!buf.length) { return sendJson(res, 400, { error: 'sin datos' }) }
+      writeFileSync(join(ART_OVERRIDE_DIR, key), buf)
+      const mime = (req.headers['content-type'] || 'image/jpeg').split(';')[0].trim()
+      touch(key, { artOverrideMime: mime })
+      return sendJson(res, 200, { ok: true })
     }
 
     // Importar un audio YA descargado (lo sube el bot desde su disco local): se
