@@ -556,7 +556,7 @@ async function ytdlpFlatPlaylist(url) {
 // Si ya es una clave conocida (p.ej. una canción subida), se usa directo.
 async function resolveSource(item) {
   if (/^https?:\/\//i.test(item.url)) return item.url
-  if (musicCache.findByUrl(item.url)) return item.url
+  if (await musicCache.findByUrl(item.url)) return item.url
   if (USE_WORKER) { try { return (await workerMeta(item.url)).url || item.url } catch {} }
   return (await ytdlpPrint(item.url, 'webpage_url')) || item.url
 }
@@ -593,13 +593,13 @@ function downloadToFile(url, destPath) {
   })
 }
 
-// Obtiene la carátula con yt-dlp y la guarda con la misma lógica del caché:
-// se baja una sola vez y queda persistida en el object-store (art_key). Si ya
-// está guardada, no hace nada. Best-effort: nunca rompe la reproducción.
+// Obtiene la carátula con yt-dlp y la guarda como override en el worker
+// (compartido por todos los entornos). Si ya tiene una, no hace nada.
+// Best-effort: nunca rompe la reproducción.
 // Baja una imagen (con timeout) desde su URL y la guarda como carátula del
 // sonido. Devuelve true si la guardó. No requiere descargar el audio.
 async function storeArtFromUrl(song, thumb) {
-  if (!song || song.art_key) return false
+  if (!song || song.has_art) return false
   if (!thumb || !/^https?:\/\//i.test(thumb)) return false
   const ctrl = new AbortController()
   const t = setTimeout(() => ctrl.abort(), 8000)
@@ -611,13 +611,13 @@ async function storeArtFromUrl(song, thumb) {
     let ext = (thumb.split(/[?#]/)[0].split('.').pop() || '').toLowerCase()
     if (!/^(jpg|jpeg|png|webp|gif)$/.test(ext)) ext = 'jpg'
     await art.store(song.id, buf, ext)
-    song.art_key = `art/${song.id}.${ext}`
+    song.has_art = true
     return true
   } catch { return false } finally { clearTimeout(t) }
 }
 
 async function ensureSongArt(song, sourceUrl) {
-  if (!song || song.art_key) return
+  if (!song || song.has_art) return
   // Carátula: iTunes → Deezer → miniatura "de siempre" (YouTube). La miniatura la
   // da el worker (workerMeta) en modo worker, o yt-dlp local si no.
   const localFile = (() => { try { return musicCache.hasLocal(song) ? musicCache.cachePath(song) : null } catch { return null } })()
@@ -629,14 +629,14 @@ async function ensureSongArt(song, sourceUrl) {
   }
   try {
     const r = await artsearch.resolveArt(song, { localFile, thumbFallback })
-    if (r) { await art.store(song.id, r.buf, r.ext); song.art_key = `art/${song.id}.${r.ext}` }
+    if (r) { await art.store(song.id, r.buf, r.ext); song.has_art = true }
   } catch { /* sin carátula: no pasa nada */ }
 }
 
 // Baja las carátulas de un set de canciones (con poca concurrencia), usando la
 // miniatura que ya trae la playlist. Solo la imagen, sin tocar el audio.
 async function fetchArtForSongs(items) {
-  const pending = items.filter(it => it.thumb && it.song && !it.song.art_key)
+  const pending = items.filter(it => it.thumb && it.song && !it.song.has_art)
   let i = 0
   const worker = async () => {
     while (i < pending.length) { const it = pending[i++]; try { await storeArtFromUrl(it.song, it.thumb) } catch {} }
@@ -647,8 +647,8 @@ async function fetchArtForSongs(items) {
 // Descarga a la caché SIN reproducir ni contar reproducción ("forzar caché").
 async function forceCacheAudio(item) {
   const sourceUrl = await resolveSource(item)
-  const song = musicCache.findByUrl(sourceUrl)
-    || musicCache.upsertSong({ sourceUrl, title: item.title })
+  const song = (await musicCache.findByUrl(sourceUrl))
+    || (await musicCache.upsertSong({ sourceUrl, title: item.title }))
   if (USE_WORKER) {
     // Se cachea en el disco del WORKER (no en Santiago). La carátula la baja el
     // worker bajo demanda; aquí solo aseguramos el audio.
@@ -668,7 +668,7 @@ let bulkCache = { running: false, abort: false, done: 0, total: 0, errors: 0, cu
 async function runBulkCache() {
   bulkCache = { running: true, abort: false, done: 0, total: 0, errors: 0, current: null }
   try {
-    const allSongs = musicCache.listAll()
+    const allSongs = await musicCache.listAll()
     const httpSongs = allSongs.filter(s => /^https?:\/\//i.test(s.source_url))
     let uncached
     if (USE_WORKER) {
@@ -701,9 +701,9 @@ async function runBulkCache() {
 
 // Resuelve la canción de un item SIN gastar yt-dlp si ya se conoce (songId o URL
 // directa ya registrada). Solo resuelve (yt-dlp) términos de búsqueda nuevos.
-function songForItem(item) {
-  if (item.songId) { const s = musicCache.getById(item.songId); if (s) return s }
-  if (/^https?:\/\//i.test(item.url)) { const s = musicCache.findByUrl(item.url); if (s) return s }
+async function songForItem(item) {
+  if (item.songId) { const s = await musicCache.getById(item.songId); if (s) return s }
+  if (/^https?:\/\//i.test(item.url)) { const s = await musicCache.findByUrl(item.url); if (s) return s }
   return null
 }
 
@@ -719,9 +719,9 @@ function isPoorTitle(t, sourceUrl) {
 async function enrich(item) {
   if (!item || !item.url) return false
   // Resolver/crear la canción primero, para poder actualizar su fila.
-  let song = songForItem(item)
+  let song = await songForItem(item)
   const sourceUrl = song ? song.source_url : await resolveSource(item)
-  if (!song) song = musicCache.findByUrl(sourceUrl) || musicCache.upsertSong({ sourceUrl, title: item.title })
+  if (!song) song = (await musicCache.findByUrl(sourceUrl)) || (await musicCache.upsertSong({ sourceUrl, title: item.title }))
   if (item.songId !== song.id) { item.songId = song.id; updatePanel() }
   // 1) Metadata (una sola vez por item): obtiene título/duración reales y los
   //    GUARDA en la canción. Se hace si falta la duración o el título es pobre.
@@ -735,12 +735,12 @@ async function enrich(item) {
     const durationMs = (item.duration && !isNaN(item.duration)) ? item.duration * 1000 : null
     // Artista: del título ("Artista - Canción") o, si no, del canal. No pisa uno ya bueno.
     const artist = song.artist ? null : deriveArtist(item.title, item.uploader)
-    song = musicCache.setMeta(song.id, { title: goodTitle, durationMs, artist })
+    song = await musicCache.setMeta(song.id, { title: goodTitle, durationMs, artist })
     updatePanel()
     return true
   }
   // 2) Carátula (iTunes-first; una sola vez por item para no entrar en bucle).
-  if (!item.artTried && !song.art_key) { item.artTried = true; await ensureSongArt(song, sourceUrl); updatePanel(); return true }
+  if (!item.artTried && !song.has_art) { item.artTried = true; await ensureSongArt(song, sourceUrl); updatePanel(); return true }
   return false
 }
 
@@ -749,9 +749,9 @@ async function enrich(item) {
 // (si va a sonar justo esa) en vez de re-extraerla.
 async function cacheToDisk(item, S = activeSession()) {
   if (!item || !item.url) return false
-  let song = songForItem(item)
+  let song = await songForItem(item)
   const sourceUrl = song ? song.source_url : await resolveSource(item)
-  if (!song) song = musicCache.findByUrl(sourceUrl) || musicCache.upsertSong({ sourceUrl, title: item.title })
+  if (!song) song = (await musicCache.findByUrl(sourceUrl)) || (await musicCache.upsertSong({ sourceUrl, title: item.title }))
   item.songId = song.id
   // Modo worker: pre-cachea en el disco del WORKER → su próxima /audio es HIT
   // (instantáneo, gapless). El play puede esperar S.bgPromise si va a sonar esta.
@@ -762,7 +762,7 @@ async function cacheToDisk(item, S = activeSession()) {
     catch { return false }
     finally { if (S.bgSongId === song.id) { S.bgSongId = null; S.bgPromise = null } }
   }
-  if (musicCache.hasLocal(song) || song.persisted) return false // ya lista
+  if (musicCache.hasLocal(song)) return false // ya lista
   // S.bgPromise = SOLO la descarga del audio (lo que la reproducción necesita
   // esperar para arrancar gapless); la carátula va después, sin bloquear el play.
   S.bgSongId = song.id
@@ -807,9 +807,9 @@ async function backgroundWork(S = activeSession()) {
     //    canciones SIN carátula (p. ej. las importadas de una playlist, que nacen
     //    con título plano y sin arte). Una tarea por ciclo y sin reintentos.
     if (!didWork) {
-      const pending = musicCache.listAll().find(s =>
+      const pending = (await musicCache.listAll()).find(s =>
         (isPoorTitle(s.title, s.source_url) && !metaBackfillTried.has(s.id)) ||
-        (!s.art_key && !artBackfillTried.has(s.id)))
+        (!s.has_art && !artBackfillTried.has(s.id)))
       if (pending) {
         // Marca solo la tarea que enrich() hará en esta llamada (metadata primero;
         // si el título ya es bueno, será la carátula). Así un caso con ambos
@@ -967,7 +967,7 @@ async function ensurePlaying(S = activeSession()) {
       if (wantOpusDirect) {
         try {
           const raw = S.current.url
-          const s = musicCache.findByUrl(raw) || musicCache.upsertSong({ sourceUrl: raw, title: S.current.title })
+          const s = (await musicCache.findByUrl(raw)) || (await musicCache.upsertSong({ sourceUrl: raw, title: S.current.title }))
           S.current.songId = s.id
           S.currentResource = await startRemoteOpusResource({ ...S.current, url: raw }, S.seekOffset)
           S.opusDirect = true
@@ -983,20 +983,20 @@ async function ensurePlaying(S = activeSession()) {
         try {
           const raw = S.current.url
           const isUrl = /^https?:\/\//i.test(raw)
-          let song = isUrl ? musicCache.findByUrl(raw) : null
+          let song = isUrl ? await musicCache.findByUrl(raw) : null
           // Si el fondo está pre-cacheando JUSTO esta canción, espera a que termine
           // (segundos de descarga) en vez de matarla y re-extraer (~10s). Gapless.
           if (song && S.bgSongId === song.id && S.bgPromise) {
             try { await S.bgPromise } catch {}
-            song = musicCache.findByUrl(raw) // refresca el estado tras el pre-cacheo
+            song = await musicCache.findByUrl(raw) // refresca el estado tras el pre-cacheo
           }
-          if (song && (musicCache.hasLocal(song) || song.persisted)) {
+          if (song && musicCache.hasLocal(song)) {
             // Cacheada completa → archivo (instantáneo, con seek). Sin yt-dlp.
             const filePath = await musicCache.getLocalAudio(song, dest => downloadToFile(raw, dest))
             stream = startFileStream(filePath, S.seekOffset)
           } else if (isUrl) {
             // URL no cacheada: stream + tee a caché en la MISMA descarga (1 yt-dlp).
-            const s = song || musicCache.upsertSong({ sourceUrl: raw, title: S.current.title })
+            const s = song || (await musicCache.upsertSong({ sourceUrl: raw, title: S.current.title }))
             S.current.songId = s.id
             stream = USE_WORKER
               ? startRemoteStream({ ...S.current, url: raw }, S.seekOffset, s)
@@ -1175,16 +1175,16 @@ async function resolveToSong(input) {
   const resolved = await resolveInput(input)   // { url, title }
   // URL directa ya conocida → reutilizar la canción sin gastar otro yt-dlp.
   if (/^https?:\/\//i.test(resolved.url)) {
-    const existing = musicCache.findByUrl(resolved.url)
+    const existing = await musicCache.findByUrl(resolved.url)
     if (existing) return existing
   }
   const meta = await ytdlpResolveMeta(resolved.url)
   const sourceUrl = meta?.sourceUrl || resolved.url
-  const song = musicCache.findByUrl(sourceUrl)
-    || musicCache.upsertSong({ sourceUrl, title: meta?.title || resolved.title })
+  const song = (await musicCache.findByUrl(sourceUrl))
+    || (await musicCache.upsertSong({ sourceUrl, title: meta?.title || resolved.title }))
   if (meta?.title) {
     const durationMs = !isNaN(meta.duration) ? meta.duration * 1000 : null
-    musicCache.setMeta(song.id, { title: meta.title, durationMs })
+    await musicCache.setMeta(song.id, { title: meta.title, durationMs })
   }
   ensureSongArt(song, sourceUrl).catch(() => {})   // carátula en segundo plano
   return musicCache.getById(song.id)
@@ -1202,14 +1202,14 @@ function requesterFromMember(member) {
   }
 }
 
-function addToQueue(url, voiceChannelId, guildId, textChannelId, title, addedBy = null, playlistId = null, S = getSession(guildId)) {
+async function addToQueue(url, voiceChannelId, guildId, textChannelId, title, addedBy = null, playlistId = null, S = getSession(guildId)) {
   if (S.queue.length >= MAX_QUEUE) throw new Error(`La cola está llena (máximo ${MAX_QUEUE})`)
   const item = { url, title: title || url, duration: null, voiceChannelId, guildId, textChannelId, addedBy, playlistId }
   // Si la canción YA es conocida (Biblioteca), toma su duración/id de una sola
-  // consulta local (sin red). Evita mostrar la barra de progreso sin duración y,
-  // para las subidas manuales ("upload:..."), evita un enriquecido inútil más
-  // tarde: esa fuente no es una URL real, nunca se le puede pedir metadata.
-  const known = musicCache.findByUrl(url)
+  // consulta (evita mostrar la barra de progreso sin duración) y, para las
+  // subidas manuales ("upload:..."), evita un enriquecido inútil más tarde:
+  // esa fuente no es una URL real, nunca se le puede pedir metadata.
+  const known = await musicCache.findByUrl(url)
   if (known) {
     item.songId = known.id
     if (known.duration_ms) item.duration = known.duration_ms / 1000
@@ -1449,7 +1449,7 @@ async function onInteraction(interaction) {
     }
     let r
     try {
-      r = addToQueue(resolved.url, member.voice.channel.id, interaction.guildId, interaction.channelId, resolved.title, requesterFromMember(member), null)
+      r = await addToQueue(resolved.url, member.voice.channel.id, interaction.guildId, interaction.channelId, resolved.title, requesterFromMember(member), null)
     } catch (err) {
       await interaction.editReply(err.message)
       return
@@ -1924,7 +1924,7 @@ async function onMessage(message) {
     }
     let r
     try {
-      r = addToQueue(resolved.url, member.voice.channel.id, message.guildId, message.channelId, resolved.title, requesterFromMember(member), null)
+      r = await addToQueue(resolved.url, member.voice.channel.id, message.guildId, message.channelId, resolved.title, requesterFromMember(member), null)
     } catch (err) {
       await message.reply(err.message)
       return
@@ -2320,7 +2320,7 @@ async function onHttp(req, res) {
           if (!t) return sendJson({ error: 'El bot no está en un canal de voz' }, 400)
           const pu = panelUser(req)
           const addedBy = pu ? { id: pu.id, name: pu.display_name || pu.username, avatar: pu.avatar_url || null } : null
-          const r = addToQueue(resolved.url, t.vcId, t.gId, null, resolved.title, addedBy, null)
+          const r = await addToQueue(resolved.url, t.vcId, t.gId, null, resolved.title, addedBy, null)
           return sendJson({ ok: true, ...r })
         }
         case '/api/music/cache': {
@@ -2373,10 +2373,10 @@ async function onHttp(req, res) {
           try {
             const entries = (await ytdlpFlatPlaylist(body.url)).slice(0, 200) // tope de seguridad
             if (!entries.length) return sendJson({ error: 'No se encontraron canciones (¿es un link de playlist?)' }, 400)
-            const items = entries.map(e => ({
-              song: musicCache.findByUrl(e.url) || musicCache.upsertSong({ sourceUrl: e.url, title: e.title }),
+            const items = await Promise.all(entries.map(async e => ({
+              song: (await musicCache.findByUrl(e.url)) || (await musicCache.upsertSong({ sourceUrl: e.url, title: e.title })),
               thumb: e.thumbnail,
-            }))
+            })))
             const songIds = items.map(it => it.song.id)
             const name = entries.find(e => e.playlistTitle)?.playlistTitle || null
             // Trae solo las carátulas (imagen, sin bajar audio) de la playlist, con
@@ -2388,14 +2388,14 @@ async function onHttp(req, res) {
           }
         }
         case '/api/music/play': {
-          const song = musicCache.getById(body.id)
+          const song = await musicCache.getById(body.id)
           if (!song) return sendJson({ error: 'Canción no encontrada' }, 404)
           const t = currentVoiceTarget()
           if (!t) return sendJson({ error: 'El bot no está en un canal de voz' }, 400)
           const pu = panelUser(req)
           const addedBy = pu ? { id: pu.id, name: pu.display_name || pu.username, avatar: pu.avatar_url || null } : null
           const playlistId = body.playlistId ? Number(body.playlistId) : null
-          const r = addToQueue(song.source_url, t.vcId, t.gId, null, song.title || song.source_url, addedBy, playlistId)
+          const r = await addToQueue(song.source_url, t.vcId, t.gId, null, song.title || song.source_url, addedBy, playlistId)
           return sendJson({ ok: true, ...r })
         }
         case '/api/skip': {

@@ -28,7 +28,6 @@ const loudness = await import('./lib/loudness.mjs')
 const { paths } = await import('./lib/config.mjs')
 
 const PORT = Number(process.env.WEB_PORT || 8770)
-const ART_MIME = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif' }
 const SOUND_MIME = { mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4', flac: 'audio/flac', webm: 'audio/webm' }
 const CLIENT_ID = process.env.DISCORD_CLIENT_ID
 const CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET
@@ -45,7 +44,7 @@ const MAX_MUSIC = 50 * 1024 * 1024 // 50 MB por canción
 // carátula desde el worker y le avisa de borrados/permanencia. Cliente compartido
 // con bot.mjs en lib/worker-client.mjs. Sin MUSIC_WORKER_URL, USE_WORKER es false
 // y todo sigue saliendo del object-store local como antes.
-const { USE_WORKER, workerReq, workerMeta, workerKeep, workerDelete, workerCachedKeys } = await import('./lib/worker-client.mjs')
+const { USE_WORKER, workerReq, workerMeta, workerKeep, workerCachedKeys } = await import('./lib/worker-client.mjs')
 // Misma clave que el worker (sha1 de la fuente) para cruzar la biblioteca con lo
 // que el worker tiene cacheado.
 const sha1 = s => createHash('sha1').update(s).digest('hex')
@@ -273,28 +272,17 @@ http.createServer(async (req, res) => {
     // Carátula de una canción (imagen pública, servida desde el object-store).
     const mArt = path.match(/^\/art\/(\d+)$/)
     if (mArt && req.method === 'GET') {
-      const song = music.getById(Number(mArt[1]))
+      const song = await music.getById(Number(mArt[1]))
       if (!song) { res.writeHead(404); res.end('Sin carátula'); return }
-      const store = getStore()
-      // PRIORIDAD: la carátula elegida/resuelta (art_key en object-store) manda. Solo
-      // si no hay art_key se cae a la miniatura del worker (YouTube) como fallback.
-      // exists/getStream son sync en local-store y async en s3-store; await unifica ambos.
-      if (song.art_key && await store.exists(song.art_key)) {
-        const ext = song.art_key.split('.').pop().toLowerCase()
-        // no-store: la carátula elegida puede cambiar; es un archivo local barato de
-        // re-servir. Así un refresco SIEMPRE muestra la actual (no la cacheada vieja).
-        res.writeHead(200, { 'Content-Type': ART_MIME[ext] || 'application/octet-stream', 'Cache-Control': 'no-store' })
-        ;(await store.getStream(song.art_key)).pipe(res)
-        return
-      }
-      // Sin art_key: miniatura del worker (la baja la 1ª vez). Uploads (upload:) no van al worker.
-      if (USE_WORKER && /^https?:\/\//i.test(song.source_url)) {
+      // El worker sirve la carátula (override elegido a mano con prioridad, si no la
+      // miniatura auto-descargada de YouTube) — mismo endpoint para uploads y URLs
+      // reales. Se reenvía su propio Cache-Control (no-store en el override, para
+      // que un cambio se vea al toque; cacheable en la auto-descargada).
+      if (USE_WORKER) {
         try {
           const r = await workerReq('GET', '/art', song.source_url)
           if (r.ok && r.body) {
-            // Miniatura del worker (fallback transitorio hasta que el bot resuelva
-            // art_key): caché corto para que no quede "pegada" la vieja por un día.
-            res.writeHead(200, { 'Content-Type': r.headers.get('content-type') || 'image/jpeg', 'Cache-Control': 'public, max-age=300' })
+            res.writeHead(200, { 'Content-Type': r.headers.get('content-type') || 'image/jpeg', 'Cache-Control': r.headers.get('cache-control') || 'public, max-age=300' })
             Readable.fromWeb(r.body).pipe(res)
             return
           }
@@ -637,13 +625,14 @@ http.createServer(async (req, res) => {
       if (Array.isArray(body.songIds)) {
         const ids = body.songIds.map(Number).filter(Boolean)
         if (!ids.length) return send(res, 400, { error: 'Sin canciones que agregar' })
-        for (const sid of ids) playlists.addItem(pl.id, sid)
+        for (const sid of ids) playlists.addItem(pl.id, sid, (await music.getById(sid)) || {})
         return send(res, 201, { ok: true, added: ids.length })
       }
-      let songId = body.songId
-      if (!songId && body.sourceUrl) songId = music.upsertSong({ sourceUrl: body.sourceUrl, title: body.title }).id
-      if (!songId) return send(res, 400, { error: 'Falta songId o sourceUrl' })
-      playlists.addItem(pl.id, Number(songId))
+      let song = null
+      if (body.songId) song = await music.getById(Number(body.songId))
+      else if (body.sourceUrl) song = await music.upsertSong({ sourceUrl: body.sourceUrl, title: body.title })
+      if (!song) return send(res, 400, { error: 'Falta songId o sourceUrl' })
+      playlists.addItem(pl.id, song.id, song)
       return send(res, 201, { ok: true })
     }
     // Quitar una canción de la lista (solo dueño o admin).
@@ -672,12 +661,12 @@ http.createServer(async (req, res) => {
 
     // ── Música / caché ────────────────────────────────────────────────────
     if (req.method === 'GET' && path === '/api/music') {
-      const list = music.listAll()
+      const list = await music.listAll()
       // location: 'local' (caché de Santiago) | 'worker' (lo tiene el worker) | 'none'.
       const wk = await workerCachedKeys()
       for (const s of list) {
         s.location = s.cached ? 'local'
-          : (USE_WORKER && /^https?:/i.test(s.source_url || '') && wk.has(sha1(s.source_url))) ? 'worker'
+          : (USE_WORKER && wk.has(sha1(s.source_url || ''))) ? 'worker'
           : 'none'
       }
       return send(res, 200, list)
@@ -703,7 +692,7 @@ http.createServer(async (req, res) => {
       const body = JSON.parse((await readBody(req)).toString() || '{}')
       const title = (body.title || '').trim()
       if (!title) return send(res, 400, { error: 'Falta el título' })
-      const song = music.setTitle(Number(mRename[1]), title)
+      const song = await music.setTitle(Number(mRename[1]), title)
       if (!song) return send(res, 404, { error: 'Canción no encontrada' })
       return send(res, 200, { id: song.id, title: song.title })
     }
@@ -712,10 +701,11 @@ http.createServer(async (req, res) => {
     if (mPerm && req.method === 'POST') {
       if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un admin' })
       const body = JSON.parse((await readBody(req)).toString() || '{}')
-      const song = music.setPermanent(Number(mPerm[1]), !!body.permanent)
+      const song = await music.setPermanent(Number(mPerm[1]), !!body.permanent)
       if (!song) return send(res, 404, { error: 'Canción no encontrada' })
-      // El worker no debe evictar las permanentes de su disco.
-      if (USE_WORKER && /^https?:\/\//i.test(song.source_url)) workerKeep(song.source_url, song.permanent)
+      // El worker no debe evictar las permanentes de su disco (aplica también a
+      // subidas manuales: viven en el worker igual que cualquier otra canción).
+      if (USE_WORKER) workerKeep(song.source_url, song.permanent)
       return send(res, 200, { id: song.id, permanent: song.permanent })
     }
     // Botón ✏️: busca la carátula en iTunes → Deezer → álbum (album-art) → arte
@@ -723,7 +713,7 @@ http.createServer(async (req, res) => {
     const mArtSearch = path.match(/^\/api\/music\/(\d+)\/art-search$/)
     if (mArtSearch && req.method === 'POST') {
       if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un admin' })
-      const song = music.getById(Number(mArtSearch[1]))
+      const song = await music.getById(Number(mArtSearch[1]))
       if (!song) return send(res, 404, { error: 'Canción no encontrada' })
       const body = JSON.parse((await readBody(req)).toString() || '{}')
       const query = (body.query || '').trim() || null
@@ -748,7 +738,7 @@ http.createServer(async (req, res) => {
     const mArtOptions = path.match(/^\/api\/music\/(\d+)\/art-options$/)
     if (mArtOptions && req.method === 'POST') {
       if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un admin' })
-      const song = music.getById(Number(mArtOptions[1]))
+      const song = await music.getById(Number(mArtOptions[1]))
       if (!song) return send(res, 404, { error: 'Canción no encontrada' })
       const body = JSON.parse((await readBody(req)).toString() || '{}')
       const query = (body.query || '').trim() || null
@@ -768,7 +758,7 @@ http.createServer(async (req, res) => {
     const mArtSet = path.match(/^\/api\/music\/(\d+)\/art-set$/)
     if (mArtSet && req.method === 'POST') {
       if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un admin' })
-      const song = music.getById(Number(mArtSet[1]))
+      const song = await music.getById(Number(mArtSet[1]))
       if (!song) return send(res, 404, { error: 'Canción no encontrada' })
       const body = JSON.parse((await readBody(req)).toString() || '{}')
       const url = (body.url || '').trim()
@@ -785,10 +775,10 @@ http.createServer(async (req, res) => {
     const mId = path.match(/^\/api\/music\/(\d+)$/)
     if (mId && req.method === 'DELETE') {
       if (!rbac.isAdmin(user.id)) return send(res, 403, { error: 'Solo un admin' })
-      const song = music.getById(Number(mId[1])) // capturar source_url antes de borrar la fila
+      const song = await music.getById(Number(mId[1])) // capturar source_url antes de borrar la fila
       const ok = await music.removeSong(Number(mId[1]))
-      // Borra también la copia del disco del worker.
-      if (ok && USE_WORKER && song && /^https?:\/\//i.test(song.source_url)) workerDelete(song.source_url)
+      // Nota: music.removeSong ya le pide al worker que borre su copia (catálogo +
+      // audio/carátula en disco); no hace falta un workerDelete aparte acá.
       return send(res, ok ? 200 : 404, ok ? { ok: true } : { error: 'Canción no encontrada' })
     }
 
