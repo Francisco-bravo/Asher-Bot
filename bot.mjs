@@ -354,7 +354,17 @@ function startRemoteStream(item, seekSec, song, S = activeSession()) {
         headers: workerHeaders(),
         signal: ac.signal,
       })
-      if (!res.ok || !res.body) throw new Error(`worker HTTP ${res.status}`)
+      if (!res.ok || !res.body) {
+        // El worker YA reintenta internamente vía el proxy de Santiago antes de
+        // rendirse (ver worker/server.mjs extractAndStream); ese reintento cubre
+        // justamente los geo-restringidos a Chile. Si aun así responde este 502
+        // "extraction failed", el video está genuinamente no disponible — un
+        // fallback local daría el mismo resultado, así que NO se reintenta acá.
+        const body = await res.text().catch(() => '')
+        const err = new Error(`worker HTTP ${res.status}: ${body.slice(0, 100)}`)
+        err.workerAlreadyRetried = res.status === 502 && body.trim() === 'extraction failed'
+        throw err
+      }
       const web = Readable.fromWeb(res.body)
       web.on('error', () => { S.streamDownloading = false; try { ff.stdin.destroy() } catch {} })
       web.pipe(ff.stdin)
@@ -365,10 +375,17 @@ function startRemoteStream(item, seekSec, song, S = activeSession()) {
       })
     } catch (e) {
       if (ac.signal.aborted) { S.streamDownloading = false; try { ff.stdin.end() } catch {}; return }
-      // El worker (Alemania) no pudo extraer. Causa típica: video GEO-RESTRINGIDO a
-      // la región de Santiago (disponible en Chile, no en Alemania). Fallback: se
-      // extrae LOCALMENTE en Santiago y se alimenta el MISMO ffmpeg decodificador.
-      console.warn('worker no pudo servir, fallback local en Santiago:', e.message)
+      if (e.workerAlreadyRetried) {
+        console.warn('worker no pudo extraer (ya con reintento vía proxy Santiago):', e.message)
+        S.streamDownloading = false
+        S.playFailReason = 'no disponible'
+        try { ff.stdin.end() } catch {}
+        return
+      }
+      // El worker no respondió en absoluto (caído, timeout, error de red/infra) —
+      // único caso real para el fallback local: extraer en Santiago y alimentar
+      // el MISMO ffmpeg decodificador.
+      console.warn('worker no responde, fallback local en Santiago:', e.message)
       startLocalFallback(ff, item, song, seekSec)
     }
   })()
@@ -376,10 +393,12 @@ function startRemoteStream(item, seekSec, song, S = activeSession()) {
 }
 
 // Fallback de reproducción: extrae con yt-dlp LOCAL (Santiago) y lo pipea al ffmpeg
-// `ff` que ya decodifica a PCM (es agnóstico al formato de entrada). Resuelve los
-// videos geo-restringidos a Chile que el worker alemán no puede bajar. Si también
-// falla acá, se marca S.playFailReason para avisar. (El seek no se reaplica en el
-// fallback: arranca desde 0; es un caso de borde poco frecuente.)
+// `ff` que ya decodifica a PCM (es agnóstico al formato de entrada). Reservado para
+// cuando el worker de Alemania NO RESPONDE en absoluto (caído, timeout, error de
+// red/infra) — los geo-restringidos a Chile los resuelve el worker solo, vía su
+// propio proxy a Santiago (ver SANTIAGO_PROXY en worker/server.mjs), sin llegar
+// hasta acá. Si también falla, se marca S.playFailReason para avisar. (El seek no
+// se reaplica en el fallback: arranca desde 0; es un caso de borde poco frecuente.)
 function startLocalFallback(ff, item, song, seekSec, S = activeSession()) {
   try {
     // Tee a la caché LOCAL en disco (Santiago) SOLO si hay canción y sin seek (audio
