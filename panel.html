@@ -433,9 +433,21 @@
   .pb-center { display: flex; flex-direction: column; gap: 7px; flex: 0 1 560px; max-width: 620px; }
   /* Lado derecho con el volumen; flex:1 equilibra para centrar los controles (estilo Spotify) */
   .pb-right { flex: 1; display: flex; align-items: center; justify-content: flex-end; }
-  .pb-volume { display: flex; align-items: center; gap: 8px; width: 100%; max-width: 170px; }
+  .pb-volume { display: flex; align-items: center; gap: 8px; width: 100%; max-width: 200px; }
   .pb-volume input[type=range] { flex: 1; min-width: 70px; accent-color: var(--accent); cursor: pointer; }
   .pb-vol-ico { font-size: 1rem; opacity: .85; flex-shrink: 0; }
+  .pb-vol-pct { font-size: .72rem; color: var(--muted); font-variant-numeric: tabular-nums; flex-shrink: 0; width: 34px; text-align: right; }
+  /* Zona "aumentada" (>100%, solo admins pueden llegar ahí) */
+  .pb-volume.boosted input[type=range] { accent-color: #f59e0b; }
+  .pb-volume.boosted .pb-vol-pct { color: #f59e0b; font-weight: 600; }
+  /* Bloqueador de volumen (solo admin puede togglearlo; el efecto se ve para todos) */
+  .vol-lock-btn {
+    background: none; border: none; cursor: pointer; font-size: .95rem; opacity: .75;
+    flex-shrink: 0; padding: 0 0 0 2px; line-height: 1;
+  }
+  .vol-lock-btn:hover { opacity: 1; }
+  .pb-volume.locked input[type=range] { opacity: .4; pointer-events: none; }
+  .pb-volume.locked .pb-vol-ico, .pb-volume.locked .pb-vol-pct { opacity: .5; }
   .pb-progress { display: flex; align-items: center; gap: 10px; }
   .pb-progress span { color: var(--muted); font-size: .72rem; font-variant-numeric: tabular-nums; flex-shrink: 0; }
   .pb-progress .progress { flex: 1; }
@@ -700,6 +712,8 @@
   .modal-actions .cancel { background: var(--panel); color: var(--muted); }
   .modal-actions .cancel:hover { background: var(--bg); color: var(--text); }
   .modal-actions button:disabled { opacity: .5; cursor: not-allowed; }
+  .upload-progress { height: 8px; border-radius: 5px; background: var(--panel); overflow: hidden; }
+  .upload-progress-bar { height: 100%; width: 0%; background: var(--accent); transition: width .15s linear; }
 
   /* Aviso cuando el usuario no está en el canal de voz del bot y por tanto no
      puede controlar la música/sonidos. */
@@ -1250,6 +1264,9 @@
           <label class="keepalive" id="keepalive-wrap" title="Mantener el bot conectado siempre (ignora la desconexión por inactividad)">
             <input type="checkbox" id="keepalive-toggle"> 📌 Mantener conectado
           </label>
+          <label class="keepalive" id="dj-wrap" title="Cuando la cola se vacía, el DJ elige sola la siguiente canción (sigue la playlist en curso o elige al azar de la Biblioteca)">
+            <input type="checkbox" id="dj-toggle" onchange="toggleDj(this.checked)"> 🎧 DJ automático
+          </label>
           <button id="btn-disconnect" class="vc-disconnect" onclick="disconnectVoice()" title="Desconectar del canal de voz">🔌 Desconectar</button>
         </div>
       </div>
@@ -1336,6 +1353,9 @@
         <label>Artista (opcional)
           <input type="text" id="song-artist" placeholder="Artista">
         </label>
+        <div class="upload-progress" id="song-progress-wrap" style="display:none">
+          <div class="upload-progress-bar" id="song-progress-bar"></div>
+        </div>
         <div class="modal-actions">
           <button type="button" class="cancel" id="song-cancel">Cancelar</button>
           <button type="submit" id="song-submit">Subir</button>
@@ -1546,6 +1566,8 @@
       <span class="pb-vol-ico">🔊</span>
       <input type="range" id="music-volume" min="0" max="200" step="5" value="100"
              oninput="onMusicVolumeInput(this.value)" onchange="saveMusicVolume(this.value)">
+      <span class="pb-vol-pct" id="pb-vol-pct">100%</span>
+      <button id="vol-lock-btn" class="vol-lock-btn" style="display:none" onclick="toggleVolumeLock()"></button>
     </div>
   </div>
 </div>
@@ -1573,6 +1595,26 @@ async function webFetch(path, opts = {}) {
   if (selectedGuildId) headers['X-Guild-Id'] = selectedGuildId
   return fetch(webUrl(path), { credentials: 'include', ...opts, headers })
 }
+// Subida con progreso real (fetch no reporta avance de envío; XMLHttpRequest sí).
+// Misma base/credenciales/header de servidor que webFetch, pero devuelve
+// {status, json()} en vez de una Response para no duplicar toda su API.
+function webUploadWithProgress(path, body, contentType, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', webUrl(path))
+    xhr.withCredentials = true
+    xhr.setRequestHeader('Content-Type', contentType)
+    if (selectedGuildId) xhr.setRequestHeader('X-Guild-Id', selectedGuildId)
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total) }
+    xhr.onload = () => {
+      let data = null
+      try { data = JSON.parse(xhr.responseText) } catch {}
+      resolve({ status: xhr.status, data })
+    }
+    xhr.onerror = () => reject(new Error('Error de red'))
+    xhr.send(body)
+  })
+}
 function botUrl(path) { return BOT_BASE + path }
 // Servidor (guild) que controla el panel. Se manda en cada petición; el bot
 // resuelve la sesión de ese servidor (o la activa si no se especifica).
@@ -1585,6 +1627,14 @@ async function botFetch(path, opts = {}) {
   return fetch(botUrl(path), { credentials: 'include', ...opts, headers })
 }
 async function loadMe() {
+  await refreshMe()
+  loadMusic()
+  loadUsers()   // se autolimita a admins; necesario para la vista dividida en PC
+}
+// Solo re-consulta /api/me (roles dependen del guild activo vía X-Guild-Id) y
+// refresca la UI que depende de ser-admin. Se separó de loadMe() para poder
+// llamarlo al cambiar de servidor sin repetir loadMusic()/loadUsers().
+async function refreshMe() {
   try {
     const res = await webFetch('/api/me')
     me = res.ok ? await res.json() : null
@@ -1598,8 +1648,6 @@ async function loadMe() {
   } catch { me = null }
   applyAdminUI()
   renderUserChip()
-  loadMusic()
-  loadUsers()   // se autolimita a admins; necesario para la vista dividida en PC
 }
 
 // Muestra el usuario logueado (avatar + nombre) arriba a la derecha.
@@ -1628,6 +1676,17 @@ function applyAdminUI() {
     if (isAdmin) el.style.removeProperty('display')
     else el.style.setProperty('display', 'none', 'important')
   }
+  // Solo admins pueden subir el volumen de música por sobre 100% (tope 200%);
+  // el resto del panel lo mantiene limitado a 0-100%.
+  const volSlider = document.getElementById('music-volume')
+  if (volSlider) {
+    volSlider.max = isAdmin ? 200 : 100
+    if (Number(volSlider.value) > Number(volSlider.max)) volSlider.value = volSlider.max
+  }
+  // Bloqueador de volumen: solo admins ven el candado para togglearlo (el
+  // efecto del bloqueo, en cambio, se aplica a TODOS por igual).
+  const lockBtn = document.getElementById('vol-lock-btn')
+  if (lockBtn) lockBtn.style.display = isAdmin ? '' : 'none'
 }
 
 // Alternar vista en PC: dividida (lado a lado) o por pestañas. Se recuerda.
@@ -1933,6 +1992,17 @@ document.getElementById('keepalive-modal').addEventListener('click', (e) => {
   if (e.target.id === 'keepalive-modal') e.currentTarget.style.display = 'none'
 })
 
+// Modo DJ automático (solo-admin, por servidor): sin confirmación, directo.
+function syncDjToggle() {
+  const t = document.getElementById('dj-toggle')
+  if (t && state && state.djEnabled != null) t.checked = !!state.djEnabled
+}
+async function toggleDj(on) {
+  const data = await api('/api/dj-enabled', { value: on })
+  if (data && data.ok) toast(on ? '🎧 DJ automático activado' : 'DJ automático desactivado')
+  else { toast((data && data.error) || 'No se pudo cambiar'); syncDjToggle() }
+}
+
 // Tamaño máximo de la cola de música.
 function syncMaxQueueInput() {
   const inp = document.getElementById('max-queue')
@@ -2024,8 +2094,17 @@ document.getElementById('progress').onclick = (e) => {
 function updateVolIcon(pct) {
   const ico = document.querySelector('.pb-vol-ico')
   if (ico) ico.textContent = pct == 0 ? '🔇' : pct < 60 ? '🔈' : pct < 120 ? '🔉' : '🔊'
+  const lbl = document.getElementById('pb-vol-pct')
+  if (lbl) lbl.textContent = Math.round(pct) + '%'
+  const wrap = document.querySelector('.pb-volume')
+  if (wrap) wrap.classList.toggle('boosted', Number(pct) > 100)
 }
 function onMusicVolumeInput(pct) { updateVolIcon(pct) } // feedback inmediato al arrastrar
+async function toggleVolumeLock() {
+  const wantOn = !(state && state.volumeLocked)
+  const data = await api('/api/volume-lock', { value: wantOn })
+  if (data && data.ok) toast(data.volumeLocked ? '🔒 Volumen bloqueado' : '🔓 Volumen desbloqueado')
+}
 async function saveMusicVolume(pct) {
   const data = await api('/api/music-volume', { to: Number(pct) / 100 })
   // Si fue rechazado (p. ej. dentro del cooldown global web+Discord), devolver el
@@ -2081,6 +2160,10 @@ function updateNpArt() {
   })
 }
 
+// Clave de la última canción que se centró en la vista de la cola; evita
+// re-centrar (y pelear con el scroll manual del usuario) en cada refresh de
+// 1s si la canción actual no cambió.
+let lastCenteredSongKey = null
 function render() {
   if (!state) return
   const dot = document.getElementById('conn-dot')
@@ -2092,6 +2175,7 @@ function render() {
   const dcBtn = document.getElementById('btn-disconnect')
   if (dcBtn) dcBtn.disabled = !state.connected
   syncKeepAliveToggle()
+  syncDjToggle()
 
   // Aviso de bloqueo: si el bot está en un canal y este usuario no está en él
   // (y no es admin), no puede controlar nada → se lo explicamos.
@@ -2121,6 +2205,15 @@ function render() {
   if (volSlider && state.musicVolume != null && document.activeElement !== volSlider) {
     volSlider.value = Math.round(state.musicVolume * 100)
     updateVolIcon(volSlider.value)
+  }
+  const volLocked = !!state.volumeLocked
+  const volWrap = document.querySelector('.pb-volume')
+  if (volWrap) volWrap.classList.toggle('locked', volLocked)
+  if (volSlider) volSlider.disabled = volLocked
+  const lockBtn = document.getElementById('vol-lock-btn')
+  if (lockBtn) {
+    lockBtn.textContent = volLocked ? '🔒' : '🔓'
+    lockBtn.title = volLocked ? 'Desbloquear el volumen (solo admin)' : 'Bloquear el volumen para todos (solo admin)'
   }
   document.getElementById('t-elapsed').textContent = state.current ? fmt(state.elapsed) : '0:00'
   document.getElementById('t-total').textContent = state.current ? fmt(state.current.duration) : '–'
@@ -2152,10 +2245,14 @@ function render() {
     const list = document.getElementById('queue-list')
     const played = state.played || []
     const rows = []
-    // 1) Reproducidas (en gris, no se quitan; ↻ para re-agregar)
+    // 1) Reproducidas (en gris, no se quitan; ↻ para re-agregar). El ícono
+    // depende de cómo terminó: reproducida entera, saltada, o cancelada por stop.
     for (const item of played) {
+      const [histIco, histTitle] = item.reason === 'skipped' ? ['⏭', 'Saltada']
+        : item.reason === 'stopped' ? ['⏹', 'Cancelada (stop)']
+        : ['✅', 'Reproducida']
       rows.push(`<li class="track-played">
-        <span class="status-ico" title="Ya reproducida">✓</span>
+        <span class="status-ico" title="${histTitle}">${histIco}</span>
         ${artThumb(item.songId)}
         <span class="title" title="${esc(item.url)}">${esc(item.title)}</span>
         ${addedByHtml(item.addedBy)}
@@ -2185,6 +2282,16 @@ function render() {
       </li>`)
     })
     list.innerHTML = rows.length ? rows.join('') : '<li class="empty">La cola está vacía</li>'
+
+    // Centrar verticalmente la canción actual (arriba = reproducidas, abajo =
+    // próximas), solo cuando CAMBIA la canción (no en cada refresh de 1s, para
+    // no pelear con el scroll manual del usuario mientras navega la lista).
+    const curKey = state.current ? (state.current.songId || state.current.url) : null
+    if (curKey !== lastCenteredSongKey) {
+      lastCenteredSongKey = curKey
+      const curEl = list.querySelector('.track-current')
+      if (curEl) curEl.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    }
   }
 }
 
@@ -3303,7 +3410,7 @@ async function playOpenPlaylist() {
     if (!items.length) { toast('La lista está vacía'); return }
     let added = 0
     for (const it of items) {
-      const data = await api('/api/music/play', { id: it.song_id })
+      const data = await api('/api/music/play', { id: it.song_id, playlistId: openPlaylist.id })
       if (data && data.ok) added++
       else break   // p. ej. bloqueado por no estar en el canal de voz
     }
@@ -3614,6 +3721,8 @@ function openSongModal() {
 function closeSongModal() {
   document.getElementById('song-modal').style.display = 'none'
   document.getElementById('song-form').reset()
+  document.getElementById('song-progress-wrap').style.display = 'none'
+  document.getElementById('song-progress-bar').style.width = '0%'
 }
 document.getElementById('btn-upload-song').addEventListener('click', openSongModal)
 document.getElementById('song-cancel').addEventListener('click', closeSongModal)
@@ -3628,15 +3737,19 @@ document.getElementById('song-form').addEventListener('submit', async (e) => {
   if (!file || !title) { toast('Falta el archivo o el título'); return }
   const ext = (file.name.split('.').pop() || '').toLowerCase()
   const btn = document.getElementById('song-submit')
+  const progressWrap = document.getElementById('song-progress-wrap')
+  const progressBar = document.getElementById('song-progress-bar')
   btn.disabled = true; btn.textContent = 'Subiendo...'
+  progressWrap.style.display = 'block'
+  progressBar.style.width = '0%'
   try {
     const buf = await file.arrayBuffer()
     const qs = new URLSearchParams({ title, artist, ext })
-    const res = await webFetch('/api/music/upload?' + qs, {
-      method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: buf,
-    })
-    const data = await res.json().catch(() => null)
-    if (!res.ok) { toast(data && data.error ? data.error : 'Error al subir'); return }
+    const { status, data } = await webUploadWithProgress(
+      '/api/music/upload?' + qs, buf, 'application/octet-stream',
+      (frac) => { progressBar.style.width = Math.round(frac * 100) + '%' }
+    )
+    if (status < 200 || status >= 300) { toast(data && data.error ? data.error : 'Error al subir'); return }
     toast('Canción subida ✓')
     closeSongModal()
     loadMusic()
@@ -3644,6 +3757,7 @@ document.getElementById('song-form').addEventListener('submit', async (e) => {
     toast('No se pudo subir la canción')
   } finally {
     btn.disabled = false; btn.textContent = 'Subir'
+    progressWrap.style.display = 'none'
   }
 })
 
@@ -4234,6 +4348,7 @@ function chooseServer(id) {
   localStorage.setItem('selectedGuildId', id)
   document.getElementById('server-picker').classList.remove('show')
   const sel = document.getElementById('guild-select'); if (sel) sel.value = id
+  refreshMe() // los roles (admin) dependen del servidor activo
   refresh(); loadSounds(); loadVoiceChannels()
 }
 async function bootGuildSelection() {

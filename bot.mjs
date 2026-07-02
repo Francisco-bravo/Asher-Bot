@@ -5,7 +5,7 @@ import {
 } from 'discord.js'
 import {
   joinVoiceChannel, createAudioPlayer, createAudioResource,
-  AudioPlayerStatus, VoiceConnectionStatus, StreamType
+  AudioPlayerStatus, VoiceConnectionStatus, StreamType, entersState
 } from '@discordjs/voice'
 import { spawn } from 'node:child_process'
 import {
@@ -27,6 +27,7 @@ import * as playHistory from './lib/history.mjs'
 import * as auth from './lib/auth.mjs'
 import * as rbac from './lib/rbac.mjs'
 import * as musicCache from './lib/music-cache.mjs'
+import { pickNext as djPickNext } from './lib/audio/dj.mjs'
 import * as art from './lib/art.mjs'
 import * as artsearch from './lib/artsearch.mjs'
 import { MixerStream, SoundMixer } from './lib/audio/mixer.mjs'
@@ -127,6 +128,15 @@ let idleDisconnectMs = 10 * 60 * 1000
 // un switch solo-admin POR SERVIDOR; persiste entre reinicios. Advertencia en la
 // UI: si muchos servidores lo activan, el bot se vuelve más lento a la larga.
 const keepAliveGuilds = new Set()
+// Servidores con el volumen de música BLOQUEADO (switch solo-admin POR SERVIDOR):
+// mientras está activo, cmdMusicVolume rechaza cualquier cambio (web o Discord),
+// incluso del propio admin, hasta que se desactive. Persiste entre reinicios.
+const volumeLockedGuilds = new Set()
+// Servidores con el modo DJ automático activo (switch solo-admin POR SERVIDOR):
+// cuando la cola se queda vacía, elige sola la siguiente canción (ver lib/audio/dj.mjs).
+// Persiste entre reinicios; el estado de "sesión" del DJ (canciones ya elegidas,
+// playlist que sigue) vive en la GuildSession y se resetea al activar el switch.
+const djEnabledGuilds = new Set()
 try {
   const s = JSON.parse(readFileSync(SETTINGS_FILE, 'utf8'))
   soundBaseVolume = s.soundBaseVolume ?? 1
@@ -141,12 +151,14 @@ try {
   if (s.soundPcmWindowMs != null) soundPcmWindowMs = s.soundPcmWindowMs
   if (s.idleDisconnectMs != null) idleDisconnectMs = s.idleDisconnectMs
   if (Array.isArray(s.keepAliveGuilds)) for (const g of s.keepAliveGuilds) keepAliveGuilds.add(String(g))
+  if (Array.isArray(s.volumeLockedGuilds)) for (const g of s.volumeLockedGuilds) volumeLockedGuilds.add(String(g))
+  if (Array.isArray(s.djEnabledGuilds)) for (const g of s.djEnabledGuilds) djEnabledGuilds.add(String(g))
   if (s.maxQueue != null) MAX_QUEUE = s.maxQueue
   if (s.maxHistory != null) MAX_HISTORY = s.maxHistory
 } catch {}
 soundTargetLufs = setTargetI(soundTargetLufs) // aplica el objetivo cargado
 function saveSettings() {
-  try { writeFileSync(SETTINGS_FILE, JSON.stringify({ soundBaseVolume, maxSoundSeconds, musicDuck, musicVolume, musicVolumeCooldownMs, soundTargetLufs, workerMaxConcurrency, workerCacheMaxGb, musicBitrateKbps, soundPcmWindowMs, idleDisconnectMs, keepAliveGuilds: [...keepAliveGuilds], maxQueue: MAX_QUEUE, maxHistory: MAX_HISTORY })) } catch {}
+  try { writeFileSync(SETTINGS_FILE, JSON.stringify({ soundBaseVolume, maxSoundSeconds, musicDuck, musicVolume, musicVolumeCooldownMs, soundTargetLufs, workerMaxConcurrency, workerCacheMaxGb, musicBitrateKbps, soundPcmWindowMs, idleDisconnectMs, keepAliveGuilds: [...keepAliveGuilds], volumeLockedGuilds: [...volumeLockedGuilds], djEnabledGuilds: [...djEnabledGuilds], maxQueue: MAX_QUEUE, maxHistory: MAX_HISTORY })) } catch {}
 }
 // Empuja al worker los ajustes de Variables Generales que aplica en caliente
 // (concurrencia, tope de caché en disco, bitrate). El cliente está en
@@ -161,7 +173,9 @@ pushWorkerConfig() // al arrancar, sincroniza el worker con el ajuste guardado
 if (!existsSync(SOUNDS_DIR)) mkdirSync(SOUNDS_DIR, { recursive: true })
 
 // ── Estado por servidor (GuildSession) ──────────────────────────────────────
-// item de la cola: { url, title, duration, voiceChannelId, guildId, textChannelId }
+// item de la cola: { url, title, duration, voiceChannelId, guildId, textChannelId,
+//                     addedBy, playlistId } — playlistId solo si vino de "reproducir
+//                     todo" en una playlist (lo usa el DJ automático, lib/audio/dj.mjs)
 // TODO el estado de reproducción vive en una instancia por servidor de Discord.
 // La clase está en lib/audio/guild-session.mjs (contenedor de estado puro); aquí
 // se le inyectan sus dependencias (players de @discordjs/voice, el volumen por
@@ -340,7 +354,17 @@ function startRemoteStream(item, seekSec, song, S = activeSession()) {
         headers: workerHeaders(),
         signal: ac.signal,
       })
-      if (!res.ok || !res.body) throw new Error(`worker HTTP ${res.status}`)
+      if (!res.ok || !res.body) {
+        // El worker YA reintenta internamente vía el proxy de Santiago antes de
+        // rendirse (ver worker/server.mjs extractAndStream); ese reintento cubre
+        // justamente los geo-restringidos a Chile. Si aun así responde este 502
+        // "extraction failed", el video está genuinamente no disponible — un
+        // fallback local daría el mismo resultado, así que NO se reintenta acá.
+        const body = await res.text().catch(() => '')
+        const err = new Error(`worker HTTP ${res.status}: ${body.slice(0, 100)}`)
+        err.workerAlreadyRetried = res.status === 502 && body.trim() === 'extraction failed'
+        throw err
+      }
       const web = Readable.fromWeb(res.body)
       web.on('error', () => { S.streamDownloading = false; try { ff.stdin.destroy() } catch {} })
       web.pipe(ff.stdin)
@@ -351,10 +375,17 @@ function startRemoteStream(item, seekSec, song, S = activeSession()) {
       })
     } catch (e) {
       if (ac.signal.aborted) { S.streamDownloading = false; try { ff.stdin.end() } catch {}; return }
-      // El worker (Alemania) no pudo extraer. Causa típica: video GEO-RESTRINGIDO a
-      // la región de Santiago (disponible en Chile, no en Alemania). Fallback: se
-      // extrae LOCALMENTE en Santiago y se alimenta el MISMO ffmpeg decodificador.
-      console.warn('worker no pudo servir, fallback local en Santiago:', e.message)
+      if (e.workerAlreadyRetried) {
+        console.warn('worker no pudo extraer (ya con reintento vía proxy Santiago):', e.message)
+        S.streamDownloading = false
+        S.playFailReason = 'no disponible'
+        try { ff.stdin.end() } catch {}
+        return
+      }
+      // El worker no respondió en absoluto (caído, timeout, error de red/infra) —
+      // único caso real para el fallback local: extraer en Santiago y alimentar
+      // el MISMO ffmpeg decodificador.
+      console.warn('worker no responde, fallback local en Santiago:', e.message)
       startLocalFallback(ff, item, song, seekSec)
     }
   })()
@@ -362,10 +393,12 @@ function startRemoteStream(item, seekSec, song, S = activeSession()) {
 }
 
 // Fallback de reproducción: extrae con yt-dlp LOCAL (Santiago) y lo pipea al ffmpeg
-// `ff` que ya decodifica a PCM (es agnóstico al formato de entrada). Resuelve los
-// videos geo-restringidos a Chile que el worker alemán no puede bajar. Si también
-// falla acá, se marca S.playFailReason para avisar. (El seek no se reaplica en el
-// fallback: arranca desde 0; es un caso de borde poco frecuente.)
+// `ff` que ya decodifica a PCM (es agnóstico al formato de entrada). Reservado para
+// cuando el worker de Alemania NO RESPONDE en absoluto (caído, timeout, error de
+// red/infra) — los geo-restringidos a Chile los resuelve el worker solo, vía su
+// propio proxy a Santiago (ver SANTIAGO_PROXY en worker/server.mjs), sin llegar
+// hasta acá. Si también falla, se marca S.playFailReason para avisar. (El seek no
+// se reaplica en el fallback: arranca desde 0; es un caso de borde poco frecuente.)
 function startLocalFallback(ff, item, song, seekSec, S = activeSession()) {
   try {
     // Tee a la caché LOCAL en disco (Santiago) SOLO si hay canción y sin seek (audio
@@ -692,7 +725,10 @@ async function enrich(item) {
   if (item.songId !== song.id) { item.songId = song.id; updatePanel() }
   // 1) Metadata (una sola vez por item): obtiene título/duración reales y los
   //    GUARDA en la canción. Se hace si falta la duración o el título es pobre.
-  if (!item.metaTried && (!item.duration || isPoorTitle(song.title, song.source_url))) {
+  //    Las subidas manuales ("upload:...") no tienen una URL real de la que pedir
+  //    metadata (se midieron al subir, en web.mjs) — nunca se intenta con ellas.
+  const isUpload = /^upload:/.test(song.source_url)
+  if (!isUpload && !item.metaTried && (!item.duration || isPoorTitle(song.title, song.source_url))) {
     item.metaTried = true
     await fetchMeta(item) // setea item.title/duration reales (si los hay)
     const goodTitle = !isPoorTitle(item.title, sourceUrl) ? item.title : null
@@ -793,7 +829,6 @@ async function backgroundWork(S = activeSession()) {
   if (didWork) setTimeout(() => backgroundWork(S), 1500)
 }
 setInterval(() => { for (const s of sessions.values()) backgroundWork(s) }, BG_WORK_INTERVAL)
-setInterval(() => { for (const s of sessions.values()) backgroundWork(s) }, BG_WORK_INTERVAL)
 
 // Reproduce desde un archivo local ya descargado (el seek es seek de archivo).
 function startFileStream(filePath, seekSec, S = activeSession()) {
@@ -821,6 +856,24 @@ async function ensureConnection(voiceChannelId, guildId, S = getSession(guildId)
     guildId,
     adapterCreator: vc.guild.voiceAdapterCreator,
   })
+  // Si Discord nos saca del canal por fuera de nuestro control (kick, canal
+  // borrado, movidos por un admin), la conexión pasa a Disconnected sin pasar
+  // por nuestro destroyConnection(). Distinguimos de una reconexión real
+  // (p.ej. cambio de canal de voz) esperando brevemente a Signalling/Connecting;
+  // si no llega, es un corte definitivo y limpiamos igual que el botón Desconectar.
+  const conn = S.connection
+  conn.on(VoiceConnectionStatus.Disconnected, async () => {
+    try {
+      await Promise.race([
+        entersState(conn, VoiceConnectionStatus.Signalling, 5000),
+        entersState(conn, VoiceConnectionStatus.Connecting, 5000),
+      ])
+    } catch {
+      if (S.connection !== conn) return // ya fue reemplazada por otra conexión
+      console.log(`Voz desconectada externamente (guild ${guildId}); limpiando cola`)
+      disconnectAndClear(S)
+    }
+  })
   await new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error('Timeout conectando al canal de voz')), 20000)
     const onReady = () => { clearTimeout(timeout); S.connection.off('error', onErr); resolve() }
@@ -842,6 +895,30 @@ function destroyConnection(S = activeSession()) {
   }
 }
 
+// Detiene la reproducción (no pausa) y suelta la conexión de voz; cmdStop() ya
+// vacía la cola completa (marcando lo cancelado como 'stopped' en el
+// historial). Se usa en TODA salida del canal de voz (botón Desconectar,
+// inactividad, o Discord desconectando al bot por fuera de nuestro control:
+// kick/mover/etc).
+function disconnectAndClear(S) {
+  sessionCtx.run(S, () => {
+    try { cmdStop() } catch {}
+    destroyConnection(S)
+    updatePanel()
+  })
+}
+
+// ── Modo DJ automático (ver lib/audio/dj.mjs) ───────────────────────────────
+// Si la cola de ESTA sesión está vacía y el DJ está activo para su servidor,
+// encola una canción más (mantiene siempre 1 de colchón; ver ensurePlaying).
+function djMaybeTopUp(S) {
+  // Sin canal de voz no hay dónde reproducir (evita elegir canciones al pedo
+  // si el DJ se activa con el bot desconectado).
+  if (S.queue.length > 0 || !S.currentChannelId || !djEnabledGuilds.has(String(S.guildId))) return
+  const item = djPickNext(S)
+  if (item) S.queue.push(item)
+}
+
 // ── Motor de reproducción ─────────────────────────────────────────────────
 async function ensurePlaying(S = activeSession()) {
   if (S.playing) return
@@ -849,8 +926,15 @@ async function ensurePlaying(S = activeSession()) {
   try {
     while (true) {
       if (!S.current) {
-        if (S.queue.length === 0) break
+        if (S.queue.length === 0) {
+          djMaybeTopUp(S)
+          if (S.queue.length === 0) break
+        }
         S.current = S.queue.shift()
+        // La playlist de la última canción sonada (si la hubo) es la que el DJ
+        // continuaría al vaciarse la cola; se actualiza siempre, DJ activo o no.
+        S.djLastPlaylistId = S.current.playlistId ?? null
+        djMaybeTopUp(S) // deja 1 canción de colchón ya encolada
       }
       try {
         await ensureConnection(S.current.voiceChannelId, S.current.guildId)
@@ -960,7 +1044,10 @@ async function ensurePlaying(S = activeSession()) {
 
       const t = S.transition
       S.transition = 'next'
-      if (t === 'next') {
+      if (t === 'next' || t === 'skip') {
+        // 'next' = terminó sola (motivo 'played'); 'skip' = el usuario la saltó
+        // (cmdSkip ya dejó S.transition='skip'). Mismo avance, distinto motivo.
+        S.current.reason = t === 'skip' ? 'skipped' : 'played'
         S.history.push(S.current)
         if (S.history.length > MAX_HISTORY) S.history.shift()
         S.current = null
@@ -970,8 +1057,10 @@ async function ensurePlaying(S = activeSession()) {
       } else if (t === 'seek') {
         // S.current se mantiene, S.seekTarget ya viene seteado
       } else if (t === 'stop') {
-        // Stop: la canción se trata como terminada (pasa a reproducidas), pero
-        // NO se avanza a la siguiente. El bot queda detenido sin desconectarse.
+        // Stop: la canción se trata como terminada (pasa a reproducidas, motivo
+        // 'stopped'), pero NO se avanza a la siguiente. El bot queda detenido
+        // sin desconectarse. cmdStop ya vació el resto de la cola.
+        S.current.reason = 'stopped'
         S.history.push(S.current)
         if (S.history.length > MAX_HISTORY) S.history.shift()
         S.current = null
@@ -1113,11 +1202,22 @@ function requesterFromMember(member) {
   }
 }
 
-function addToQueue(url, voiceChannelId, guildId, textChannelId, title, addedBy = null, S = getSession(guildId)) {
+function addToQueue(url, voiceChannelId, guildId, textChannelId, title, addedBy = null, playlistId = null, S = getSession(guildId)) {
   if (S.queue.length >= MAX_QUEUE) throw new Error(`La cola está llena (máximo ${MAX_QUEUE})`)
-  const item = { url, title: title || url, duration: null, voiceChannelId, guildId, textChannelId, addedBy }
-  // La metadata (título/duración) NO se pide aquí para no lanzar otro yt-dlp que
-  // compita con el arranque del stream; la rellena backgroundWork cuando ya suena.
+  const item = { url, title: title || url, duration: null, voiceChannelId, guildId, textChannelId, addedBy, playlistId }
+  // Si la canción YA es conocida (Biblioteca), toma su duración/id de una sola
+  // consulta local (sin red). Evita mostrar la barra de progreso sin duración y,
+  // para las subidas manuales ("upload:..."), evita un enriquecido inútil más
+  // tarde: esa fuente no es una URL real, nunca se le puede pedir metadata.
+  const known = musicCache.findByUrl(url)
+  if (known) {
+    item.songId = known.id
+    if (known.duration_ms) item.duration = known.duration_ms / 1000
+    if (!isPoorTitle(known.title, known.source_url)) item.title = known.title
+  }
+  // El resto de la metadata (título si falta/carátula) NO se pide aquí para no
+  // lanzar otro yt-dlp que compita con el arranque del stream; la rellena
+  // backgroundWork cuando ya suena.
   S.queue.push(item)
   const startsNow = !S.current && S.queue.length === 1
   ensurePlaying()
@@ -1130,7 +1230,7 @@ function addToQueue(url, voiceChannelId, guildId, textChannelId, title, addedBy 
 
 function cmdSkip(S = activeSession()) {
   if (!S.current) return false
-  S.transition = 'next'
+  S.transition = 'skip' // distinto de 'next' (fin natural) para el motivo en el historial
   S.musicPlayer.stop()
   return true
 }
@@ -1172,13 +1272,20 @@ function cmdResume(S = activeSession()) {
 }
 
 function cmdStop(S = activeSession()) {
-  // Detiene la canción actual como si hubiera terminado (pasa a reproducidas);
-  // NO inicia la siguiente, NO borra la cola y NO se desconecta. El bot queda
-  // detenido en el canal hasta que alguien reproduzca o agregue una canción.
-  if (!S.current) return false
+  // Detiene la canción actual Y vacía la cola completa; todo lo cancelado queda
+  // marcado con motivo 'stopped' en el historial (no 'played', ver getState/
+  // reason). NO se desconecta. El bot queda detenido en el canal hasta que
+  // alguien reproduzca o agregue una canción.
+  if (!S.current && S.queue.length === 0) return false
   S.transition = 'stop'
   S.pendingSounds = [] // si había sonidos esperando un switch, se descartan
-  S.musicPlayer.stop()
+  for (const item of S.queue) {
+    item.reason = 'stopped'
+    S.history.push(item)
+    if (S.history.length > MAX_HISTORY) S.history.shift()
+  }
+  S.queue.length = 0
+  if (S.current) S.musicPlayer.stop()
   return true
 }
 
@@ -1312,9 +1419,7 @@ setInterval(() => {
     if (Date.now() - sess.emptySince >= idleDisconnectMs) {
       sess.emptySince = 0
       console.log(`Inactividad: desconectando del canal de voz (guild ${gid})`)
-      // Mismo efecto que el botón Desconectar (detiene y vacía la cola), en el
-      // contexto de ESA sesión para que los defaults activeSession() resuelvan bien.
-      sessionCtx.run(sess, () => { try { cmdStop() } catch {} sess.queue.length = 0; destroyConnection(); updatePanel() })
+      disconnectAndClear(sess)
     }
   }
 }, IDLE_CHECK_INTERVAL)
@@ -1344,7 +1449,7 @@ async function onInteraction(interaction) {
     }
     let r
     try {
-      r = addToQueue(resolved.url, member.voice.channel.id, interaction.guildId, interaction.channelId, resolved.title, requesterFromMember(member))
+      r = addToQueue(resolved.url, member.voice.channel.id, interaction.guildId, interaction.channelId, resolved.title, requesterFromMember(member), null)
     } catch (err) {
       await interaction.editReply(err.message)
       return
@@ -1416,12 +1521,16 @@ async function onInteraction(interaction) {
   }
 
   if (id === 'mp_voldown' || id === 'mp_volup') {
+    if (volumeLockedGuilds.has(String(activeGuildId(S)))) {
+      await interaction.reply({ content: '🔒 El volumen está bloqueado por un administrador.', flags: 64 }).catch(() => {})
+      return
+    }
     const left = musicVolumeCooldownLeft(S)
     if (left > 0) {
       await interaction.reply({ content: `⏳ Espera ${Math.ceil(left / 1000)}s para volver a cambiar el volumen.`, flags: 64 }).catch(() => {})
       return
     }
-    cmdMusicVolume(S.musicVolume + (id === 'mp_volup' ? 0.1 : -0.1), S)
+    cmdMusicVolume(S.musicVolume + (id === 'mp_volup' ? 0.1 : -0.1), S, memberIsAdmin(interaction.member))
   }
   else if (id === 'mp_prev') {
     const S = activeSession()
@@ -1620,12 +1729,15 @@ function cmdSoundTargetLufs(v) {
 function musicVolumeCooldownLeft(S = activeSession()) {
   return Math.max(0, musicVolumeCooldownMs - (Date.now() - S.lastMusicVolumeAt))
 }
-function cmdMusicVolume(v, S = activeSession()) {
+// Solo admins pueden superar el 100% (tope 200%); el resto queda acotado a 100%.
+function cmdMusicVolume(v, S = activeSession(), isAdmin = false) {
   if (typeof v !== 'number' || isNaN(v)) return false
+  if (volumeLockedGuilds.has(String(activeGuildId(S)))) return false // bloqueado por un admin
   if (musicVolumeCooldownLeft(S) > 0) return false // limitado: aún en enfriamiento
   S.lastMusicVolumeAt = Date.now()
   const prev = S.musicVolume
-  S.musicVolume = Math.round(Math.min(2, Math.max(0, v)) * 100) / 100
+  const cap = isAdmin ? 2 : 1
+  S.musicVolume = Math.round(Math.min(cap, Math.max(0, v)) * 100) / 100
   // Si estaba en passthrough Opus y el volumen deja de ser 1, reiniciar en PCM
   // para que el mixer pueda aplicar el volumen desde el inicio del siguiente chunk.
   if (S.opusDirect && prev === 1 && S.musicVolume !== 1 && S.current && S.currentPlaying) {
@@ -1699,6 +1811,28 @@ function cmdKeepAlive(guildId, on) {
   if (on) keepAliveGuilds.add(String(guildId)); else keepAliveGuilds.delete(String(guildId))
   getSession(guildId).emptySince = 0 // resetea el contador de inactividad
   saveSettings()
+  return true
+}
+
+// Bloqueador de volumen POR SERVIDOR (solo-admin, solo web): mientras está
+// activo, cmdMusicVolume rechaza cualquier cambio (incluso del propio admin).
+function cmdVolumeLock(guildId, on) {
+  if (!guildId) return false
+  if (on) volumeLockedGuilds.add(String(guildId)); else volumeLockedGuilds.delete(String(guildId))
+  saveSettings()
+  return true
+}
+
+// Modo DJ automático POR SERVIDOR (solo-admin): al activarlo arranca una
+// "sesión" de DJ nueva (limpia lo ya elegido y qué playlist seguía).
+function cmdDjEnabled(guildId, on) {
+  if (!guildId) return false
+  if (on) djEnabledGuilds.add(String(guildId)); else djEnabledGuilds.delete(String(guildId))
+  const S = getSession(guildId)
+  S.djPlayedIds.clear()
+  S.djLastPlaylistId = null
+  saveSettings()
+  if (on) ensurePlaying(S) // por si la cola ya estaba vacía, arranca de inmediato
   return true
 }
 
@@ -1790,7 +1924,7 @@ async function onMessage(message) {
     }
     let r
     try {
-      r = addToQueue(resolved.url, member.voice.channel.id, message.guildId, message.channelId, resolved.title, requesterFromMember(member))
+      r = addToQueue(resolved.url, member.voice.channel.id, message.guildId, message.channelId, resolved.title, requesterFromMember(member), null)
     } catch (err) {
       await message.reply(err.message)
       return
@@ -1858,7 +1992,7 @@ function getState(S = activeSession()) {
     queue: S.queue.map(i => ({ url: i.url, title: i.title, duration: i.duration, songId: i.songId ?? null, addedBy: i.addedBy || null })),
     // Reproducidas recientes (en memoria), de más antigua a más reciente,
     // para mostrarlas en gris en la cola sin que desaparezcan.
-    played: S.history.slice(-20).map(i => ({ url: i.url, title: i.title, duration: i.duration, songId: i.songId ?? null, addedBy: i.addedBy || null })),
+    played: S.history.slice(-20).map(i => ({ url: i.url, title: i.title, duration: i.duration, songId: i.songId ?? null, addedBy: i.addedBy || null, reason: i.reason || 'played' })),
     historyCount: S.history.length,
     connected: !!S.connection,
     voiceChannel: S.currentChannelName,
@@ -1876,6 +2010,8 @@ function getState(S = activeSession()) {
     soundPcmWindowMs,
     idleDisconnectMs,
     keepAlive: keepAliveGuilds.has(activeGuildId(S)),
+    volumeLocked: volumeLockedGuilds.has(String(activeGuildId(S))),
+    djEnabled: djEnabledGuilds.has(String(activeGuildId(S))),
     maxQueue: MAX_QUEUE,
     maxHistory: MAX_HISTORY,
   }
@@ -1941,14 +2077,20 @@ function canControlMusic(req) {
   return isInBotVoiceChannel(u.discord_id)
 }
 
+// ¿El miembro de Discord es administrador? (para el tope de volumen >100%, etc.)
+function memberIsAdmin(member) {
+  if (!member) return false
+  const u = auth.getUserByDiscordId(member.id)
+  return !!(u && rbac.isAdmin(u.id))
+}
+
 // Variante para comandos/botones de Discord: admin siempre; si el bot ya está en
 // un canal, el miembro debe estar en ESE canal; si no hay conexión, se permite
 // (el primero en pedir trae el bot a su canal). member.id es el id de Discord; el
 // rol admin se consulta mapeando a la fila interna del usuario.
 function memberCanControl(member, S = activeSession()) {
   if (!member) return false
-  const u = auth.getUserByDiscordId(member.id)
-  if (u && rbac.isAdmin(u.id)) return true
+  if (memberIsAdmin(member)) return true
   if (!S.connection || !S.currentChannelId) return true
   return member.voice?.channelId === S.currentChannelId
 }
@@ -2178,7 +2320,7 @@ async function onHttp(req, res) {
           if (!t) return sendJson({ error: 'El bot no está en un canal de voz' }, 400)
           const pu = panelUser(req)
           const addedBy = pu ? { id: pu.id, name: pu.display_name || pu.username, avatar: pu.avatar_url || null } : null
-          const r = addToQueue(resolved.url, t.vcId, t.gId, null, resolved.title, addedBy)
+          const r = addToQueue(resolved.url, t.vcId, t.gId, null, resolved.title, addedBy, null)
           return sendJson({ ok: true, ...r })
         }
         case '/api/music/cache': {
@@ -2252,7 +2394,8 @@ async function onHttp(req, res) {
           if (!t) return sendJson({ error: 'El bot no está en un canal de voz' }, 400)
           const pu = panelUser(req)
           const addedBy = pu ? { id: pu.id, name: pu.display_name || pu.username, avatar: pu.avatar_url || null } : null
-          const r = addToQueue(song.source_url, t.vcId, t.gId, null, song.title || song.source_url, addedBy)
+          const playlistId = body.playlistId ? Number(body.playlistId) : null
+          const r = addToQueue(song.source_url, t.vcId, t.gId, null, song.title || song.source_url, addedBy, playlistId)
           return sendJson({ ok: true, ...r })
         }
         case '/api/skip': {
@@ -2272,10 +2415,12 @@ async function onHttp(req, res) {
           return sendJson({ ok: cmdSeek(to) })
         }
         case '/api/music-volume': {
+          if (volumeLockedGuilds.has(String(activeGuildId(S))))
+            return sendJson({ error: 'El volumen está bloqueado por un administrador', locked: true, musicVolume: S.musicVolume }, 423)
           const left = musicVolumeCooldownLeft(S)
           if (left > 0) return sendJson({ error: `Espera ${Math.ceil(left / 1000)}s para volver a cambiar el volumen`, retryMs: left, musicVolume: S.musicVolume }, 429)
           const v = body.to !== undefined ? body.to : S.musicVolume + (body.delta || 0)
-          return sendJson({ ok: cmdMusicVolume(v, S), musicVolume: S.musicVolume })
+          return sendJson({ ok: cmdMusicVolume(v, S, isPanelAdmin(req)), musicVolume: S.musicVolume })
         }
         case '/api/queue/remove': {
           const i = body.index
@@ -2360,9 +2505,7 @@ async function onHttp(req, res) {
         }
         case '/api/disconnect': {
           if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador' }, 403)
-          cmdStop()
-          S.queue.length = 0   // al desconectar sí se vacía la cola (reset completo)
-          destroyConnection()
+          disconnectAndClear(S)
           return sendJson({ ok: true })
         }
         // Tiempo de auto-desconexión por inactividad (minutos; 0 = desactivado).
@@ -2377,6 +2520,22 @@ async function onHttp(req, res) {
           if (!u || !rbac.isAdmin(u.id, gid)) return sendJson({ error: 'Solo un administrador' }, 403)
           if (!gid) return sendJson({ error: 'Sin servidor activo' }, 400)
           return sendJson({ ok: cmdKeepAlive(gid, !!body.value), keepAlive: keepAliveGuilds.has(gid) })
+        }
+        // Bloqueador de volumen para el servidor activo (solo-admin de ese servidor, solo web).
+        case '/api/volume-lock': {
+          const gid = activeGuildId(S)
+          const u = panelUser(req)
+          if (!u || !rbac.isAdmin(u.id, gid)) return sendJson({ error: 'Solo un administrador' }, 403)
+          if (!gid) return sendJson({ error: 'Sin servidor activo' }, 400)
+          return sendJson({ ok: cmdVolumeLock(gid, !!body.value), volumeLocked: volumeLockedGuilds.has(String(gid)) })
+        }
+        // Modo DJ automático para el servidor activo (solo-admin de ese servidor).
+        case '/api/dj-enabled': {
+          const gid = activeGuildId(S)
+          const u = panelUser(req)
+          if (!u || !rbac.isAdmin(u.id, gid)) return sendJson({ error: 'Solo un administrador' }, 403)
+          if (!gid) return sendJson({ error: 'Sin servidor activo' }, 400)
+          return sendJson({ ok: cmdDjEnabled(gid, !!body.value), djEnabled: djEnabledGuilds.has(String(gid)) })
         }
         case '/api/voice/join': {
           if (!isPanelAdmin(req)) return sendJson({ error: 'Solo un administrador puede mover el bot de canal' }, 403)

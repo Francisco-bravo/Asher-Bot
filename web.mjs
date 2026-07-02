@@ -137,6 +137,19 @@ async function checkSoundDuration(buffer, ext) {
   }
 }
 
+// Mide la duración de un audio subido (canciones permanentes: sin tope, a
+// diferencia de checkSoundDuration). Si no se puede medir, sigue sin duración
+// (no bloquea la subida por un formato raro).
+async function probeAudioDurationMs(buffer, ext) {
+  const tmp = join(paths.tmp, `up_${randomBytes(8).toString('hex')}.${ext}`)
+  try {
+    writeFileSync(tmp, buffer)
+    return await loudness.probeDurationMs(tmp)
+  } finally {
+    try { rmSync(tmp, { force: true }) } catch { /* ignore */ }
+  }
+}
+
 function currentUser(req) {
   const token = parseCookies(req)[SID_COOKIE]
   return token ? auth.getSession(token) : null
@@ -679,7 +692,8 @@ http.createServer(async (req, res) => {
       if (!MUSIC_EXTS.has(ext)) return send(res, 400, { error: `Extensión no permitida: ${ext}` })
       const buffer = await readBody(req, MAX_MUSIC)
       if (!buffer.length) return send(res, 400, { error: 'Cuerpo vacío' })
-      const song = await music.uploadPermanent({ title, artist, ext, buffer })
+      const durationMs = await probeAudioDurationMs(buffer, ext).catch(() => null)
+      const song = await music.uploadPermanent({ title, artist, ext, buffer, durationMs })
       return send(res, 201, { id: song.id, title: song.title })
     }
     // Renombrar una canción (editar el título). Solo admin.
