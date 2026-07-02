@@ -116,6 +116,12 @@ function slotFree() { return active < MAX_CONC }
 // Solo afecta descargas NUEVAS; lo ya cacheado conserva su bitrate.
 let MUSIC_BITRATE = Math.min(256, Math.max(64, +(process.env.MUSIC_BITRATE || 160)))
 
+// Proxy SOCKS5 en Santiago (VM de test/prod, ver microsocks) para reintentar videos
+// geo-restringidos a Chile que este worker (Alemania) no puede extraer. Formato
+// completo aceptado por yt-dlp: socks5://usuario:password@ip:puerto. Vacío = sin
+// proxy configurado (el reintento simplemente no ocurre, se comporta como antes).
+const SANTIAGO_PROXY = process.env.SANTIAGO_PROXY || ''
+
 // Deduplicación de operaciones en vuelo: si llega la misma clave mientras se
 // procesa, se comparte la misma promesa en vez de lanzar otro yt-dlp.
 const inflight = new Map()
@@ -126,17 +132,18 @@ function dedup(key, fn) {
   return p
 }
 
-function ytdlpArgs(extra) {
+function ytdlpArgs(extra, proxy = false) {
   // Node resuelve el desafío de firma de YouTube (mismo runtime que el bot).
   const a = ['--no-warnings', '--js-runtimes', `node:${NODE}`]
   if (existsSync(COOKIES_RW)) a.push('--cookies', COOKIES_RW)
+  if (proxy && SANTIAGO_PROXY) a.push('--proxy', SANTIAGO_PROXY)
   return a.concat(extra)
 }
 
 // Ejecuta yt-dlp juntando stdout (para --print / --flat-playlist). Rechaza si falla.
-function ytdlpText(extra) {
+function ytdlpText(extra, proxy = false) {
   return new Promise((resolve, reject) => {
-    const p = spawn(YTDLP, ytdlpArgs(extra))
+    const p = spawn(YTDLP, ytdlpArgs(extra, proxy))
     let out = '', err = ''
     p.stdout.on('data', d => out += d)
     p.stderr.on('data', d => { if (err.length < 2000) err += d })
@@ -145,9 +152,22 @@ function ytdlpText(extra) {
   })
 }
 
+// Reintenta vía el proxy de Santiago (IP chilena) si el intento directo (IP alemana)
+// falla — cubre videos geo-restringidos a Chile. Sin SANTIAGO_PROXY configurado, se
+// comporta exactamente igual que antes (un solo intento, directo).
+async function ytdlpTextWithFallback(extra) {
+  try {
+    return await ytdlpText(extra, false)
+  } catch (e) {
+    if (!SANTIAGO_PROXY) throw e
+    console.warn('yt-dlp directo falló, reintentando vía proxy Santiago:', e.message)
+    return await ytdlpText(extra, true)
+  }
+}
+
 // Resuelve metadata + URL canónica de una fuente (URL directa o ytsearch1:).
 async function resolveMeta(src) {
-  const line = (await ytdlpText(['--no-playlist', '--skip-download', '--print',
+  const line = (await ytdlpTextWithFallback(['--no-playlist', '--skip-download', '--print',
     '%(webpage_url)s\t%(title)s\t%(duration)s\t%(uploader)s\t%(thumbnail)s\t%(ext)s', src]))
     .trim().split('\n')[0] || ''
   const [url, title, duration, uploader, thumbnail, ext] = line.split('\t')
@@ -220,77 +240,109 @@ function streamCached(res, file, seek, key) {
   }
 }
 
-// Extrae con yt-dlp→ffmpeg y transmite Opus. Si doCache y seek==0, hace tee a
-// disco y al terminar (yt-dlp código 0, sin abortar) lo deja en audio/<key>.opus.
-async function extractAndStream(res, src, seek, key, doCache) {
-  await acquire() // la extracción cuenta para el límite de concurrencia
-  let slotReleased = false
-  const releaseSlot = () => { if (!slotReleased) { slotReleased = true; release() } }
-  const yt = spawn(YTDLP, ytdlpArgs(['--no-playlist', '-f', 'bestaudio/best', '-o', '-', src]))
-  const ff = spawn(FFMPEG, opusArgs('pipe:0', seek))
+// Un intento de extracción (directo o vía proxy). Resuelve {ok, aborted} — nunca
+// escribe la respuesta final (502/fin de stream): eso lo decide extractAndStream
+// una vez que sabe si hace falta o no un segundo intento vía proxy.
+function runExtraction(res, src, seek, key, doCache, proxy) {
+  return new Promise(resolveAttempt => {
+    const yt = spawn(YTDLP, ytdlpArgs(['--no-playlist', '-f', 'bestaudio/best', '-o', '-', src], proxy))
+    const ff = spawn(FFMPEG, opusArgs('pipe:0', seek))
 
-  yt.stdout.pipe(ff.stdin)
-  yt.stdout.on('error', () => {})
-  ff.stdin.on('error', () => {})
+    yt.stdout.pipe(ff.stdin)
+    yt.stdout.on('error', () => {})
+    ff.stdin.on('error', () => {})
 
-  let tmp = null, ws = null
-  if (doCache && seek === 0) {
-    tmp = `${audioPath(key)}.${process.pid}.${Date.now()}.part`
-    ws = createWriteStream(tmp)
-  }
+    let tmp = null, ws = null
+    if (doCache && seek === 0) {
+      tmp = `${audioPath(key)}.${process.pid}.${Date.now()}.part`
+      ws = createWriteStream(tmp)
+    }
 
-  let ytCode = null, aborted = false, ended = false, headerSent = false
-  let ytErr = ''
-  yt.stderr.on('data', d => { if (ytErr.length < 2000) ytErr += d })
-  ff.stderr.on('data', () => {})
+    let ytCode = null, aborted = false, ended = false, headerSent = false
+    let ytErr = ''
+    yt.stderr.on('data', d => { if (ytErr.length < 2000) ytErr += d })
+    ff.stderr.on('data', () => {})
 
-  // El 200 NO se envía hasta el primer byte de audio: si la extracción falla
-  // (video no disponible, etc.) se responde 502 en vez de un 200 vacío (que el
-  // bot interpretaba como "Invalid data" y hacía desaparecer la canción).
-  ff.stdout.on('data', chunk => {
-    if (!headerSent) { headerSent = true; res.writeHead(200, { 'Content-Type': 'audio/ogg', 'Cache-Control': 'no-store', 'X-Cache': 'miss' }) }
-    const ok = res.write(chunk)
-    if (ws) ws.write(chunk)
-    if (!ok) { ff.stdout.pause(); res.once('drain', () => ff.stdout.resume()) }
-  })
+    // El 200 NO se envía hasta el primer byte de audio: si la extracción falla
+    // (video no disponible, etc.) el llamador decide 502 en vez de un 200 vacío
+    // (que el bot interpretaba como "Invalid data" y hacía desaparecer la canción).
+    ff.stdout.on('data', chunk => {
+      if (!headerSent) { headerSent = true; res.writeHead(200, { 'Content-Type': 'audio/ogg', 'Cache-Control': 'no-store', 'X-Cache': 'miss' }) }
+      const ok = res.write(chunk)
+      if (ws) ws.write(chunk)
+      if (!ok) { ff.stdout.pause(); res.once('drain', () => ff.stdout.resume()) }
+    })
 
-  const kill = () => { aborted = true; try { yt.kill('SIGKILL') } catch {} try { ff.kill('SIGKILL') } catch {} }
-  res.on('close', () => { if (!ended) kill() })
+    const kill = () => { aborted = true; try { yt.kill('SIGKILL') } catch {} try { ff.kill('SIGKILL') } catch {} }
+    res.on('close', kill)
 
-  yt.on('error', e => { console.error('yt-dlp:', e.message); releaseSlot(); try { res.destroy() } catch {} })
-  ff.on('error', e => { console.error('ffmpeg:', e.message); releaseSlot(); try { res.destroy() } catch {} })
-  yt.on('close', code => { ytCode = code; if (code && !aborted) console.error('yt-dlp exit', code, ytErr.slice(0, 300)) })
+    yt.on('error', e => { console.error('yt-dlp:', e.message); try { res.destroy() } catch {} })
+    ff.on('error', e => { console.error('ffmpeg:', e.message); try { res.destroy() } catch {} })
+    yt.on('close', code => { ytCode = code; if (code && !aborted) console.error('yt-dlp exit', code, ytErr.slice(0, 300)) })
 
-  ff.on('close', () => {
-    ended = true
-    releaseSlot()
-    if (!headerSent && !aborted) { try { res.writeHead(502, { 'Content-Type': 'text/plain' }); res.end('extraction failed') } catch {} }
-    else { try { res.end() } catch {} }
-    if (!ws) return
-    ws.end(() => {
-      // Solo cachea si hubo audio real, la extracción terminó bien y no se abortó.
-      if (headerSent && ytCode === 0 && !aborted) {
-        try {
-          const dst = audioPath(key)
-          renameSync(tmp, dst)
-          touch(key, { size: statSync(dst).size })
-          evictIfNeeded()
-        } catch (e) { console.warn('cache:', e.message); try { rmSync(tmp, { force: true }) } catch {} }
-      } else {
-        try { rmSync(tmp, { force: true }) } catch {}
-      }
+    ff.on('close', () => {
+      ended = true
+      res.off('close', kill)
+      const finish = () => resolveAttempt({ ok: headerSent, aborted })
+      if (!ws) return finish()
+      ws.end(() => {
+        // Solo cachea si hubo audio real, la extracción terminó bien y no se abortó.
+        if (headerSent && ytCode === 0 && !aborted) {
+          try {
+            const dst = audioPath(key)
+            renameSync(tmp, dst)
+            touch(key, { size: statSync(dst).size })
+            evictIfNeeded()
+          } catch (e) { console.warn('cache:', e.message); try { rmSync(tmp, { force: true }) } catch {} }
+        } else {
+          try { rmSync(tmp, { force: true }) } catch {}
+        }
+        finish()
+      })
     })
   })
 }
 
+// Extrae con yt-dlp→ffmpeg y transmite Opus. Si el intento directo (IP alemana) no
+// produce audio (geo-restricción a Chile, típicamente), reintenta UNA vez vía el
+// proxy de Santiago antes de rendirse — así el bot ya no necesita un fallback local
+// para esos casos (ver SANTIAGO_PROXY). Si doCache y seek==0, el intento que sí
+// funcionó hace tee a disco y lo deja en audio/<key>.opus.
+async function extractAndStream(res, src, seek, key, doCache) {
+  await acquire() // la extracción cuenta para el límite de concurrencia (ambos intentos comparten el slot)
+  try {
+    let result = await runExtraction(res, src, seek, key, doCache, false)
+    if (!result.ok && !result.aborted && SANTIAGO_PROXY) {
+      console.warn('extracción directa falló, reintentando vía proxy Santiago:', src)
+      result = await runExtraction(res, src, seek, key, doCache, true)
+    }
+    if (!result.ok && !result.aborted) {
+      try { res.writeHead(502, { 'Content-Type': 'text/plain' }); res.end('extraction failed') } catch {}
+    } else if (!result.aborted) {
+      try { res.end() } catch {}
+    }
+  } finally {
+    release()
+  }
+}
+
 // Descarga a disco SIN transmitir (para /ensure: forzar caché / prefetch).
 // Dedup por clave + slot de concurrencia (no satura ante varios /ensure juntos).
+// Mismo reintento vía proxy Santiago que extractAndStream si el intento directo falla.
 function downloadToCache(src, key) {
-  return dedup('ensure:' + key, () => withSlot(() => downloadToCacheRaw(src, key)))
+  return dedup('ensure:' + key, () => withSlot(async () => {
+    try {
+      await downloadToCacheRaw(src, key, false)
+    } catch (e) {
+      if (!SANTIAGO_PROXY) throw e
+      console.warn('ensure directo falló, reintentando vía proxy Santiago:', e.message)
+      await downloadToCacheRaw(src, key, true)
+    }
+  }))
 }
-function downloadToCacheRaw(src, key) {
+function downloadToCacheRaw(src, key, proxy = false) {
   return new Promise((resolve, reject) => {
-    const yt = spawn(YTDLP, ytdlpArgs(['--no-playlist', '-f', 'bestaudio/best', '-o', '-', src]))
+    const yt = spawn(YTDLP, ytdlpArgs(['--no-playlist', '-f', 'bestaudio/best', '-o', '-', src], proxy))
     const ff = spawn(FFMPEG, opusArgs('pipe:0', 0))
     const tmp = `${audioPath(key)}.${process.pid}.${Date.now()}.part`
     const ws = createWriteStream(tmp)
@@ -377,7 +429,7 @@ function classifyPlaylistError(text) {
 async function getPlaylist(src) {
   let out
   try {
-    out = await withSlot(() => ytdlpText(['--flat-playlist', '--print',
+    out = await withSlot(() => ytdlpTextWithFallback(['--flat-playlist', '--print',
       '%(url)s\t%(title)s\t%(duration)s\t%(playlist_title)s\t%(thumbnail)s', src]))
   } catch (e) {
     const err = new Error(classifyPlaylistError(e.message))
