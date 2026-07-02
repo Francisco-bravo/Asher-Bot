@@ -712,6 +712,8 @@
   .modal-actions .cancel { background: var(--panel); color: var(--muted); }
   .modal-actions .cancel:hover { background: var(--bg); color: var(--text); }
   .modal-actions button:disabled { opacity: .5; cursor: not-allowed; }
+  .upload-progress { height: 8px; border-radius: 5px; background: var(--panel); overflow: hidden; }
+  .upload-progress-bar { height: 100%; width: 0%; background: var(--accent); transition: width .15s linear; }
 
   /* Aviso cuando el usuario no está en el canal de voz del bot y por tanto no
      puede controlar la música/sonidos. */
@@ -1351,6 +1353,9 @@
         <label>Artista (opcional)
           <input type="text" id="song-artist" placeholder="Artista">
         </label>
+        <div class="upload-progress" id="song-progress-wrap" style="display:none">
+          <div class="upload-progress-bar" id="song-progress-bar"></div>
+        </div>
         <div class="modal-actions">
           <button type="button" class="cancel" id="song-cancel">Cancelar</button>
           <button type="submit" id="song-submit">Subir</button>
@@ -1589,6 +1594,26 @@ async function webFetch(path, opts = {}) {
   const headers = { ...(opts.headers || {}) }
   if (selectedGuildId) headers['X-Guild-Id'] = selectedGuildId
   return fetch(webUrl(path), { credentials: 'include', ...opts, headers })
+}
+// Subida con progreso real (fetch no reporta avance de envío; XMLHttpRequest sí).
+// Misma base/credenciales/header de servidor que webFetch, pero devuelve
+// {status, json()} en vez de una Response para no duplicar toda su API.
+function webUploadWithProgress(path, body, contentType, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', webUrl(path))
+    xhr.withCredentials = true
+    xhr.setRequestHeader('Content-Type', contentType)
+    if (selectedGuildId) xhr.setRequestHeader('X-Guild-Id', selectedGuildId)
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total) }
+    xhr.onload = () => {
+      let data = null
+      try { data = JSON.parse(xhr.responseText) } catch {}
+      resolve({ status: xhr.status, data })
+    }
+    xhr.onerror = () => reject(new Error('Error de red'))
+    xhr.send(body)
+  })
 }
 function botUrl(path) { return BOT_BASE + path }
 // Servidor (guild) que controla el panel. Se manda en cada petición; el bot
@@ -3696,6 +3721,8 @@ function openSongModal() {
 function closeSongModal() {
   document.getElementById('song-modal').style.display = 'none'
   document.getElementById('song-form').reset()
+  document.getElementById('song-progress-wrap').style.display = 'none'
+  document.getElementById('song-progress-bar').style.width = '0%'
 }
 document.getElementById('btn-upload-song').addEventListener('click', openSongModal)
 document.getElementById('song-cancel').addEventListener('click', closeSongModal)
@@ -3710,15 +3737,19 @@ document.getElementById('song-form').addEventListener('submit', async (e) => {
   if (!file || !title) { toast('Falta el archivo o el título'); return }
   const ext = (file.name.split('.').pop() || '').toLowerCase()
   const btn = document.getElementById('song-submit')
+  const progressWrap = document.getElementById('song-progress-wrap')
+  const progressBar = document.getElementById('song-progress-bar')
   btn.disabled = true; btn.textContent = 'Subiendo...'
+  progressWrap.style.display = 'block'
+  progressBar.style.width = '0%'
   try {
     const buf = await file.arrayBuffer()
     const qs = new URLSearchParams({ title, artist, ext })
-    const res = await webFetch('/api/music/upload?' + qs, {
-      method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: buf,
-    })
-    const data = await res.json().catch(() => null)
-    if (!res.ok) { toast(data && data.error ? data.error : 'Error al subir'); return }
+    const { status, data } = await webUploadWithProgress(
+      '/api/music/upload?' + qs, buf, 'application/octet-stream',
+      (frac) => { progressBar.style.width = Math.round(frac * 100) + '%' }
+    )
+    if (status < 200 || status >= 300) { toast(data && data.error ? data.error : 'Error al subir'); return }
     toast('Canción subida ✓')
     closeSongModal()
     loadMusic()
@@ -3726,6 +3757,7 @@ document.getElementById('song-form').addEventListener('submit', async (e) => {
     toast('No se pudo subir la canción')
   } finally {
     btn.disabled = false; btn.textContent = 'Subir'
+    progressWrap.style.display = 'none'
   }
 })
 

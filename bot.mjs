@@ -706,7 +706,10 @@ async function enrich(item) {
   if (item.songId !== song.id) { item.songId = song.id; updatePanel() }
   // 1) Metadata (una sola vez por item): obtiene título/duración reales y los
   //    GUARDA en la canción. Se hace si falta la duración o el título es pobre.
-  if (!item.metaTried && (!item.duration || isPoorTitle(song.title, song.source_url))) {
+  //    Las subidas manuales ("upload:...") no tienen una URL real de la que pedir
+  //    metadata (se midieron al subir, en web.mjs) — nunca se intenta con ellas.
+  const isUpload = /^upload:/.test(song.source_url)
+  if (!isUpload && !item.metaTried && (!item.duration || isPoorTitle(song.title, song.source_url))) {
     item.metaTried = true
     await fetchMeta(item) // setea item.title/duration reales (si los hay)
     const goodTitle = !isPoorTitle(item.title, sourceUrl) ? item.title : null
@@ -1183,8 +1186,18 @@ function requesterFromMember(member) {
 function addToQueue(url, voiceChannelId, guildId, textChannelId, title, addedBy = null, playlistId = null, S = getSession(guildId)) {
   if (S.queue.length >= MAX_QUEUE) throw new Error(`La cola está llena (máximo ${MAX_QUEUE})`)
   const item = { url, title: title || url, duration: null, voiceChannelId, guildId, textChannelId, addedBy, playlistId }
-  // La metadata (título/duración) NO se pide aquí para no lanzar otro yt-dlp que
-  // compita con el arranque del stream; la rellena backgroundWork cuando ya suena.
+  // Si la canción YA es conocida (Biblioteca), toma su duración/id de una sola
+  // consulta local (sin red). Evita mostrar la barra de progreso sin duración y,
+  // para las subidas manuales ("upload:..."), evita un enriquecido inútil más
+  // tarde: esa fuente no es una URL real, nunca se le puede pedir metadata.
+  const known = musicCache.findByUrl(url)
+  if (known) {
+    item.songId = known.id
+    if (known.duration_ms) item.duration = known.duration_ms / 1000
+  }
+  // El resto de la metadata (título si falta/carátula) NO se pide aquí para no
+  // lanzar otro yt-dlp que compita con el arranque del stream; la rellena
+  // backgroundWork cuando ya suena.
   S.queue.push(item)
   const startsNow = !S.current && S.queue.length === 1
   ensurePlaying()
