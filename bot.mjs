@@ -911,11 +911,11 @@ function disconnectAndClear(S) {
 // ── Modo DJ automático (ver lib/audio/dj.mjs) ───────────────────────────────
 // Si la cola de ESTA sesión está vacía y el DJ está activo para su servidor,
 // encola una canción más (mantiene siempre 1 de colchón; ver ensurePlaying).
-function djMaybeTopUp(S) {
+async function djMaybeTopUp(S) {
   // Sin canal de voz no hay dónde reproducir (evita elegir canciones al pedo
   // si el DJ se activa con el bot desconectado).
   if (S.queue.length > 0 || !S.currentChannelId || !djEnabledGuilds.has(String(S.guildId))) return
-  const item = djPickNext(S)
+  const item = await djPickNext(S)
   if (item) S.queue.push(item)
 }
 
@@ -927,14 +927,14 @@ async function ensurePlaying(S = activeSession()) {
     while (true) {
       if (!S.current) {
         if (S.queue.length === 0) {
-          djMaybeTopUp(S)
+          await djMaybeTopUp(S)
           if (S.queue.length === 0) break
         }
         S.current = S.queue.shift()
         // La playlist de la última canción sonada (si la hubo) es la que el DJ
         // continuaría al vaciarse la cola; se actualiza siempre, DJ activo o no.
         S.djLastPlaylistId = S.current.playlistId ?? null
-        djMaybeTopUp(S) // deja 1 canción de colchón ya encolada
+        await djMaybeTopUp(S) // deja 1 canción de colchón ya encolada
       }
       try {
         await ensureConnection(S.current.voiceChannelId, S.current.guildId)

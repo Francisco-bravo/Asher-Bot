@@ -5,7 +5,6 @@
 // saturar el worker / YouTube. Idempotente: re-ejecutar solo toca las que falten.
 //
 //   node --env-file=.env scripts/backfill-artists.mjs
-import { getDb } from '../lib/db.mjs'
 import * as musicCache from '../lib/music-cache.mjs'
 
 const WORKER_URL = (process.env.MUSIC_WORKER_URL || '').replace(/\/$/, '')
@@ -41,10 +40,8 @@ async function workerUploader(url) {
   } catch { return null }
 }
 
-const db = getDb()
-const rows = db.prepare(
-  "SELECT id, title, source_url FROM songs WHERE (artist IS NULL OR artist = '') AND source_url LIKE 'http%' ORDER BY id"
-).all()
+const rows = (await musicCache.listAll())
+  .filter(s => (!s.artist) && /^https?:\/\//i.test(s.source_url))
 
 console.log(`Canciones sin artista: ${rows.length}`)
 let done = 0, set = 0, fromTitle = 0, fromChannel = 0, failed = 0
@@ -61,7 +58,7 @@ for (const s of rows) {
     artist = deriveArtist(s.title, up)
     if (artist) fromChannel++
   }
-  if (artist) { musicCache.setMeta(s.id, { artist }); set++ }
+  if (artist) { await musicCache.setMeta(s.id, { artist }); set++ }
   else failed++
 
   if (done % 10 === 0 || done === rows.length) {
